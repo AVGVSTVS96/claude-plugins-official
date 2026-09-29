@@ -1,6 +1,6 @@
 ---
 name: math-proof-worker-deep
-description: "The higher-effort math-proof worker, used from the escalation round on. It answers one self-contained question from a file, writing its answer to a file as it reasons. It has no memory between questions and is launched only by the math-proof plugin's siege skill."
+description: "The higher-effort math-proof worker, used from the escalation round on (round 4, unless the siege setting ESC_ROUND says otherwise). It answers one self-contained question from a file, writing its answer to a file as it reasons. It has no memory between questions and is launched only by the math-proof plugin's siege skill."
 tools: Read, Write, Edit
 model: inherit
 effort: medium

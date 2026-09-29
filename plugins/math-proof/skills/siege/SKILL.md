@@ -1,10 +1,10 @@
 ---
 name: siege
-description: "Work on one hard mathematics problem in rounds: each round a judge writes a few self-contained questions, independent workers answer them, and the judge keeps a ledger of what is proved, refuted and open, until the judge concludes or the rounds run out, and then a proof.md says plainly what is and is not proved. A run takes hours and dozens of worker runs, and the usage is /math-proof:siege [NAME=value settings] <the problem, stated in full, or the path of a file holding it>."
-argument-hint: [NAME=value ...] [DIR=run-directory] <problem statement | problem-file>
+description: "Work on one hard mathematics problem in rounds: each round a judge writes a few self-contained questions, independent workers answer them, and the judge keeps a ledger of what is proved, refuted and open, until the judge concludes or the rounds run out, and then a proof.md says plainly what is and is not proved. A run takes hours and dozens of worker runs. Usage: /math-proof:siege [NAME=value settings] <the problem, stated in full, or the path of a file holding it>."
+argument-hint: "[NAME=value ...] [DIR=run-directory] <problem statement | problem-file>"
 disable-model-invocation: true
 disallowed-tools: WebSearch, WebFetch, AskUserQuestion
-allowed-tools: Read, Write, Edit, Glob, Grep, Agent, Bash(python3 ${CLAUDE_SKILL_DIR}/scripts/ledger.py *), Bash(python3 ${CLAUDE_PLUGIN_ROOT}/skills/siege/scripts/ledger.py *), Bash(mkdir *), Bash(cp *), Bash(mv *), Bash(cat *), Bash(test *), Bash(ls *), Bash(wc *), Bash(cmp *), Bash(grep *), Bash(printf *), Bash(echo *)
+allowed-tools: Read, Write, Edit, Glob, Grep, Agent, Bash(python3 ${CLAUDE_SKILL_DIR}/scripts/ledger.py *), Bash(python3 ${CLAUDE_PLUGIN_ROOT}/skills/siege/scripts/ledger.py *), Bash(python ${CLAUDE_SKILL_DIR}/scripts/ledger.py *), Bash(python ${CLAUDE_PLUGIN_ROOT}/skills/siege/scripts/ledger.py *), Bash(mkdir *), Bash(cp *), Bash(mv *), Bash(cat *), Bash(test *), Bash(ls *), Bash(wc *), Bash(cmp *), Bash(grep *), Bash(printf *), Bash(echo *)
 ---
 
 # math-proof: siege
@@ -37,16 +37,22 @@ the bookkeeping script, not you, decides whether it is finished); do not summari
 paraphrases. Work unattended to the end: there is nobody to answer questions.
 
 **Arguments.** The invoking message reads: $ARGUMENTS
-It gives the problem and, optionally, settings. Read it this way. Tokens of the form NAME=value at its start
-are settings (below) or DIR=path, the run directory; remove them. If what remains begins with the path of an
-existing file, that file is the problem file (and a second path after it, or DIR=, is the run
-directory); otherwise everything that remains, to the end of the message, IS the problem statement,
-verbatim — mathematics, line breaks and all. (Older form: if the message contains a line beginning
-"----- PROBLEM STATEMENT", the text after that line is the problem statement and the paths and settings are
-before it.) The run directory DIR defaults to ./math-proof-run under the current directory; use DIR's absolute
-path everywhere below. If the message names a place to put the final proof, copy DIR/proof.md there at the
-very end; otherwise the proof stays at DIR/proof.md. If the message holds neither a readable problem file nor
-any problem text, say so in one sentence and stop.
+It gives the problem and, optionally, settings. Read it this way. Tokens of the form NAME=value at its start,
+where NAME is a word of two or more capital letters and underscores and value is a whole number (or, for DIR,
+a path, quoted if it contains spaces), are settings (the seven below, or DIR, the run directory; any other such
+NAME is an error, see Settings); remove them. If what remains is a single line that, taken as a whole —
+surrounding whitespace and one pair of enclosing quotation marks removed, backslash-escaped spaces read as spaces
+— is the path of an existing file (it may contain spaces; check with Read or Glob, not the shell), that file is
+the problem file; if no such file exists and what remains can only be a file path — a single line ending in .md,
+.txt or .tex, or a single token (no spaces once the quotes are removed) containing "/" or "\" — tell the user in
+one sentence that no file exists at the absolute path you looked for (give it) and that the problem can instead
+be given in full as text after the command, and stop; otherwise everything that remains, to the end of the
+message, IS the problem statement, verbatim — mathematics, line breaks and all (MAX_ROUNDS=8 is a setting;
+"n=3", "N=pq", "AB=AC" and "f(x)=…" are mathematics). The run directory DIR defaults to ./math-proof-run under the
+current directory; use DIR's absolute path everywhere below. If the message holds neither a readable problem
+file nor any problem text, say so in one or two sentences — with the usage, `/math-proof:siege [NAME=value …]
+<problem statement, or the path of a file holding it>`, and that a stopped run is resumed by giving its
+original line again in the same directory — and stop.
 **Settings** (use these unless the invoking message overrides them by name): ESC_ROUND = 4 (the escalation
 round: from round ESC_ROUND on, if the loop is still running, the wave cap rises, every worker is a
 `math-proof-worker-deep`, and the plan brief carries its escalation clauses); WAVE = 4 queries per round at most in
@@ -54,26 +60,46 @@ rounds before ESC_ROUND and WAVE_DEEP = 10 queries per round at most from round 
 MIN_ROUNDS = 4 (the judge may conclude freely from round MIN_ROUNDS on, earlier only with an
 audited chain in the ledger — the script decides); REFINE_STEPS = 2; MAX_COMMIT = 9 (both apply to the FULL proof tail; a run whose final goal was certified during the rounds gets the SHORT tail — see "The proof tail"). The invoking message may override any of these seven by
 name, with tokens of the form NAME=value (for example MAX_ROUNDS=8 WAVE_DEEP=6) placed before the problem, at
-the start of the invoking message (or before the PROBLEM STATEMENT line in the older form): use the values as
-given, and treat a NAME=value token there whose NAME is neither one of the seven nor DIR as an error — say so in
-your first reply and stop before creating anything. (An "=" inside the problem statement itself is mathematics,
-not a setting.)
+the start of the invoking message: use the values as given, and treat such a token there (NAME a word of two or
+more capitals and underscores, value a whole number) whose NAME is neither one of the seven nor DIR as an error — tell the user in one sentence
+that NAME is not a setting of /math-proof:siege, that the accepted names are DIR, ESC_ROUND, WAVE, WAVE_DEEP,
+MAX_ROUNDS, MIN_ROUNDS, REFINE_STEPS and MAX_COMMIT, and that if the token is part of the problem itself the
+problem can be given as a file path instead — and stop before creating anything. (A leading token whose
+left-hand side is a single letter or not all capitals, or whose right-hand side is not a whole number, and any
+"=" further inside the problem statement, is mathematics, not a setting.)
 Wherever a setting is named below, it means the value in force.
-The bookkeeping script is scripts/ledger.py in this skill's own folder: `python3 ${CLAUDE_SKILL_DIR}/scripts/ledger.py` (called SCRIPT below). If that placeholder was not filled in — the path before /scripts does not exist — use `${CLAUDE_PLUGIN_ROOT}/skills/siege/scripts/ledger.py`, and if that one is unfilled too, find scripts/ledger.py in this skill's own folder (for the standard install ~/.claude/skills/math-proof/skills/siege/scripts/ledger.py; otherwise Glob for math-proof/skills/siege/scripts/ledger.py) and use its absolute path; `test -s` the path once before Setup.
+The bookkeeping script is scripts/ledger.py in this skill's own folder: `python3 ${CLAUDE_SKILL_DIR}/scripts/ledger.py`
+(called SCRIPT below). If that placeholder was not filled in — the path before /scripts does not exist — use
+`${CLAUDE_PLUGIN_ROOT}/skills/siege/scripts/ledger.py`, and if that one is unfilled too, Glob for
+`**/skills/siege/scripts/ledger.py` under ~/.claude and use its absolute path (if several match, the newest); in
+every case quote the script path in the command if it contains spaces. Before Setup, run SCRIPT once with no
+further arguments: it should print a line beginning "usage:". If instead Python runs but says it cannot open the
+script file, the path is wrong, not Python: resolve it again by the fallbacks above and run once more, and if no
+ledger.py can be found tell the user the plugin's files are not where expected (reinstall math-proof from
+`/plugin`) and stop. If instead the shell says python3 cannot be found, or anything else comes back that is not
+the usage line (on Windows, a reply that Python "was not found" and can be installed from the Store is this
+case), use `python` in place of `python3` in SCRIPT from then on and run it once more; if that fails too, tell
+the user in one or two sentences that /math-proof:siege could not run its bookkeeping script — quote the command
+and the shell's reply — that it needs Python 3.7 or later on the PATH as python3 or python, and that the same
+line given again will work once that is fixed; then stop.
 
 ## Setup
 1. If DIR/state.md already exists, this is a resume: check that the existing DIR/problem.md is the same problem
    you were given (compare the text, ignoring differences in whitespace and line endings; for a file, `cmp`) —
-   if it differs, say in one sentence that DIR holds a run on a different problem and that DIR=<another
-   directory> selects a fresh one, and stop; if it is the same, Read DIR/problem.md in full, read state.md and
+   if it differs, say in one sentence that DIR holds a run on a different problem and that `DIR=<another
+   directory>` selects a fresh one, and stop; if it is the same and state.md records "phase: finished", that run
+   is complete: say where DIR/proof.md is (and DIR/result-so-far.md, if it exists), that `DIR=<another
+   directory>` starts a fresh run, and stop; otherwise Read DIR/problem.md in full, read state.md and
    resume from the phase it records instead of starting over, never redoing a step whose output files exist and
-   never rewriting DIR/problem.md. If the phase recorded is a wave, start with `SCRIPT answers` on that wave's
+   never rewriting DIR/problem.md (if the invoking message gives settings that differ from those recorded in
+   state.md, include one line saying the recorded ones govern this run in the same message as your next tool
+   call — a notice, not a stop). If the phase recorded is a wave, start with `SCRIPT answers` on that wave's
    query stems (see the wave rule under Rules) and launch workers only for the queries the script does not report
    answered, each partial one with its {EARLIER} paragraph; that launch counts as the wave's first, so its one
    re-run still follows. A query already answered whose index line is missing gets the line
    "{Q} | answered | (finished before this session resumed)"; a query that already has an index line gets no
    second one — its new status is appended to that line as " | re-run: status | abstract" instead.
-   Otherwise create DIR and DIR/judge/ and put the problem at DIR/problem.md: if
+   Otherwise create DIR and DIR/judge/ (`mkdir -p`) and put the problem at DIR/problem.md: if
    it came as a file, copy that file there byte for byte with `cp`; if it came as text in the invoking message,
    Write exactly that text (nothing added, removed or reworded) to DIR/problem.md. Then, as your very next
    action, Read DIR/problem.md in full — you paste its text into every judge brief and every worker prompt (see
@@ -92,7 +118,9 @@ a space or a blank line). This is attempt 1 of round r.
 append each of its verdicts (" | OK" or " | DEGENERATE: …") to that query's index line — plain file handling; nothing is
 re-run on a DEGENERATE verdict. Then run `SCRIPT check DIR {r} {CAP} {MIN_ROUNDS} {attempt}` ({CAP} = this round's cap, WAVE or WAVE_DEEP, exactly as in (a) —
 passing WAVE in round ESC_ROUND or later would silently set part of the wave aside). It numbers and appends the round's
-ledger lines to DIR/ledger.md itself and prints exactly one verdict line; act on its first word:
+ledger lines to DIR/ledger.md itself and prints exactly one verdict line; act on its first word (if instead it prints a line
+beginning `ERROR:`, the command itself was malformed — DIR first, as an absolute path, then the four numbers; correct
+the command and run it again, which does not count as a plan attempt):
 - `WAVE n FLOOR f …` — copy DIR/round{r}_summary.md over DIR/summary.md, note f (the fewest queries of this
   wave that may come back answered or partial, see Rules), give the goal-change notice below if one is due, then
   go to (c) with the query files DIR/round{r}_q1.md … DIR/round{r}_q{n}.md (the script has renumbered them
@@ -113,9 +141,9 @@ record the same line in state.md. If the sentence begins "Goal change: raised", 
 names as holding the earlier goal's proof (`test -s` each) to DIR/result-so-far.md — one file: `cp`; several: one
 `cat <files in the order named> > DIR/result-so-far.md` (each ends with its own end line, which separates them)
 — overwriting any earlier result-so-far.md, and end your line with "the proved result so far is in
-DIR/result-so-far.md". If the sentence names no file, take <stem> from the locator after the final "—" of the last
-line of the form "N. PROVED: [GOAL] …" in DIR/ledger.md (grep) and use DIR/<stem>.answer.md, or
-DIR/<stem>.partial.md if only that exists; `test -s` each file first, and if none exists, skip the copy and say
+DIR/result-so-far.md". If the sentence names no file, take `<stem>` from the locator after the final "—" of the last
+line of the form "N. PROVED: [GOAL] …" in DIR/ledger.md (grep) and use `DIR/<stem>.answer.md`, or
+`DIR/<stem>.partial.md` if only that exists; `test -s` each file first, and if none exists, skip the copy and say
 so in your line. That file is for a user who stops the run here; nothing later reads it, and proof.md remains the
 run's deliverable. (On a problem that fixes its claim a raise never happens — there is nothing to raise to — so
 the file is never written; a replacement is still announced.)
@@ -132,8 +160,10 @@ verdicts into the index. Update state.md ("phase: round {r+1} plan, attempt 1"; 
 ## The proof tail (after the loop ends, by CONCLUDE, TAIL, or finishing round MAX_ROUNDS)
 First fix the tail's shape: run `SCRIPT gate DIR`. If its output begins `CONCLUDE`, the claims ledger holds the
 headline goal settled and certified by two separate verify queries, and the tail is SHORT: (e) draft, (f) no refine step, no select step — build DIR/r3_verify.md yourself by the shell concatenation described under (g) and
-write no r3_q files —, (h) a commit wave consisting of DIR/r3_verify.md alone, (i) finalize. If it prints anything
-else (`REJECT: …`, or an error line), the tail is FULL: steps (e)–(i) exactly as written below. Record "tail: short" or "tail: full" and
+write no r3_q files —, (h) a commit wave consisting of DIR/r3_verify.md alone, (i) finalize. If it prints
+anything else (normally `REJECT: …`), the tail is FULL: steps (e)–(i) exactly as written below — except that a line
+beginning `ERROR:` means the gate command itself was malformed (DIR first, as an absolute path): correct it and run
+it again before deciding. Record "tail: short" or "tail: full" and
 the gate's line in state.md. Two fallbacks guard the short tail. If its verify-only wave ends, after the one re-run, with no
 DIR/r3_verify.answer.md, switch to the FULL tail from (g) on (note "tail: short, then full — no verify answer"). And if the
 FIRST finalize reply of the short tail begins "MAIN CLAIM: NOT PROVED" (check this before the stand-alone grep check of
@@ -148,8 +178,7 @@ results" clause by "(no wave completed before the rounds ended — work from the
 DIR/proof.md. The extra-query rule applies (see Rules; that relaunch, if it happens, is part of this step). If
 DIR/proof.md does not exist once the step is over, launch the draft judge one more time with the added first
 paragraph "DIR/proof.md was not written; write it now from the material named below."; if it still does not
-exist, stop and report. As soon as DIR/proof.md exists, and again after every later step that rewrites it, copy
-it to the requested output path if one was named (so a run that dies late still leaves its latest proof there).
+exist, stop and report.
 **(f) Refine**, REFINE_STEPS times in the FULL tail (step names refine_2, refine_3, … in order, REFINE_STEPS of them), not at all in the SHORT
 tail: one `math-proof-judge` each with the REFINE BRIEF (extra-query rule applies, once per step).
 **(g) Select.** One `math-proof-judge` with the SELECT BRIEF → up to MAX_COMMIT files DIR/r3_q{k}.md and exactly one
@@ -169,8 +198,7 @@ first paragraph "DIR/proof.md still refers to run files (grep found: {the matche
 A referee reads proof.md alone and cannot open them. Rewrite DIR/proof.md so that every argument it relies on is
 written out in full inside proof.md itself, with no reference to any file in this directory.", note
 "standalone-check: resent" in state.md, and accept whatever proof.md that launch leaves (do not repeat the check).
-Copy the final DIR/proof.md to the requested
-output path if one was named. Update state.md ("phase: finished"). Reply to the user with: where proof.md is,
+Update state.md ("phase: finished"). Reply to the user with: where proof.md is,
 how many rounds ran and why the loop ended (the script's verdict line), how many worker queries ran, how
 many were answered and how many ended partial, whether the goal was ever replaced or raised (one line, from
 state.md; if DIR/result-so-far.md exists, say that it holds the earlier result as the worker wrote it, checked
@@ -179,24 +207,20 @@ restate or assess the mathematics yourself.
 
 ## Rules that hold throughout
 - Every judge step and every worker is a NEW subagent launch (the Agent tool) with `subagent_type` set
-  explicitly; never omit it. The sub-agents ship with this skill and your agent list may show them under a
-  plugin-scoped name — `math-proof:math-proof-judge`, `math-proof:math-proof-worker`, `math-proof:math-proof-worker-deep` — or under
-  the bare names; use the bare names if your agent list offers them (if agent files with these names are installed
-  in the project or user agents directory they take precedence, which is intended), otherwise the scoped names, and if neither
-  is available say so and stop before round 1. Record the form you used in state.md. Judge steps use `math-proof-judge`. Workers — round waves and their re-runs — use `math-proof-worker` in rounds
+  explicitly; never omit it. The sub-agents ship with this plugin and your agent list normally shows them under
+  plugin-scoped names — `math-proof:math-proof-judge`, `math-proof:math-proof-worker`, `math-proof:math-proof-worker-deep`.
+  Decide the name seat by seat: for each of the three, use the bare name (`math-proof-judge`, `math-proof-worker`,
+  `math-proof-worker-deep`) if your agent list offers it, otherwise the scoped name; mixing the two forms is fine (a
+  bare-named copy in the user's or the project's agents directory is how a user changes that one seat's settings,
+  and is meant to win). If one of the three is listed under neither name, tell the user that the math-proof
+  plugin's sub-agents are not in this session's agent list — open `/plugin` to check that math-proof is installed
+  and enabled, restart Claude Code, and give the same /math-proof:siege line again — and stop before round 1.
+  Record in state.md the name used for each seat. Judge steps use `math-proof-judge`. Workers — round waves and their re-runs — use `math-proof-worker` in rounds
   before ESC_ROUND and `math-proof-worker-deep` in round ESC_ROUND and every later round; the workers of the proof
   tail (extra-query waves, the commit wave, r3_verify) use `math-proof-worker-deep` if a wave ran in round ESC_ROUND
   or later (R ≥ ESC_ROUND in state.md) and `math-proof-worker` otherwise. The choice is purely by round number, never
   by your own view of how the attempt is going. Never reuse, resume or send a message to an earlier subagent.
-  Do not pass a `model` to the Agent tool: judges and workers run on this session's model — with exactly one
-  exception. If a judge step or a worker comes back with an error saying the model's SAFEGUARDS FLAGGED or
-  refused the request (the provider's usage-policy filter, e.g. "…'s safeguards flagged this message"),
-  relaunch that same step or worker ONCE with `model: "opus"` added to the Agent call, everything else
-  identical, and record it (append " | FALLBACK opus" to the worker's index line; note the step and
-  "fallback: opus" in state.md). This is the run owner's chosen fallback, not a licence to change models
-  otherwise: never use it for any other kind of failure, never pre-emptively, and never reword the
-  mathematics to avoid the filter. If the fallback launch fails too, it is a failed step under the rules
-  below. In your final reply, say how many launches used the fallback.
+  Do not pass a `model` to the Agent tool: judges and workers run on this session's model.
   Launch a whole wave in ONE message so the workers run in parallel; never run a subagent in the background.
 - In every brief and worker prompt below, DIR stands for the run directory's absolute path and the other
   {bracketed} slots for the values named; substitute them and send the text otherwise VERBATIM. Do not add
@@ -212,7 +236,7 @@ restate or assess the mathematics yourself.
 - You never write or edit query files, answer files (finished or partial), summaries, ledger files, notes.md or
   proof.md yourself. The only files you write are state.md, index.md, the problem copy, the fallback r3_verify.md
   and result-so-far.md (both by copying or concatenation only); beyond that you only copy or move files where a
-  step says so (cp/mv, e.g. summary.md, rejected answers, proof.md to the output path). You do not read answer files beyond confirming they exist (`test -s`);
+  step says so (cp/mv: summary.md, and the r3_verify.first renames in the proof tail). You do not read answer files beyond confirming they exist (`test -s`);
   which of them are finished is decided by the bookkeeping script (`SCRIPT answers`, below), never by you.
 - Worker prompts are always exactly this, with {Q} the query file stem (for example round2_q3, extra_q1,
   r3_q2, r3_verify), {PROBLEM} the complete contents of DIR/problem.md, byte for byte, and {EARLIER} an empty
@@ -233,8 +257,7 @@ restate or assess the mathematics yourself.
   The end line is how a finished answer is told from one a worker was cut off in the middle of (by a usage
   limit, an error or its turn limit); the bookkeeping script checks for it, you never do.
 - Running a wave of query files means: launch one worker of the type this wave uses (`math-proof-worker` or
-  `math-proof-worker-deep`, see the first rule) per file, all in one message. When all have returned (a worker
-  relaunched under the safeguards exception above included) — never earlier: a worker still running is still
+  `math-proof-worker-deep`, see the first rule) per file, all in one message. When all have returned — never earlier: a worker still running is still
   writing its file — run `SCRIPT answers DIR {Q1} {Q2} …` with the stems of the wave's query files, as a
   command on its own, and read what it prints before you write any index line or launch anything. It decides,
   without your reading anything, which answer files are finished, and prints one line per query — "{Q}: answered" (DIR/{Q}.answer.md ends with that query's end line: its worker
@@ -255,7 +278,7 @@ restate or assess the mathematics yourself.
   longer of its two unfinished files as DIR/{Q}.partial.md and the other beside it as DIR/{Q}.partial.prev.md).
   So an index line reads "{Q} | status | abstract", sometimes followed by " | re-run: status | abstract", and
   the re-run's status, when there is one, is the one in force; the plan, draft, refine and finalize briefs tell
-  the judges what a partial file is. Apart from that safeguards relaunch, never launch a worker for a query
+  the judges what a partial file is. Never launch a worker for a query
   between a worker's return and the `answers` run that accounts for it. Note the TOTAL line of the last `answers` run for the wave — the one
   over all its stems, so its count n equals the wave's size: the FLOOR rule below and state.md use it.
 - No user will answer you during this session: never end your turn to ask how to proceed, never wait for confirmation, and
@@ -266,7 +289,9 @@ restate or assess the mathematics yourself.
   row, stop and report where things stand. If, once a round's wave has ended after its one re-run,
   answered + partial on that last TOTAL line is smaller than the FLOOR number the script printed with its WAVE
   verdict (screening verdicts do not count against this), stop and report: something systematic is wrong and
-  continuing would only spend judge steps on nothing. (If that TOTAL line's n is smaller than the wave, you ran
+  continuing would only spend judge steps on nothing — tell the user the likeliest cause is a usage limit or an
+  outage that cut the workers off, that the run's files are intact, and that giving the same /math-proof:siege line
+  again in this directory resumes the run once the cause has cleared. (If that TOTAL line's n is smaller than the wave, you ran
   `answers` on only some stems — run it on all of them first.) The extra-query and commit waves have no floor.
 - Extra queries: when a draft or refine brief allows it, the judge may write up to 3 files named
   DIR/extra_q{k}.md using the next unused numbers k; the whole run has a budget of 10 (once DIR/extra_q10.md
@@ -375,7 +400,7 @@ restate or assess the mathematics yourself.
 > newest OPEN [GOAL] line and aim the wave at the gap). A REFUTED raised goal is not the run's verdict, and its
 > refutation needs no verify queries (the audit rule below is for a goal the run may conclude on): record it as a
 > "REFUTED: [GOAL] …" line naming the refuting file, then re-state the goal you proved below it, as (iv)
-> describes, and conclude on that. Raising is a judgement, not a duty: if nothing clearly more significant looks
+> describes, and conclude on that. Raising is a judgment, not a duty: if nothing clearly more significant looks
 > within reach, conclude on the proved goal under the rule on concluding given earlier in this brief; and if the
 > first two waves aimed at a raised goal (the raising round's own wave is the first) leave it no nearer — no
 > proof of it, and no new route to one — then at the next plan step come back to the goal already proved and
@@ -499,7 +524,7 @@ new proof's locator, and compose the audit rule's verify queries so that they ca
 entries' arguments and the new proof, each spliced from its answer file, joined by the chain's derivation exactly
 as last round's summary states it. If a complete written proof or refutation is in hand, that way or any other,
 skip the rest of (iii) and all of (iv). Otherwise the summary carries a section headed exactly 'The chain and the
-missing statement', rewritten every round, with four labelled parts. Chain: the derivation by which the [GOAL]
+missing statement', rewritten every round, with four labeled parts. Chain: the derivation by which the [GOAL]
 claim (or its negation, when the line pursued is a disproof — then read 'proof of the missing statement' below
 accordingly) follows from results already PROVED — cited by ledger
 number, statements only — together with exactly ONE further statement not yet proved; write the derivation out
@@ -588,17 +613,6 @@ queries of the wave may go elsewhere: to routes the main line does not descend f
 under summary rule (ii)), or —
 at most one of them — to checking one PROVED step the chain rests on that no separate query has yet checked. All
 of these are attempt queries (first line 'kind: attempt')."
-
-## SCREEN BRIEF (retired — not launched in this version; screening is item 0 of the PLAN BRIEF. Kept for reference.)
-> Step: screen round {r}. Files: the problem is DIR/problem.md; the queries are DIR/round{r}_q1.md …
-> DIR/round{r}_q{n}.md and their outputs DIR/round{r}_q{k}.answer.md (DIR/index.md says which have no answer).
-> Read them. You are
-> quality-screening the outputs of independent deep-reasoning queries from one round of a structured attempt at
-> a mathematics problem. You are NOT judging correctness or progress — only whether each output is a genuine
-> attempt at the query it was sent. Mark DEGENERATE only for refusals, empty or off-topic text, or output about
-> a different problem. Write DIR/judge/screen_r{r}.md with one line per query, exactly "round{r}_q{k}: OK" or
-> "round{r}_q{k}: DEGENERATE: one-line reason" (a missing answer is "DEGENERATE: no answer"), and reply with
-> the same lines and nothing else. No shell and no notes rewrite needed for this step.
 
 ## DRAFT BRIEF
 > Step: proof draft. Files: the problem is DIR/problem.md; your running notes are DIR/notes.md; your running

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Bookkeeping helper for the math-proof plugin's siege skill: the four mechanical
 decisions of the round loop and its waves that should not depend on a
-model's judgement.
+model's judgment.
 
     ledger.py check DIR R WAVE MIN_ROUNDS ATTEMPT
         After the round-R plan step: validates the shape of what the judge
@@ -37,12 +37,15 @@ model's judgement.
         shorter older one moves to Q.partial.prev.md), and an empty
         DIR/Q.answer.md is deleted. Nothing a worker wrote is ever deleted or
         overwritten except an older Q.partial.prev.md. Idempotent; an ERROR
-        line (and nothing touched) if DIR or a stem is wrong.
+        line (and nothing touched) if a stem is wrong.
 
-Standard library only. Always exits 0 and says what it decided on
-stdout; any internal error prints a fail-closed verdict (RETRY/REJECT, or
-an ERROR line from `answers`) rather than a traceback the orchestrator
-might misread.
+A malformed command (DIR not an existing directory, a missing or non-numeric
+argument) prints an ERROR line and touches nothing. Standard library only
+(Python 3.7 or later); files are read and written as UTF-8 regardless of the
+platform's default encoding. Always exits 0 and says what it decided on
+stdout; any internal error prints a fail-closed verdict (RETRY/REJECT, or an
+ERROR line from `answers`) rather than a traceback the orchestrator might
+misread.
 """
 
 from __future__ import annotations
@@ -52,6 +55,7 @@ import sys
 from pathlib import Path
 
 MAX_ATTEMPTS = 3  # plan attempts per round before a shortfall is accepted
+ENC = dict(encoding="utf-8", errors="replace")
 
 # ---- ledger parsing and the early-conclusion gate --------------------------
 _LEDGER_STATUS_WORDS = ("OPEN", "PROVED", "REFUTED", "RETRACT", "RETRACTED", "SKETCHED")
@@ -64,8 +68,6 @@ def _take_tags(text: str, tags: set) -> str:
     bracketed STATUS word is not a tag and stops the scan. Tags count
     only in this leading position — a prose mention later in the line
     ("the key step toward [GOAL]") is not a tag."""
-    import re
-
     while True:
         m = re.match(r"^[*_\s]*\[([A-Za-z]{1,6})\]\s*[:\-–—]?\s*", text)
         if not m or m.group(1).upper() in _LEDGER_STATUS_WORDS:
@@ -92,8 +94,6 @@ def _cited_ids(text: str) -> set:
     L hybrid ("entry L5") is not accepted after "line"/"lines", where
     it collides with geometry prose ("lines L2 and L4 are tangent").
     Bare integers are never citations (math prose is full of them)."""
-    import re
-
     ids = set()
     for m in re.finditer(r"#(\d{1,4})\b(?![./]\d)", text):
         ids.add(int(m.group(1)))
@@ -121,8 +121,6 @@ def ledger_entries(ledger_text: str) -> dict[int, dict]:
     goal/audit are set only by a [GOAL]/[AUDIT] tag in tag position —
     immediately before or after the status word — never by a prose
     mention elsewhere in the line."""
-    import re
-
     out: dict[int, dict] = {}
     for ln in ledger_text.splitlines():
         m = re.match(r"\s*(\d+)\.\s+(.*)", ln)
@@ -198,8 +196,6 @@ def early_conclude_ok(entries: dict[int, dict], known_locators=None) -> bool:
     attestation check on judge-written ledger text, not an independent
     proof check: the run's correctness still rests on the audits being
     real, which the locator requirement grounds but cannot prove."""
-    import re
-
     live = {n: e for n, e in entries.items() if e["retracted_by"] is None}
     goals = sorted(n for n, e in live.items() if e.get("goal"))
     if not goals:
@@ -266,7 +262,7 @@ def ledger_text(d: Path, before=None) -> str:
     for p in _parts(d):
         if before is not None and _round_of(p) >= before:
             continue
-        out.append(p.read_text(errors="replace"))
+        out.append(p.read_text(**ENC))
     return "".join(out)
 
 
@@ -291,10 +287,12 @@ def numbered_lines(d: Path, r: int, block: str) -> list:
 
 def append(d: Path, r: int) -> int:
     bp = d / f"round{r}_ledger_block.md"
-    block = bp.read_text(errors="replace") if bp.exists() else ""
+    block = bp.read_text(**ENC) if bp.exists() else ""
     lines = numbered_lines(d, r, block)
-    (d / f"round{r}_ledger.md").write_text("".join(f"{ln}\n" for ln in lines))
-    (d / "ledger.md").write_text(ledger_text(d))
+    (d / f"round{r}_ledger.md").write_text(
+        "".join(f"{ln}\n" for ln in lines), encoding="utf-8"
+    )
+    (d / "ledger.md").write_text(ledger_text(d), encoding="utf-8")
     return len(lines)
 
 
@@ -342,7 +340,7 @@ def is_attack(p: Path) -> bool:
     """kind: attempt declared near the top (first three non-empty lines that
     contain letters — tolerates a front-matter fence or a heading first)."""
     seen = 0
-    for ln in p.read_text(errors="replace").splitlines():
+    for ln in p.read_text(**ENC).splitlines():
         if not re.search(r"[A-Za-z]", ln):
             continue
         if re.match(
@@ -357,7 +355,7 @@ def is_attack(p: Path) -> bool:
 
 def is_withdrawn(p: Path) -> bool:
     """An emptied or '(withdrawn)' query file left over from a re-plan."""
-    t = p.read_text(errors="replace").strip()
+    t = p.read_text(**ENC).strip()
     return not t or bool(
         re.fullmatch(r"[(\[]?\s*withdrawn\s*[)\]]?\.?", t, re.IGNORECASE)
     )
@@ -404,8 +402,8 @@ def _last_line(text: str) -> str:
     """The last line of text that contains a letter or digit ('' if none),
     so that a closing code fence or a rule drawn under the end line does
     not hide it. A line made of nothing but bare markup tags without
-    attributes (a stray '</invoke>' or '</details>' a model sometimes emits
-    after its last real line) is skipped the same way: a worker does not
+    attributes (a stray '</details>' or similar closing tag a model sometimes
+    emits after its last real line) is skipped the same way: a worker does not
     write its end line in that form, and skipping such a line can only
     reveal an end line the worker did write above it."""
     for ln in reversed(text.splitlines()):
@@ -420,8 +418,6 @@ def answers(d: Path, args: list) -> str:
     the module docstring). Only one line of DIR/Q.answer.md is looked at, the
     last that contains a letter or digit and is not a bare markup tag;
     nothing else in any file is read for meaning."""
-    if not d.is_dir():
-        return f"ERROR: {str(d)!r} is not an existing run directory; give DIR first, then the query stems (e.g. round2_q1 round2_q2)"
     stems, seen = [], set()
     for arg in args:
         stem = Path(arg).name  # tolerate a path or a file name for a stem
@@ -441,7 +437,7 @@ def answers(d: Path, args: list) -> str:
         a, p = d / f"{stem}.answer.md", d / f"{stem}.partial.md"
         status = None
         if a.exists():
-            text = a.read_text(errors="replace")
+            text = a.read_text(**ENC)
             if is_end_line(_last_line(text), stem):
                 status = "answered"
             elif not text.strip():
@@ -450,11 +446,11 @@ def answers(d: Path, args: list) -> str:
                 # an older, longer unfinished file stays the partial; keep this one beside it
                 a.replace(d / f"{stem}.partial.prev.md")
             else:
-                if p.exists() and p.read_text(errors="replace").strip():
+                if p.exists() and p.read_text(**ENC).strip():
                     p.replace(d / f"{stem}.partial.prev.md")
                 a.replace(p)
         if status is None:
-            partial = p.exists() and p.read_text(errors="replace").strip()
+            partial = p.exists() and p.read_text(**ENC).strip()
             status = "partial" if partial else "no answer"
         counts[status] += 1
         out.append(f"{stem}: {status}")
@@ -491,8 +487,9 @@ def check(d: Path, r: int, wave: int, min_rounds: int, attempt: int) -> str:
     and the early-conclusion gate is evaluated on the ledger of earlier
     rounds plus this attempt's not-yet-appended lines."""
     final = attempt >= MAX_ATTEMPTS
+    wave = max(1, wave)
     sp = d / f"round{r}_summary.md"
-    if not sp.exists() or not sp.read_text(errors="replace").strip():
+    if not sp.exists() or not sp.read_text(**ENC).strip():
         what = f"no running summary (DIR/round{r}_summary.md is missing or empty)"
         return (
             f"TAIL: {what} after {attempt} attempts"
@@ -503,21 +500,21 @@ def check(d: Path, r: int, wave: int, min_rounds: int, attempt: int) -> str:
         )
     qs = round_queries(d, r)
     for p in [q for q in qs if is_withdrawn(q)]:
-        p.rename(p.with_name(p.stem + ".withdrawn.md"))
+        p.replace(p.with_name(p.stem + ".withdrawn.md"))
         qs.remove(p)
     for k, p in enumerate(qs, 1):  # close gaps so the wave is q1..qn
         want = d / f"round{r}_q{k}.md"
         if p != want:
-            p.rename(want)
+            p.replace(want)
             qs[k - 1] = want
     done = d / f"round{r}_DONE.md"
     if qs:  # composed queries take precedence over a verdict
         if done.exists():
-            done.rename(d / f"round{r}_DONE.superseded.md")
+            done.replace(d / f"round{r}_DONE.superseded.md")
         extra = ""
         if len(qs) > wave:
             for p in qs[wave:]:
-                p.rename(p.with_name(p.stem + ".overcount.md"))
+                p.replace(p.with_name(p.stem + ".overcount.md"))
             qs = qs[:wave]
             extra = f"; over-count: files beyond q{wave} set aside"
         need = (len(qs) + 1) // 2
@@ -538,14 +535,12 @@ def check(d: Path, r: int, wave: int, min_rounds: int, attempt: int) -> str:
         return (
             f"WAVE {len(qs)} FLOOR {wave_floor(len(qs))} (ledger +{n_new}{note}{extra})"
         )
-    if done.exists() and done.read_text(errors="replace").strip():
+    if done.exists() and done.read_text(**ENC).strip():
         if r >= min_rounds:
             n_new = append(d, r)
             return f"CONCLUDE (round {r} >= floor {min_rounds}; ledger +{n_new})"
         bp = d / f"round{r}_ledger_block.md"
-        pending = numbered_lines(
-            d, r, bp.read_text(errors="replace") if bp.exists() else ""
-        )
+        pending = numbered_lines(d, r, bp.read_text(**ENC) if bp.exists() else "")
         text = ledger_text(d, before=r) + "".join(f"{ln}\n" for ln in pending)
         why = gate_reason(text, known_locators(d))
         if not why:
@@ -554,7 +549,7 @@ def check(d: Path, r: int, wave: int, min_rounds: int, attempt: int) -> str:
         if final:
             n_new = append(d, r)
             return f"CONCLUDE (accepted before round {min_rounds} after {attempt} plan attempts without a qualifying chain — {why}; ledger +{n_new})"
-        done.rename(d / f"round{r}_DONE.rejected{attempt}.md")
+        done.replace(d / f"round{r}_DONE.rejected{attempt}.md")
         return (
             f"RETRY: Correction — your conclusion at round {r} was not accepted: {why}. "
             + GATE_RULE.format(m=min_rounds)
@@ -572,17 +567,48 @@ def check(d: Path, r: int, wave: int, min_rounds: int, attempt: int) -> str:
     )
 
 
+USAGE = (
+    "usage: ledger.py check DIR R WAVE MIN_ROUNDS ATTEMPT | append DIR R | gate DIR [R] | "
+    "answers DIR Q1 [Q2 ...] (bookkeeping for the math-proof siege skill; DIR is the run directory)"
+)
+# per command: its usage form, then how many arguments follow DIR (at least,
+# at most) and how many of those must be whole numbers
+_FORMS = {
+    "check": ("check DIR R WAVE MIN_ROUNDS ATTEMPT", 4, 4, 4),
+    "append": ("append DIR R", 1, 1, 1),
+    "gate": ("gate DIR [R]", 0, 1, 1),
+    "answers": ("answers DIR Q1 [Q2 ...]", 1, None, 0),
+}
+
+
+def _malformed(argv: list) -> str:
+    """'' when the command line has the right shape, else an ERROR line."""
+    cmd, rest = argv[1], argv[3:]
+    if cmd not in _FORMS:
+        return f"ERROR: unknown command {cmd!r}. {USAGE}; nothing was touched"
+    form, lo, hi, nints = _FORMS[cmd]
+    if len(argv) < 3 or len(rest) < lo or (hi is not None and len(rest) > hi):
+        return f"ERROR: usage: ledger.py {form} (DIR first, as an absolute path); nothing was touched"
+    d = Path(argv[2])
+    if not d.is_dir():
+        return f"ERROR: '{d}' is not an existing run directory; give the run directory's absolute path first (ledger.py {form}); nothing was touched"
+    if not all(a.isascii() and a.isdigit() for a in rest[:nints]):
+        return f"ERROR: usage: ledger.py {form}; the arguments after DIR must be whole numbers (got {' '.join(rest[:nints])}); nothing was touched"
+    return ""
+
+
 def main(argv: list) -> str:
+    if len(argv) < 2 or argv[1] in ("-h", "--help"):
+        return USAGE
     try:
+        bad = _malformed(argv)
+        if bad:
+            return bad
         cmd = argv[1]
-        if cmd == "answers" and len(argv) < 4:
-            return "ERROR: usage: ledger.py answers DIR Q1 [Q2 ...] (query stems such as round2_q1)"
         d = Path(argv[2])
         if cmd == "append":
             return f"APPENDED {append(d, int(argv[3]))}"
-        if (
-            cmd == "gate"
-        ):  # on ledger.md as it stands, plus round R's pending block if R given
+        if cmd == "gate":  # on ledger.md as it stands, plus round R's pending block if R given
             text = ledger_text(d)
             if len(argv) > 3:
                 r = int(argv[3])
@@ -590,7 +616,7 @@ def main(argv: list) -> str:
                 text = ledger_text(d, before=r) + "".join(
                     f"{ln}\n"
                     for ln in numbered_lines(
-                        d, r, bp.read_text() if bp.exists() else ""
+                        d, r, bp.read_text(**ENC) if bp.exists() else ""
                     )
                 )
             why = gate_reason(text, known_locators(d))
@@ -604,20 +630,16 @@ def main(argv: list) -> str:
             # caller passing attempt=1 forever still reaches the terminal
             # verdicts after MAX_ATTEMPTS plan steps
             logp = d / "judge" / f"plan_r{r}_retries.log"
-            issued = (
-                len(logp.read_text(errors="replace").splitlines())
-                if logp.exists()
-                else 0
-            )
+            issued = len(logp.read_text(**ENC).splitlines()) if logp.exists() else 0
             attempt = max(attempt, issued + 1)
             verdict = check(d, r, wave, min_rounds, attempt)
             if verdict.startswith("RETRY"):
                 logp.parent.mkdir(parents=True, exist_ok=True)
-                with logp.open("a") as f:
+                with logp.open("a", encoding="utf-8") as f:
                     f.write(f"attempt {attempt}: {verdict[:120]}\n")
             # corrections are pasted into a brief whose paths are absolute
             return verdict.replace("DIR/", str(d).rstrip("/") + "/")
-        return f"REJECT: unknown command {cmd!r} (commands: check, append, gate, answers)"
+        return USAGE
     except Exception as e:  # fail closed, in words the orchestrator can relay
         if len(argv) > 1 and argv[1] == "answers":
             return f"ERROR: the bookkeeping script could not classify the answer files ({type(e).__name__}: {str(e)[:200]}); check DIR and the query stems and run the command again"
@@ -633,4 +655,8 @@ def main(argv: list) -> str:
 
 
 if __name__ == "__main__":
+    try:  # the verdict goes out as UTF-8 whatever the console's code page (Windows)
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
     print(main(sys.argv))
