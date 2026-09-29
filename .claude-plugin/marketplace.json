@@ -2959,14 +2959,14 @@
     },
     {
       "name": "postman",
-      "description": "Full API lifecycle management for Claude Code. Sync collections, generate client code, discover APIs, run tests, create mocks, publish docs, and audit security. Powered by the Postman MCP Server.",
+      "description": "Work with Postman from your agent: bootstrap a repo's Postman setup, mock an API before it's implemented, run collection and governance checks in CI, monitor a live endpoint, deploy and debug Postman Flows, and publish generated API documentation.",
       "category": "development",
       "source": {
         "source": "url",
-        "url": "https://github.com/Postman-Devrel/postman-claude-code-plugin.git",
-        "sha": "1e5f49ee91c3604bc3590c5602f664e0e4bfc1fd"
+        "url": "https://github.com/postmanlabs/postman-plugin.git",
+        "sha": "67cff8f385d88608f427af01e152969065ddb1d8"
       },
-      "homepage": "https://learning.postman.com/docs/developer/postman-mcp-server/"
+      "homepage": "https://github.com/postmanlabs/postman-plugin"
     },
     {
       "name": "pr-review-toolkit",
