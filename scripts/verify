@@ -5,9 +5,12 @@ export PYTHONDONTWRITEBYTECODE=1
 
 python3 scripts/fork_sync.py validate
 python3 scripts/test_fork_sync.py
-jq -e '.name == "assistant" and any(.plugins[]; .name == "telegram")' .claude-plugin/marketplace.json >/dev/null
+jq -e '.name == "assistant" and any(.plugins[]; .name == "telegram") and any(.plugins[]; .name == "discord")' .claude-plugin/marketplace.json >/dev/null
 bun test hub
-bun install --cwd external_plugins/telegram --silent
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
-bun build external_plugins/telegram/bot.ts external_plugins/telegram/server.ts --target bun --outdir "$out" >/dev/null
+for plugin in telegram discord; do
+  bun install --cwd "external_plugins/$plugin" --silent
+  bun build "external_plugins/$plugin/bot.ts" "external_plugins/$plugin/server.ts" --target bun --outdir "$out/$plugin" >/dev/null
+done
+bun build hub/serve.ts --target bun --outdir "$out/hub" >/dev/null

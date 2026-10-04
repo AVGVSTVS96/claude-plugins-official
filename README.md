@@ -1,13 +1,15 @@
 > [!NOTE]
 > **This is an auto-patched fork of [claude-plugins-official](https://github.com/anthropics/claude-plugins-official).**
-> It runs a personal assistant where every Telegram forum topic is its own Claude Code
-> session. A daily pipeline re-applies the [PATCH.md packages](patches/) onto the latest
+> It runs a personal assistant where every Telegram forum topic and every Discord thread is
+> its own Claude Code session. A daily pipeline re-applies the [PATCH.md packages](patches/) onto the latest
 > upstream, heals conflicts with Claude, runs `scripts/verify`, and commits the result
 > to `main`.
 >
 > - [`hub/`](hub/) gives every chat thread its own session ([thread-hub](patches/thread-hub/PATCH.md)).
 > - [`external_plugins/telegram`](external_plugins/telegram/) is the reworked channel
->   ([telegram-topics](patches/telegram-topics/PATCH.md)).
+>   ([telegram-topics](patches/telegram-topics/PATCH.md)), and
+>   [`external_plugins/discord`](external_plugins/discord/) its Discord counterpart
+>   ([discord-threads](patches/discord-threads/PATCH.md)).
 > - The marketplace is named `assistant`, so plugins install as `telegram@assistant`
 >   ([assistant-marketplace](patches/assistant-marketplace/PATCH.md)).
 >
