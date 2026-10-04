@@ -1,0 +1,12 @@
+diff --git a/.claude-plugin/marketplace.json b/.claude-plugin/marketplace.json
+index 99a6383d2232641cd2d650bf6f4cc3d30caa7dc3..ea5b9ae17b08fbac3c6218634855a8a66f8252fd 100644
+--- a/.claude-plugin/marketplace.json
++++ b/.claude-plugin/marketplace.json
+@@ -1,6 +1,6 @@
+ {
+   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+-  "name": "claude-plugins-official",
++  "name": "assistant",
+   "description": "Directory of popular Claude Code extensions including development tools, productivity plugins, and MCP integrations",
+   "owner": {
+     "name": "Anthropic",
