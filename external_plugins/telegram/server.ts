@@ -21,7 +21,7 @@ const mcp = new Server(
       '',
       'reply accepts file paths (files: ["/abs/path.png"]) for attachments. Use react to add emoji reactions, and edit_message for interim progress updates. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',
       '',
-      'new_thread opens a new forum topic with its own fresh session and hands it your prompt. Use it for work the user will want to follow or talk to on its own. It only works in a group with topics.',
+      'new_thread opens a new forum topic with its own fresh session and hands it your prompt. Use it for work the user will want to follow or talk to on its own. It only works in a group with topics. With app: "discord" it opens a Discord thread instead, the place for deep, long-form work. handoff moves this whole conversation to Discord when the user asks: you stop here and continue there with your memory (from General, a copy continues there and you stay).',
       '',
       "Telegram's Bot API exposes no history or search — you only see messages as they arrive. If you need earlier context, ask the user to paste it or summarize.",
     ].join('\n'),
@@ -115,8 +115,23 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         properties: {
           title: { type: 'string', description: 'Topic name the user sees in Telegram: 1–2 words, like a chat name ("OpenAI frontier", "Desk anchors").' },
           prompt: { type: 'string', description: 'Everything the new session needs to start the work: it shares none of your context.' },
+          app: { type: 'string', enum: ['telegram', 'discord'], description: 'Where to open it. Default: telegram.' },
+          channel: { type: 'string', description: 'Discord only: the channel to open it in, by name. Default: the server\'s first channel.' },
         },
         required: ['title', 'prompt'],
+      },
+    },
+    {
+      name: 'handoff',
+      description: 'Move this conversation to Discord when the user asks. It opens a thread there, and this session stops here once the turn ends and resumes there with its full memory. From General, a copy continues there and you stay.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          to: { type: 'string', enum: ['discord'] },
+          title: { type: 'string', description: 'Thread name there, 1–2 words. Defaults to this topic\'s name; required from General.' },
+          channel: { type: 'string', description: 'Discord channel to open it in, by name. Default: the server\'s first channel.' },
+        },
+        required: ['to'],
       },
     },
   ],

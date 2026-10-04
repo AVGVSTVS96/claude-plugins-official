@@ -4,7 +4,7 @@ id: telegram-topics
 summary: Rework the Telegram channel so every forum topic in a group is its own Claude Code session, through the thread hub.
 baseline: d182ca456ca09d31d139f7d3818d1d333b103cce
 patch_file: telegram-topics.patch
-patch_sha256: f5abe8bfaf6a8f56df66e12c57537fd8be74ce36869bc1039f9eb8182d28ea20
+patch_sha256: 7dbd0d6ce90ea8a062cf08909e060ced2dbbd32ca5560324aab5e443be87a187
 ---
 
 ## Intent
@@ -13,7 +13,7 @@ Split upstream's single-session `server.ts` in two, so one bot connection
 serves a session per forum topic through `hub/`:
 
 - `bot.ts` takes upstream's bot half: polling, the allowlist, attachments
-  and the Telegram calls. It runs once as a service (`bun run bot`), embeds
+  and the Telegram calls. It runs in the hub service (`hub/serve.ts`), embeds
   the hub, and maps each forum topic, or a plain chat, to a thread.
 - `server.ts` keeps upstream's tools and instructions as the channel every
   session loads. It learns its thread from `ASSISTANT_THREAD`, connects to the
@@ -21,8 +21,10 @@ serves a session per forum topic through `hub/`:
 
 On top of upstream:
 
-- `new_thread(title, prompt)` opens a topic with a fresh session. Titles are
-  1–2 words, enforced.
+- `new_thread(title, prompt)` opens a topic with a fresh session, or a
+  Discord thread with `app: "discord"`. Titles are 1–2 words, enforced.
+- `handoff(to: "discord")` moves a topic's session to a new Discord thread and
+  closes the topic. From General, a copy continues there and main stays.
 - `close_thread` closes a topic and stops its session once it's idle.
 - `reply` can post into another topic by name.
 - The typing indicator follows the session's real busy state.

@@ -4,7 +4,7 @@ import type { ReactionTypeEmoji } from 'grammy/types'
 import { readFileSync, writeFileSync, mkdirSync, statSync, realpathSync, chmodSync } from 'fs'
 import { homedir } from 'os'
 import { join, extname, sep } from 'path'
-import { startHub, type Message } from '../../hub/hub.ts'
+import { startHub, clients, move, type Message } from '../../hub/hub.ts'
 
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'telegram-hub')
 const ACCESS_FILE = join(STATE_DIR, 'access.json')
@@ -154,6 +154,21 @@ function showTyping(thread: string, busy: boolean): void {
   typing.set(thread, setInterval(() => sendTyping(thread), 4000))
 }
 
+function title(text: string): string {
+  const title = text.trim()
+  if (!title || title.split(/\s+/).length > 2) throw new Error(`title must be 1–2 words, got "${title}"`)
+  return title
+}
+
+async function place(name: string) {
+  if (!MAIN) throw new Error('topics need ASSISTANT_MAIN_THREAD, the group they open in')
+  const { chat_id } = target(MAIN)
+  const topic = await bot.api.createForumTopic(chat_id, name)
+  const thread = `${chat_id}:${topic.message_thread_id}`
+  topicNames.set(thread, name)
+  return { thread, link: `https://t.me/c/${chat_id.replace(/^-100/, '')}/${topic.message_thread_id}` }
+}
+
 async function call(caller: string, tool: string, args: Record<string, unknown>): Promise<string> {
   const thread = args.thread ? hub.find(args.thread as string) : caller
   const { chat_id, extra } = target(thread)
@@ -233,13 +248,25 @@ async function call(caller: string, tool: string, args: Record<string, unknown>)
       return `closed "${topicNames.get(thread) ?? thread}"; its session stops once it's idle`
     }
     case 'new_thread': {
-      const title = (args.title as string).trim()
-      if (title.split(/\s+/).length > 2) throw new Error(`title must be 1–2 words, got "${title}"`)
-      const topic = await bot.api.createForumTopic(chat_id, title)
-      const opened = `${chat_id}:${topic.message_thread_id}`
-      topicNames.set(opened, title)
-      hub.open(opened, title, args.prompt as string)
-      return `started thread "${title}"`
+      const name = title(args.title as string)
+      const app = (args.app as string | undefined) ?? 'telegram'
+      const there = app === 'telegram' ? { hub, place } : clients.get(app)
+      if (!there) throw new Error(`${app} isn't connected`)
+      const opened = await there.place(name, args.channel as string | undefined)
+      there.hub.open(opened.thread, name, args.prompt as string)
+      return `started thread "${name}" in ${app}: ${opened.link}`
+    }
+    case 'handoff': {
+      const to = args.to as string
+      const name = title((args.title as string | undefined) ?? topicNames.get(thread) ?? '')
+      const link = await move(hub, thread, to, name, args.channel as string | undefined)
+      if (thread === MAIN) {
+        await bot.api.sendMessage(chat_id, `Continued in ${to}: ${link}`, extra)
+        return `a copy of this conversation continues in ${to}: ${link}. You stay here.`
+      }
+      await bot.api.sendMessage(chat_id, `Moved to ${to}: ${link}`, extra)
+      await bot.api.closeForumTopic(chat_id, extra.message_thread_id!)
+      return `moving to ${to}: ${link}. Your session stops here once this turn ends and resumes there.`
     }
     default:
       throw new Error(`unknown tool: ${tool}`)
@@ -258,6 +285,8 @@ const hub = startHub({
     void bot.api.sendMessage(chat_id, `Couldn't start this topic's session: ${reason}`, extra).catch(() => {})
   },
 })
+
+clients.set('telegram', { hub, place })
 
 bot.on(['message:forum_topic_created', 'message:forum_topic_edited'], ctx => {
   const name = ctx.message.forum_topic_created?.name ?? ctx.message.forum_topic_edited?.name
