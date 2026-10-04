@@ -290,7 +290,7 @@ index ad04f6fa437bfa013f72f71de2b460f3eedeeeee..f8a98d2e2f94bd3e2eb3061938b3b981
 +The bot token lives in `~/.claude/channels/discord-hub/.env` as `DISCORD_BOT_TOKEN=…`, and `access.json` there holds `allowFrom`, the Discord user ids allowed to talk to it. The bot needs the Message Content intent, and in its server: View Channels, Send Messages, Send Messages in Threads, Create Public Threads, Manage Threads, Read Message History, Attach Files and Add Reactions.
 diff --git a/external_plugins/discord/bot.ts b/external_plugins/discord/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..5dbcfc9d9e4025112df5259d39d81b1ca321e462
+index 0000000000000000000000000000000000000000..87c352487a080147bfc7f269a73b762ac1deb866
 --- /dev/null
 +++ b/external_plugins/discord/bot.ts
 @@ -0,0 +1,381 @@
@@ -667,7 +667,7 @@ index 0000000000000000000000000000000000000000..5dbcfc9d9e4025112df5259d39d81b1c
 +    process.stderr.write(`discord hub: client error: ${err}\n`)
 +  })
 +
-+  client.once('ready', c => {
++  client.once('clientReady', c => {
 +    process.stderr.write(`discord hub: gateway connected as ${c.user.tag}\n`)
 +  })
 +

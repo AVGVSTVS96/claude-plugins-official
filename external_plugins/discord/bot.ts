@@ -371,7 +371,7 @@ function serve(token: string) {
     process.stderr.write(`discord hub: client error: ${err}\n`)
   })
 
-  client.once('ready', c => {
+  client.once('clientReady', c => {
     process.stderr.write(`discord hub: gateway connected as ${c.user.tag}\n`)
   })
 
