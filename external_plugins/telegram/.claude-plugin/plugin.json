@@ -1,11 +1,6 @@
 {
   "name": "telegram",
-  "description": "Telegram channel for Claude Code \u2014 messaging bridge with built-in access control. Manage pairing, allowlists, and policy via /telegram:access.",
-  "version": "0.0.7",
-  "keywords": [
-    "telegram",
-    "messaging",
-    "channel",
-    "mcp"
-  ]
+  "description": "Telegram channel where every forum topic is its own session. Fork of claude-plugins-official/telegram.",
+  "version": "0.1.0",
+  "keywords": ["telegram", "messaging", "channel", "mcp"]
 }
