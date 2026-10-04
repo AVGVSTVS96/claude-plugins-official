@@ -4,7 +4,7 @@ id: telegram-deps
 summary: Lock the Telegram plugin to current releases of its dependencies; upstream's lockfile still pins the versions it shipped with.
 baseline: d182ca456ca09d31d139f7d3818d1d333b103cce
 patch_file: telegram-deps.patch
-patch_sha256: 5d9c0c36068292e85764da87da3e3a204a6bd3bd19fb88ab7dea11b391276c04
+patch_sha256: f7d0bdb6854560c4924ecf507b586c1955a4f105c8f1df91bece15da1ee89f61
 ---
 
 ## Intent
