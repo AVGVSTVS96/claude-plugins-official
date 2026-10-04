@@ -173,10 +173,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cd external_plugins/telegram
-          bun update
-          git checkout -- package.json
-          bun install
+          for plugin in telegram discord; do
+            (cd "external_plugins/$plugin" && bun update && git checkout -- package.json && bun install)
+          done
 
       - name: Verify rebuilt source
         run: scripts/verify
