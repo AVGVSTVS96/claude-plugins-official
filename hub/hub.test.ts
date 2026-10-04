@@ -1,0 +1,265 @@
+import { afterEach, beforeEach, expect, test } from 'bun:test'
+import { connect, type Socket } from 'net'
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, chmodSync, existsSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
+import { startHub, type Message } from './hub.ts'
+
+const CHANNEL = 'plugin:telegram@assistant'
+const SESSION = '0a1b2c3d-0000-4000-8000-000000000000'
+const message: Message = { content: 'hi', meta: { chat_id: '1' } }
+
+let dir: string
+let hub: ReturnType<typeof startHub>
+let states: [string, boolean][]
+let failures: [string, string][]
+const sockets: Socket[] = []
+
+beforeEach(() => {
+  dir = mkdtempSync(join(tmpdir(), 'hub-'))
+  mkdirSync(join(dir, 'assistant', '.claude'), { recursive: true })
+  writeFileSync(join(dir, 'assistant', '.claude', 'thread.json'), JSON.stringify({ enabledPlugins: { 'telegram@assistant': true } }))
+  const fake = join(dir, 'claude')
+  writeFileSync(fake, `#!/bin/sh
+jq -cn '$ARGS.positional' --args -- "$@" >> "${dir}/calls"
+[ "$1 $2" = "agents --json" ] && cat "${dir}/agents" 2>/dev/null
+[ "$1" = "--bg" ] && echo "backgrounded · job12345 · test"
+exit 0
+`)
+  chmodSync(fake, 0o755)
+  process.env.PATH = `${dir}:${process.env.PATH}`
+})
+
+afterEach(() => {
+  for (const socket of sockets.splice(0)) socket.destroy()
+  hub?.close()
+  process.env.PATH = process.env.PATH!.split(':').slice(1).join(':')
+})
+
+function start(options: { main?: string; idleStop?: number; registry?: object; agents?: object[] } = {}) {
+  if (options.registry) writeFileSync(join(dir, 'threads.json'), JSON.stringify(options.registry))
+  if (options.agents) writeFileSync(join(dir, 'agents'), JSON.stringify(options.agents))
+  const seen: [string, boolean][] = (states = [])
+  const failedSeen: [string, string][] = (failures = [])
+  hub = startHub({
+    stateDir: dir,
+    channel: CHANNEL,
+    main: options.main,
+    call: async (thread, tool) => `${tool} in ${thread}`,
+    state: (thread, busy) => void seen.push([thread, busy]),
+    failed: (thread, reason) => void failedSeen.push([thread, reason]),
+    jobsDir: join(dir, 'jobs'),
+    assistantDir: join(dir, 'assistant'),
+    idleStop: options.idleStop,
+  })
+}
+
+function calls(): string[][] {
+  return existsSync(join(dir, 'calls'))
+    ? readFileSync(join(dir, 'calls'), 'utf8').trim().split('\n').map(line => JSON.parse(line))
+    : []
+}
+
+async function until<T>(check: () => T | undefined, timeout = 3000): Promise<T> {
+  for (const end = Date.now() + timeout; Date.now() < end; await Bun.sleep(20)) {
+    const value = check()
+    if (value) return value
+  }
+  throw new Error('timed out')
+}
+
+function launched() {
+  return until(() => calls().find(args => args[0] === '--bg'))
+}
+
+async function session(thread: string, id = SESSION) {
+  const socket = connect(join(dir, 'hub.sock'))
+  sockets.push(socket)
+  const received: any[] = []
+  let buffer = ''
+  socket.setEncoding('utf8')
+  socket.on('data', (chunk: string) => {
+    buffer += chunk
+    const lines = buffer.split('\n')
+    buffer = lines.pop()!
+    received.push(...lines.map(line => JSON.parse(line)))
+  })
+  await new Promise(resolve => socket.on('connect', resolve))
+  socket.write(JSON.stringify({ type: 'hello', thread, session: id }) + '\n')
+  return { socket, received, send: (payload: object) => socket.write(JSON.stringify(payload) + '\n') }
+}
+
+function settingsOf(args: string[]) {
+  return JSON.parse(args[args.indexOf('--settings') + 1]!)
+}
+
+function registry() {
+  return JSON.parse(readFileSync(join(dir, 'threads.json'), 'utf8'))
+}
+
+test('a message for a new thread starts a session bound to that thread', async () => {
+  start()
+  hub.deliver('chat:7', 'Desk anchors', message)
+  const args = await launched()
+  expect(args.slice(0, 5)).toEqual(['--bg', '--channels', CHANNEL, '--name', 'Desk anchors'])
+  expect(args).not.toContain('--resume')
+  expect(settingsOf(args).env).toEqual({ ASSISTANT_THREAD: 'chat:7', ASSISTANT_HUB: join(dir, 'hub.sock') })
+  expect(states).toEqual([['chat:7', true]])
+})
+
+test('a new thread prompt comes last, where --channels cannot swallow it', async () => {
+  start()
+  hub.open('chat:8', 'OpenAI', 'find the latest model')
+  const args = await launched()
+  expect(args.at(-1)).toBe('find the latest model')
+  expect(args.at(-3)).toBe('--settings')
+})
+
+test('queued messages reach the session when it says hello, and its id is kept', async () => {
+  start()
+  hub.deliver('chat:7', 'Desk anchors', message)
+  await launched()
+  const { received } = await session('chat:7')
+  await until(() => received.length)
+  expect(received).toEqual([{ type: 'inbound', ...message }])
+  expect(registry()['chat:7']).toEqual({ name: 'Desk anchors', session: SESSION })
+})
+
+test('a stopped thread has its job record cleared, then resumes under the same id', async () => {
+  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } }, agents: [] })
+  hub.deliver('chat:7', 'Desk anchors', message)
+  const args = await launched()
+  expect(calls().slice(0, 2)).toEqual([['agents', '--json'], ['rm', SESSION.slice(0, 8)]])
+  expect(args).toContain('--resume')
+  expect(args[args.indexOf('--resume') + 1]).toBe(SESSION)
+})
+
+test('a thread whose session is still running is never relaunched', async () => {
+  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42 }] })
+  hub.deliver('chat:7', 'Desk anchors', message)
+  await until(() => calls().length)
+  await Bun.sleep(100)
+  expect(calls()).toEqual([['agents', '--json']])
+  const { received } = await session('chat:7')
+  await until(() => received.length)
+  expect(received[0].content).toBe('hi')
+})
+
+test('the main thread is never launched by the hub', async () => {
+  start({ main: 'chat' })
+  hub.deliver('chat', 'main', message)
+  await Bun.sleep(150)
+  expect(calls()).toEqual([])
+  const { received } = await session('chat')
+  await until(() => received.length)
+  expect(received[0].content).toBe('hi')
+})
+
+test('tool calls act on the calling session\'s own thread', async () => {
+  start()
+  const { send, received } = await session('chat:9')
+  send({ type: 'call', id: 1, tool: 'reply', args: { text: 'yo' } })
+  await until(() => received.length)
+  expect(received[0]).toEqual({ type: 'result', id: 1, text: 'reply in chat:9' })
+})
+
+test('busy and idle from session hooks reach the client, and a dropped session is idle', async () => {
+  start()
+  const { socket } = await session('chat:9')
+  const hook = (busy: boolean) => connect(join(dir, 'hub.sock')).on('connect', function () {
+    this.end(JSON.stringify({ type: 'state', thread: 'chat:9', busy }) + '\n')
+  })
+  hook(true)
+  await until(() => states.length === 1)
+  hook(false)
+  await until(() => states.length === 2)
+  socket.destroy()
+  await until(() => states.length === 3)
+  expect(states).toEqual([['chat:9', true], ['chat:9', false], ['chat:9', false]])
+})
+
+test('an idle thread is stopped, and a busy one is not', async () => {
+  start({ idleStop: 50 })
+  hub.deliver('chat:7', 'Desk anchors', message)
+  await launched()
+  const { send } = await session('chat:7')
+  send({ type: 'state', thread: 'chat:7', busy: false })
+  send({ type: 'state', thread: 'chat:7', busy: true })
+  await Bun.sleep(120)
+  expect(calls().some(args => args[0] === 'stop')).toBe(false)
+  send({ type: 'state', thread: 'chat:7', busy: false })
+  const stop = await until(() => calls().find(args => args[0] === 'stop'))
+  expect(stop).toEqual(['stop', SESSION.slice(0, 8)])
+})
+
+test('a local open request starts a session for an existing topic with its prompt', async () => {
+  start()
+  connect(join(dir, 'hub.sock')).on('connect', function () {
+    this.end(JSON.stringify({ type: 'open', thread: 'chat:5', name: 'Theo clips', prompt: 'pick it up' }) + '\n')
+  })
+  const args = await launched()
+  expect(args.slice(3, 5)).toEqual(['--name', 'Theo clips'])
+  expect(args.at(-1)).toBe('pick it up')
+  expect(settingsOf(args).env.ASSISTANT_THREAD).toBe('chat:5')
+})
+
+test('a session that fails to start is reported with its reason, and the next message retries', async () => {
+  start()
+  mkdirSync(join(dir, 'jobs', 'job12345'), { recursive: true })
+  hub.deliver('chat:7', 'Desk anchors', message)
+  await launched()
+  await Bun.sleep(50)
+  writeFileSync(join(dir, 'jobs', 'job12345', 'state.json'), JSON.stringify({ state: 'failed', detail: 'exit 1 before init' }))
+  await until(() => failures.length)
+  expect(failures).toEqual([['chat:7', 'exit 1 before init']])
+  expect(states).toEqual([['chat:7', true], ['chat:7', false]])
+  hub.deliver('chat:7', 'Desk anchors', message)
+  await until(() => calls().filter(args => args[0] === '--bg').length === 2)
+})
+
+test('a session that connects ends the watch, so a later failed state is ignored', async () => {
+  start()
+  mkdirSync(join(dir, 'jobs', 'job12345'), { recursive: true })
+  hub.deliver('chat:7', 'Desk anchors', message)
+  await launched()
+  await session('chat:7')
+  await Bun.sleep(50)
+  writeFileSync(join(dir, 'jobs', 'job12345', 'state.json'), JSON.stringify({ state: 'failed', detail: 'later' }))
+  await Bun.sleep(100)
+  expect(failures).toEqual([])
+})
+
+test('closing an idle thread stops its session right away', async () => {
+  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } } })
+  await session('chat:7')
+  await Bun.sleep(50)
+  hub.retire('chat:7')
+  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
+})
+
+test('closing a busy thread stops its session at its next idle, not before', async () => {
+  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } } })
+  const { send } = await session('chat:7')
+  send({ type: 'state', thread: 'chat:7', busy: true })
+  await until(() => states.length)
+  hub.retire('chat:7')
+  await Bun.sleep(100)
+  expect(calls().some(args => args[0] === 'stop')).toBe(false)
+  send({ type: 'state', thread: 'chat:7', busy: false })
+  await until(() => calls().find(args => args[0] === 'stop'))
+})
+
+test('the main thread cannot be closed', () => {
+  start({ main: 'chat' })
+  expect(() => hub.retire('chat')).toThrow('the main thread stays open')
+})
+
+test('threads are found by name or id, and renames are kept', () => {
+  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION }, 'chat:8': { name: 'Clips' } } })
+  expect(hub.find('desk anchors')).toBe('chat:7')
+  expect(hub.find('chat:8')).toBe('chat:8')
+  expect(() => hub.find('Nope')).toThrow('no thread named "Nope"')
+  hub.rename('chat:8', 'Theo clips')
+  expect(hub.find('Theo clips')).toBe('chat:8')
+  expect(registry()['chat:8'].name).toBe('Theo clips')
+})
