@@ -52,19 +52,18 @@ jobs:
           # Sync commits merge the source as a second parent, so ancestry is
           # the tree truth; patch metadata alone can't mark a source synced.
           if git merge-base --is-ancestor "$source_sha" HEAD; then
-            needs_sync=false
+            source_synced=true
           else
-            needs_sync=true
+            source_synced=false
           fi
           {
             echo "source_sha=$source_sha"
             echo "current_main=$(git rev-parse HEAD)"
-            echo "needs_sync=$needs_sync"
+            echo "source_synced=$source_synced"
           } >> "$GITHUB_OUTPUT"
 
       - name: Restore control plane and try deterministic patches
         id: apply
-        if: steps.resolve.outputs.needs_sync == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -101,7 +100,6 @@ jobs:
           echo "apply_failed=$apply_failed" >> "$GITHUB_OUTPUT"
 
       - name: Upload upstream .github drift
-        if: steps.resolve.outputs.needs_sync == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: upstream-github-diff
@@ -109,10 +107,9 @@ jobs:
           if-no-files-found: ignore
 
       - name: Install Bun
-        if: steps.resolve.outputs.needs_sync == 'true'
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: 1.3.14
+          bun-version: 1.4.2
 
       - name: Heal patches with Claude only after git apply fails
         if: steps.apply.outputs.apply_failed == 'true'
@@ -172,12 +169,19 @@ jobs:
           path: ${{ runner.temp }}/healed.diff
           if-no-files-found: ignore
 
+      - name: Update plugin dependencies within their ranges
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd external_plugins/telegram
+          bun update
+          git checkout -- package.json
+          bun install
+
       - name: Verify rebuilt source
-        if: steps.resolve.outputs.needs_sync == 'true'
         run: scripts/verify
 
       - name: Refresh deterministic patch artifacts
-        if: steps.resolve.outputs.needs_sync == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -188,7 +192,6 @@ jobs:
           git diff --cached --check -- . ':(exclude)patches/**/*.patch'
 
       - name: Commit verified tree to main as a signed commit
-        if: steps.resolve.outputs.needs_sync == 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -198,21 +201,33 @@ jobs:
           source_sha='${{ steps.resolve.outputs.source_sha }}'
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          message="chore: sync patched fork to ${source_sha}"
+          tree="$(git write-tree)"
+          if [ "$tree" = "$(git rev-parse "${current_main}^{tree}")" ]; then
+            echo "main is current"
+            exit 0
+          fi
+          if [ '${{ steps.resolve.outputs.source_synced }}' = "true" ]; then
+            message="chore: update plugin dependencies"
+            commit_parents=(-p "$current_main")
+            api_parents=(-f "parents[]=$current_main")
+          else
+            message="chore: sync patched fork to ${source_sha}"
+            commit_parents=(-p "$current_main" -p "$source_sha")
+            api_parents=(-f "parents[]=$current_main" -f "parents[]=$source_sha")
+          fi
           if [ '${{ steps.apply.outputs.apply_failed }}' = "true" ]; then
             message="${message}"$'\n\n'"patches healed by Claude after deterministic apply failed"
           fi
-          tree="$(git write-tree)"
           # Push the objects under a scratch ref, then have GitHub create the
           # commit itself: commits made through the API are signed by GitHub.
-          carrier="$(printf 'carrier\n' | git commit-tree "$tree" -p "$current_main" -p "$source_sha")"
+          carrier="$(printf 'carrier\n' | git commit-tree "$tree" "${commit_parents[@]}")"
           remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           scratch="refs/heads/sync-objects-${GITHUB_RUN_ID}"
           git push "$remote" "${carrier}:${scratch}"
           trap 'git push "$remote" --delete "$scratch" || true' EXIT
           signed="$(gh api "repos/${GITHUB_REPOSITORY}/git/commits" \
             -f message="$message" -f tree="$tree" \
-            -f "parents[]=$current_main" -f "parents[]=$source_sha" --jq .sha)"
+            "${api_parents[@]}" --jq .sha)"
           gh api -X PATCH "repos/${GITHUB_REPOSITORY}/git/refs/heads/main" -f sha="$signed" >/dev/null
           gh api "repos/${GITHUB_REPOSITORY}/commits/${signed}" \
             --jq '"synced \(.sha[0:12]), verified: \(.commit.verification.verified)"'

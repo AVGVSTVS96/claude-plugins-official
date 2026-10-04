@@ -29,6 +29,6 @@ never updated it.
 
 ## Removal
 
-Remove this patch when upstream's lockfile is at or past these versions.
-To update, run `bun update` in `external_plugins/telegram`, restore
-`package.json`, and refresh.
+The daily sync runs `bun update` and refreshes this patch, so it tracks the
+newest releases on its own. Remove it when upstream keeps its lockfile
+current.
