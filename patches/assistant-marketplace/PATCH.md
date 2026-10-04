@@ -2,9 +2,9 @@
 format: patch-md/v0.1
 id: assistant-marketplace
 summary: Name the marketplace assistant, so it installs beside the official one and its plugins load as telegram@assistant.
-baseline: 2f189354595613190f575ab1f7510f3a94150022
+baseline: d182ca456ca09d31d139f7d3818d1d333b103cce
 patch_file: assistant-marketplace.patch
-patch_sha256: 038c475a92e74df6de1c0e7cd1898cf56f8017b938032e31a7c5c1964c1f52bd
+patch_sha256: 0eb5374abe0191a67fda639700e1283b4ece73fdd59a200727dfb19dde30a0d0
 ---
 
 ## Intent
