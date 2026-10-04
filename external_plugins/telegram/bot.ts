@@ -250,6 +250,7 @@ const hub = startHub({
   stateDir: STATE_DIR,
   channel: 'plugin:telegram@assistant',
   main: MAIN,
+  assistantDir: process.env.ASSISTANT_DIR,
   call,
   state: showTyping,
   failed: (thread, reason) => {

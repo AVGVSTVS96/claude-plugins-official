@@ -178,7 +178,7 @@ index f762daf561baba3df6406e5bbe3038843810a7c2..00000000000000000000000000000000
 -}
 -```
 diff --git a/external_plugins/telegram/README.md b/external_plugins/telegram/README.md
-index d72dbc1a759e601dd0188cc7a8c3b58edc04373c..cd2814947aba2f05e4c48407cc92fdbfa983fcff 100644
+index d72dbc1a759e601dd0188cc7a8c3b58edc04373c..a1bf17d41b7619be1eac9f72b2fbffae94cc6f08 100644
 --- a/external_plugins/telegram/README.md
 +++ b/external_plugins/telegram/README.md
 @@ -1,98 +1,8 @@
@@ -188,7 +188,7 @@ index d72dbc1a759e601dd0188cc7a8c3b58edc04373c..cd2814947aba2f05e4c48407cc92fdbf
 +A fork of the official Telegram channel where every forum topic in a group is its own Claude Code session. Its intent, invariants and what changed from upstream live in [`patches/telegram-topics/PATCH.md`](../../patches/telegram-topics/PATCH.md).
  
 -The MCP server logs into Telegram as a bot and provides tools to Claude to reply, react, or edit messages. When you message the bot, the server forwards the message to your Claude Code session.
-+- `bot.ts` holds the one bot connection and runs as a service: `bun run bot`.
++- `bot.ts` holds the one bot connection and runs as a service: `bun run bot`. It runs sessions in `ASSISTANT_DIR`, `~/assistant` by default.
 +- `server.ts` is the channel each session loads. A session learns its topic from `ASSISTANT_THREAD`.
  
 -## Prerequisites
@@ -286,10 +286,10 @@ index d72dbc1a759e601dd0188cc7a8c3b58edc04373c..cd2814947aba2f05e4c48407cc92fdbf
 +The bot token lives in `~/.claude/channels/telegram-hub/.env` as `TELEGRAM_BOT_TOKEN=…`, and `access.json` there holds `allowFrom`, the Telegram user ids allowed to talk to it.
 diff --git a/external_plugins/telegram/bot.ts b/external_plugins/telegram/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..3767294c1a58f7cf1d3566b742bc7f4f15486883
+index 0000000000000000000000000000000000000000..7758112ed2b9a567b87d5939f12f31fd3736cb7c
 --- /dev/null
 +++ b/external_plugins/telegram/bot.ts
-@@ -0,0 +1,453 @@
+@@ -0,0 +1,454 @@
 +#!/usr/bin/env bun
 +import { Bot, GrammyError, InputFile, type Context } from 'grammy'
 +import type { ReactionTypeEmoji } from 'grammy/types'
@@ -542,6 +542,7 @@ index 0000000000000000000000000000000000000000..3767294c1a58f7cf1d3566b742bc7f4f
 +  stateDir: STATE_DIR,
 +  channel: 'plugin:telegram@assistant',
 +  main: MAIN,
++  assistantDir: process.env.ASSISTANT_DIR,
 +  call,
 +  state: showTyping,
 +  failed: (thread, reason) => {
