@@ -1,9 +1,9 @@
 diff --git a/hub/hub.test.ts b/hub/hub.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..6c47bceecc9a7c454a3ccf40cdcb59d410119420
+index 0000000000000000000000000000000000000000..d95497cd3d46c3b33704c90de084687acdd5ba91
 --- /dev/null
 +++ b/hub/hub.test.ts
-@@ -0,0 +1,263 @@
+@@ -0,0 +1,335 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { connect, type Socket } from 'net'
 +import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, chmodSync, existsSync } from 'fs'
@@ -267,12 +267,84 @@ index 0000000000000000000000000000000000000000..6c47bceecc9a7c454a3ccf40cdcb59d4
 +  expect(hub.find('Theo clips')).toBe('chat:8')
 +  expect(registry()['chat:8'].name).toBe('Theo clips')
 +})
++
++test('the channel plugin is enabled for the session whatever thread.json says', async () => {
++  writeFileSync(join(dir, 'assistant', '.claude', 'thread.json'), JSON.stringify({ enabledPlugins: { 'telegram@assistant': false, 'other@assistant': true } }))
++  start()
++  hub.open('chat:7', 'Desk anchors', 'go')
++  expect(settingsOf(await launched()).enabledPlugins).toEqual({ 'telegram@assistant': true })
++})
++
++test('releasing an idle thread stops its session, then forgets it once the socket closes', async () => {
++  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } } })
++  const { socket } = await session('chat:7')
++  await Bun.sleep(50)
++  let released: string | undefined
++  void hub.release('chat:7').then(id => (released = id))
++  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
++  await Bun.sleep(50)
++  expect(released).toBeUndefined()
++  expect(registry()['chat:7']).toBeDefined()
++  socket.destroy()
++  expect(await until(() => released)).toBe(SESSION)
++  expect(registry()['chat:7']).toBeUndefined()
++})
++
++test('releasing a busy thread waits for its next idle', async () => {
++  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } } })
++  const { socket, send } = await session('chat:7')
++  send({ type: 'state', thread: 'chat:7', busy: true })
++  await until(() => states.length)
++  let released: string | undefined
++  void hub.release('chat:7').then(id => (released = id))
++  await Bun.sleep(100)
++  expect(calls().some(args => args[0] === 'stop')).toBe(false)
++  send({ type: 'state', thread: 'chat:7', busy: false })
++  await until(() => calls().find(args => args[0] === 'stop'))
++  socket.destroy()
++  expect(await until(() => released)).toBe(SESSION)
++  expect(registry()['chat:7']).toBeUndefined()
++})
++
++test('releasing a thread with no live session resolves at once', async () => {
++  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } } })
++  expect(await hub.release('chat:7')).toBe(SESSION)
++  expect(registry()['chat:7']).toBeUndefined()
++  expect(calls()).toEqual([])
++})
++
++test('the main thread and a thread without a session cannot be released', () => {
++  start({ main: 'chat', registry: { 'chat:8': { name: 'Clips' } } })
++  expect(() => hub.release('chat')).toThrow('the main thread stays here')
++  expect(() => hub.release('chat:8')).toThrow('this thread has no session yet')
++})
++
++test('an adopted thread clears the old job record, then resumes its session with the prompt last', async () => {
++  start({ agents: [] })
++  hub.adopt('chat:7', 'Desk anchors', SESSION, 'carry on')
++  const args = await launched()
++  expect(calls().slice(0, 2)).toEqual([['agents', '--json'], ['rm', SESSION.slice(0, 8)]])
++  expect(args[args.indexOf('--resume') + 1]).toBe(SESSION)
++  expect(args.at(-1)).toBe('carry on')
++  expect(registry()['chat:7']).toEqual({ name: 'Desk anchors', session: SESSION })
++})
++
++test('a fork resumes a copy of the session without checking agents or clearing its job record', async () => {
++  start()
++  hub.fork('chat:7', 'Desk anchors', SESSION, 'carry on')
++  const args = await launched()
++  const resume = args.indexOf('--resume')
++  expect(args.slice(resume, resume + 3)).toEqual(['--resume', SESSION, '--fork-session'])
++  expect(args.at(-1)).toBe('carry on')
++  await Bun.sleep(50)
++  expect(calls().map(args => args[0])).toEqual(['--bg'])
++})
 diff --git a/hub/hub.ts b/hub/hub.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..7dd4e38bc123aa39f5213f7355453f9ef74e844d
+index 0000000000000000000000000000000000000000..a599777570b892d04f5f191b4aa14ada4fed8b1e
 --- /dev/null
 +++ b/hub/hub.ts
-@@ -0,0 +1,220 @@
+@@ -0,0 +1,280 @@
 +import { createServer, type Socket } from 'net'
 +import { execFile, spawn } from 'child_process'
 +import { readFileSync, writeFileSync, renameSync, rmSync, watch, type FSWatcher } from 'fs'
@@ -284,6 +356,11 @@ index 0000000000000000000000000000000000000000..7dd4e38bc123aa39f5213f7355453f9e
 +export type State = (thread: string, busy: boolean) => void
 +export type Failed = (thread: string, reason: string) => void
 +type Thread = { name: string; session?: string }
++export type Hub = ReturnType<typeof startHub>
++
++// Every client running in this process, so a thread can move between them.
++// place() opens an empty thread on the client and returns its id and a link to it.
++export const clients = new Map<string, { hub: Hub; place: (name: string, where?: string) => Promise<{ thread: string; link: string }> }>()
 +
 +const ASSISTANT = join(homedir(), 'assistant')
 +const JOBS = join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'jobs')
@@ -309,6 +386,8 @@ index 0000000000000000000000000000000000000000..7dd4e38bc123aa39f5213f7355453f9e
 +  const idle = new Map<string, ReturnType<typeof setTimeout>>()
 +  const busy = new Set<string>()
 +  const retiring = new Set<string>()
++  const leaving = new Map<string, (session: string) => void>()
++  const plugin = channel.replace(/^plugin:/, '')
 +
 +  function read() {
 +    try {
@@ -351,6 +430,31 @@ index 0000000000000000000000000000000000000000..7dd4e38bc123aa39f5213f7355453f9e
 +    if (!busy.has(thread)) stop(thread)
 +  }
 +
++  // Resolves with the thread's session once it has stopped, so another client can resume it.
++  function release(thread: string): Promise<string> {
++    if (thread === main) throw new Error('the main thread stays here')
++    if (!threads[thread]?.session) throw new Error('this thread has no session yet')
++    return new Promise(resolve => {
++      leaving.set(thread, resolve)
++      if (live.has(thread)) retire(thread)
++      else forget(thread)
++    })
++  }
++
++  function forget(thread: string) {
++    const session = threads[thread]!.session!
++    delete threads[thread]
++    save()
++    leaving.get(thread)!(session)
++    leaving.delete(thread)
++  }
++
++  function adopt(thread: string, name: string, session: string, prompt: string) {
++    threads[thread] = { name, session }
++    save()
++    launch(thread, name, prompt)
++  }
++
 +  function find(nameOrThread: string) {
 +    if (threads[nameOrThread]) return nameOrThread
 +    const wanted = nameOrThread.trim().toLowerCase()
@@ -370,12 +474,13 @@ index 0000000000000000000000000000000000000000..7dd4e38bc123aa39f5213f7355453f9e
 +    socket.write(JSON.stringify(payload) + '\n')
 +  }
 +
-+  function launch(thread: string, name: string, prompt?: string) {
++  function launch(thread: string, name: string, prompt?: string, fork?: string) {
 +    if (thread === main || launching.has(thread)) return
 +    retiring.delete(thread)
 +    const known = threads[thread] ?? (threads[thread] = { name })
 +    setState(thread, true)
 +    launching.set(thread, undefined)
++    if (fork) return start(known, thread, prompt, fork)
 +    if (!known.session) return start(known, thread, prompt)
 +    const session = known.session
 +    execFile('claude', ['agents', '--json'], (_, stdout) => {
@@ -395,13 +500,13 @@ index 0000000000000000000000000000000000000000..7dd4e38bc123aa39f5213f7355453f9e
 +    }
 +  }
 +
-+  function start(known: Thread, thread: string, prompt?: string) {
++  function start(known: Thread, thread: string, prompt?: string, fork?: string) {
 +    const launcher = spawn('claude', [
 +      '--bg',
 +      '--channels', channel,
 +      '--name', known.name,
-+      ...(known.session ? ['--resume', known.session] : []),
-+      '--settings', JSON.stringify({ ...settings(), env: { ASSISTANT_THREAD: thread, ASSISTANT_HUB: socketPath } }),
++      ...(fork ? ['--resume', fork, '--fork-session'] : known.session ? ['--resume', known.session] : []),
++      '--settings', JSON.stringify({ ...settings(), enabledPlugins: { [plugin]: true }, env: { ASSISTANT_THREAD: thread, ASSISTANT_HUB: socketPath } }),
 +      ...(prompt ? [prompt] : []),
 +    ], { cwd: assistantDir, stdio: ['ignore', 'pipe', 'pipe'] })
 +    let output = ''
@@ -487,12 +592,49 @@ index 0000000000000000000000000000000000000000..7dd4e38bc123aa39f5213f7355453f9e
 +      if (live.get(thread) !== socket) return
 +      live.delete(thread)
 +      setState(thread, false)
++      if (leaving.has(thread)) forget(thread)
 +    })
 +    socket.on('error', () => {})
 +  }).listen(socketPath)
 +
-+  return { deliver, open: launch, retire, find, rename, close: () => server.close() }
++  return {
++    deliver,
++    open: (thread: string, name: string, prompt: string) => launch(thread, name, prompt),
++    fork: (thread: string, name: string, session: string, prompt: string) => launch(thread, name, prompt, session),
++    main,
++    session: (thread: string) => threads[thread]?.session,
++    release,
++    adopt,
++    retire,
++    find,
++    rename,
++    close: () => server.close(),
++  }
 +}
++
++// Moves a thread to another client: its session stops here and resumes there,
++// memory intact. The main thread never leaves, so a copy of it continues instead.
++export async function move(from: Hub, thread: string, to: string, name: string, where?: string) {
++  const target = clients.get(to)
++  if (!target) throw new Error(`${to} isn't connected`)
++  const session = from.session(thread)
++  if (!session) throw new Error('this thread has no session yet')
++  const { thread: dest, link } = await target.place(name, where)
++  const prompt = `This conversation just moved to ${to}, into the thread "${name}". Your ${to} tools now post there. Carry on where you left off.`
++  if (thread === from.main) target.hub.fork(dest, name, session, prompt)
++  else void from.release(thread).then(session => target.hub.adopt(dest, name, session, prompt))
++  return link
++}
+diff --git a/hub/serve.ts b/hub/serve.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..5218c12ff63db964314d9bfefbe97d24edd93c82
+--- /dev/null
++++ b/hub/serve.ts
+@@ -0,0 +1,4 @@
++await Promise.all([
++  import('../external_plugins/telegram/bot.ts'),
++  import('../external_plugins/discord/bot.ts'),
++])
 diff --git a/hub/state.ts b/hub/state.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..8b8048e2c5298bd6a345b325e37329e675f40ee5

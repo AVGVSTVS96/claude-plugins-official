@@ -261,3 +261,75 @@ test('threads are found by name or id, and renames are kept', () => {
   expect(hub.find('Theo clips')).toBe('chat:8')
   expect(registry()['chat:8'].name).toBe('Theo clips')
 })
+
+test('the channel plugin is enabled for the session whatever thread.json says', async () => {
+  writeFileSync(join(dir, 'assistant', '.claude', 'thread.json'), JSON.stringify({ enabledPlugins: { 'telegram@assistant': false, 'other@assistant': true } }))
+  start()
+  hub.open('chat:7', 'Desk anchors', 'go')
+  expect(settingsOf(await launched()).enabledPlugins).toEqual({ 'telegram@assistant': true })
+})
+
+test('releasing an idle thread stops its session, then forgets it once the socket closes', async () => {
+  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } } })
+  const { socket } = await session('chat:7')
+  await Bun.sleep(50)
+  let released: string | undefined
+  void hub.release('chat:7').then(id => (released = id))
+  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
+  await Bun.sleep(50)
+  expect(released).toBeUndefined()
+  expect(registry()['chat:7']).toBeDefined()
+  socket.destroy()
+  expect(await until(() => released)).toBe(SESSION)
+  expect(registry()['chat:7']).toBeUndefined()
+})
+
+test('releasing a busy thread waits for its next idle', async () => {
+  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } } })
+  const { socket, send } = await session('chat:7')
+  send({ type: 'state', thread: 'chat:7', busy: true })
+  await until(() => states.length)
+  let released: string | undefined
+  void hub.release('chat:7').then(id => (released = id))
+  await Bun.sleep(100)
+  expect(calls().some(args => args[0] === 'stop')).toBe(false)
+  send({ type: 'state', thread: 'chat:7', busy: false })
+  await until(() => calls().find(args => args[0] === 'stop'))
+  socket.destroy()
+  expect(await until(() => released)).toBe(SESSION)
+  expect(registry()['chat:7']).toBeUndefined()
+})
+
+test('releasing a thread with no live session resolves at once', async () => {
+  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } } })
+  expect(await hub.release('chat:7')).toBe(SESSION)
+  expect(registry()['chat:7']).toBeUndefined()
+  expect(calls()).toEqual([])
+})
+
+test('the main thread and a thread without a session cannot be released', () => {
+  start({ main: 'chat', registry: { 'chat:8': { name: 'Clips' } } })
+  expect(() => hub.release('chat')).toThrow('the main thread stays here')
+  expect(() => hub.release('chat:8')).toThrow('this thread has no session yet')
+})
+
+test('an adopted thread clears the old job record, then resumes its session with the prompt last', async () => {
+  start({ agents: [] })
+  hub.adopt('chat:7', 'Desk anchors', SESSION, 'carry on')
+  const args = await launched()
+  expect(calls().slice(0, 2)).toEqual([['agents', '--json'], ['rm', SESSION.slice(0, 8)]])
+  expect(args[args.indexOf('--resume') + 1]).toBe(SESSION)
+  expect(args.at(-1)).toBe('carry on')
+  expect(registry()['chat:7']).toEqual({ name: 'Desk anchors', session: SESSION })
+})
+
+test('a fork resumes a copy of the session without checking agents or clearing its job record', async () => {
+  start()
+  hub.fork('chat:7', 'Desk anchors', SESSION, 'carry on')
+  const args = await launched()
+  const resume = args.indexOf('--resume')
+  expect(args.slice(resume, resume + 3)).toEqual(['--resume', SESSION, '--fork-session'])
+  expect(args.at(-1)).toBe('carry on')
+  await Bun.sleep(50)
+  expect(calls().map(args => args[0])).toEqual(['--bg'])
+})

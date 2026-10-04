@@ -9,6 +9,11 @@ export type Call = (thread: string, tool: string, args: Record<string, unknown>)
 export type State = (thread: string, busy: boolean) => void
 export type Failed = (thread: string, reason: string) => void
 type Thread = { name: string; session?: string }
+export type Hub = ReturnType<typeof startHub>
+
+// Every client running in this process, so a thread can move between them.
+// place() opens an empty thread on the client and returns its id and a link to it.
+export const clients = new Map<string, { hub: Hub; place: (name: string, where?: string) => Promise<{ thread: string; link: string }> }>()
 
 const ASSISTANT = join(homedir(), 'assistant')
 const JOBS = join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'jobs')
@@ -34,6 +39,8 @@ export function startHub({ stateDir, channel, main, call, state, failed, idleSto
   const idle = new Map<string, ReturnType<typeof setTimeout>>()
   const busy = new Set<string>()
   const retiring = new Set<string>()
+  const leaving = new Map<string, (session: string) => void>()
+  const plugin = channel.replace(/^plugin:/, '')
 
   function read() {
     try {
@@ -76,6 +83,31 @@ export function startHub({ stateDir, channel, main, call, state, failed, idleSto
     if (!busy.has(thread)) stop(thread)
   }
 
+  // Resolves with the thread's session once it has stopped, so another client can resume it.
+  function release(thread: string): Promise<string> {
+    if (thread === main) throw new Error('the main thread stays here')
+    if (!threads[thread]?.session) throw new Error('this thread has no session yet')
+    return new Promise(resolve => {
+      leaving.set(thread, resolve)
+      if (live.has(thread)) retire(thread)
+      else forget(thread)
+    })
+  }
+
+  function forget(thread: string) {
+    const session = threads[thread]!.session!
+    delete threads[thread]
+    save()
+    leaving.get(thread)!(session)
+    leaving.delete(thread)
+  }
+
+  function adopt(thread: string, name: string, session: string, prompt: string) {
+    threads[thread] = { name, session }
+    save()
+    launch(thread, name, prompt)
+  }
+
   function find(nameOrThread: string) {
     if (threads[nameOrThread]) return nameOrThread
     const wanted = nameOrThread.trim().toLowerCase()
@@ -95,12 +127,13 @@ export function startHub({ stateDir, channel, main, call, state, failed, idleSto
     socket.write(JSON.stringify(payload) + '\n')
   }
 
-  function launch(thread: string, name: string, prompt?: string) {
+  function launch(thread: string, name: string, prompt?: string, fork?: string) {
     if (thread === main || launching.has(thread)) return
     retiring.delete(thread)
     const known = threads[thread] ?? (threads[thread] = { name })
     setState(thread, true)
     launching.set(thread, undefined)
+    if (fork) return start(known, thread, prompt, fork)
     if (!known.session) return start(known, thread, prompt)
     const session = known.session
     execFile('claude', ['agents', '--json'], (_, stdout) => {
@@ -120,13 +153,13 @@ export function startHub({ stateDir, channel, main, call, state, failed, idleSto
     }
   }
 
-  function start(known: Thread, thread: string, prompt?: string) {
+  function start(known: Thread, thread: string, prompt?: string, fork?: string) {
     const launcher = spawn('claude', [
       '--bg',
       '--channels', channel,
       '--name', known.name,
-      ...(known.session ? ['--resume', known.session] : []),
-      '--settings', JSON.stringify({ ...settings(), env: { ASSISTANT_THREAD: thread, ASSISTANT_HUB: socketPath } }),
+      ...(fork ? ['--resume', fork, '--fork-session'] : known.session ? ['--resume', known.session] : []),
+      '--settings', JSON.stringify({ ...settings(), enabledPlugins: { [plugin]: true }, env: { ASSISTANT_THREAD: thread, ASSISTANT_HUB: socketPath } }),
       ...(prompt ? [prompt] : []),
     ], { cwd: assistantDir, stdio: ['ignore', 'pipe', 'pipe'] })
     let output = ''
@@ -212,9 +245,36 @@ export function startHub({ stateDir, channel, main, call, state, failed, idleSto
       if (live.get(thread) !== socket) return
       live.delete(thread)
       setState(thread, false)
+      if (leaving.has(thread)) forget(thread)
     })
     socket.on('error', () => {})
   }).listen(socketPath)
 
-  return { deliver, open: launch, retire, find, rename, close: () => server.close() }
+  return {
+    deliver,
+    open: (thread: string, name: string, prompt: string) => launch(thread, name, prompt),
+    fork: (thread: string, name: string, session: string, prompt: string) => launch(thread, name, prompt, session),
+    main,
+    session: (thread: string) => threads[thread]?.session,
+    release,
+    adopt,
+    retire,
+    find,
+    rename,
+    close: () => server.close(),
+  }
+}
+
+// Moves a thread to another client: its session stops here and resumes there,
+// memory intact. The main thread never leaves, so a copy of it continues instead.
+export async function move(from: Hub, thread: string, to: string, name: string, where?: string) {
+  const target = clients.get(to)
+  if (!target) throw new Error(`${to} isn't connected`)
+  const session = from.session(thread)
+  if (!session) throw new Error('this thread has no session yet')
+  const { thread: dest, link } = await target.place(name, where)
+  const prompt = `This conversation just moved to ${to}, into the thread "${name}". Your ${to} tools now post there. Carry on where you left off.`
+  if (thread === from.main) target.hub.fork(dest, name, session, prompt)
+  else void from.release(thread).then(session => target.hub.adopt(dest, name, session, prompt))
+  return link
 }
