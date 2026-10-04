@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+cd "$(dirname "$0")/.."
+export PYTHONDONTWRITEBYTECODE=1
+
+python3 scripts/fork_sync.py validate
+python3 scripts/test_fork_sync.py
+jq -e '.name == "assistant" and any(.plugins[]; .name == "telegram")' .claude-plugin/marketplace.json >/dev/null
+bun test hub
+bun install --cwd external_plugins/telegram --silent
+out=$(mktemp -d)
+trap 'rm -rf "$out"' EXIT
+bun build external_plugins/telegram/bot.ts external_plugins/telegram/server.ts --target bun --outdir "$out" >/dev/null
