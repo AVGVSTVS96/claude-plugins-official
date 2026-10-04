@@ -19,6 +19,7 @@ beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'hub-'))
   mkdirSync(join(dir, 'assistant', '.claude'), { recursive: true })
   writeFileSync(join(dir, 'assistant', '.claude', 'thread.json'), JSON.stringify({ enabledPlugins: { 'telegram@assistant': true } }))
+  mkdirSync(join(dir, 'jobs', 'job12345'), { recursive: true })
   const fake = join(dir, 'claude')
   writeFileSync(fake, `#!/bin/sh
 jq -cn '$ARGS.positional' --args -- "$@" >> "${dir}/calls"
@@ -55,9 +56,8 @@ function start(options: { main?: string; idleStop?: number; registry?: object; a
 }
 
 function calls(): string[][] {
-  return existsSync(join(dir, 'calls'))
-    ? readFileSync(join(dir, 'calls'), 'utf8').trim().split('\n').map(line => JSON.parse(line))
-    : []
+  if (!existsSync(join(dir, 'calls'))) return []
+  return readFileSync(join(dir, 'calls'), 'utf8').split('\n').slice(0, -1).map(line => JSON.parse(line))
 }
 
 async function until<T>(check: () => T | undefined, timeout = 3000): Promise<T> {
@@ -205,7 +205,6 @@ test('a local open request starts a session for an existing topic with its promp
 
 test('a session that fails to start is reported with its reason, and the next message retries', async () => {
   start()
-  mkdirSync(join(dir, 'jobs', 'job12345'), { recursive: true })
   hub.deliver('chat:7', 'Desk anchors', message)
   await launched()
   await Bun.sleep(50)
@@ -219,7 +218,6 @@ test('a session that fails to start is reported with its reason, and the next me
 
 test('a session that connects ends the watch, so a later failed state is ignored', async () => {
   start()
-  mkdirSync(join(dir, 'jobs', 'job12345'), { recursive: true })
   hub.deliver('chat:7', 'Desk anchors', message)
   await launched()
   await session('chat:7')

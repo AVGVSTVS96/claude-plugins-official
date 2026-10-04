@@ -1,9 +1,9 @@
 diff --git a/hub/hub.test.ts b/hub/hub.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..5f09f8828769fbf9f651fec7707b21313d08e4e3
+index 0000000000000000000000000000000000000000..6c47bceecc9a7c454a3ccf40cdcb59d410119420
 --- /dev/null
 +++ b/hub/hub.test.ts
-@@ -0,0 +1,265 @@
+@@ -0,0 +1,263 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { connect, type Socket } from 'net'
 +import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, chmodSync, existsSync } from 'fs'
@@ -25,6 +25,7 @@ index 0000000000000000000000000000000000000000..5f09f8828769fbf9f651fec7707b2131
 +  dir = mkdtempSync(join(tmpdir(), 'hub-'))
 +  mkdirSync(join(dir, 'assistant', '.claude'), { recursive: true })
 +  writeFileSync(join(dir, 'assistant', '.claude', 'thread.json'), JSON.stringify({ enabledPlugins: { 'telegram@assistant': true } }))
++  mkdirSync(join(dir, 'jobs', 'job12345'), { recursive: true })
 +  const fake = join(dir, 'claude')
 +  writeFileSync(fake, `#!/bin/sh
 +jq -cn '$ARGS.positional' --args -- "$@" >> "${dir}/calls"
@@ -61,9 +62,8 @@ index 0000000000000000000000000000000000000000..5f09f8828769fbf9f651fec7707b2131
 +}
 +
 +function calls(): string[][] {
-+  return existsSync(join(dir, 'calls'))
-+    ? readFileSync(join(dir, 'calls'), 'utf8').trim().split('\n').map(line => JSON.parse(line))
-+    : []
++  if (!existsSync(join(dir, 'calls'))) return []
++  return readFileSync(join(dir, 'calls'), 'utf8').split('\n').slice(0, -1).map(line => JSON.parse(line))
 +}
 +
 +async function until<T>(check: () => T | undefined, timeout = 3000): Promise<T> {
@@ -211,7 +211,6 @@ index 0000000000000000000000000000000000000000..5f09f8828769fbf9f651fec7707b2131
 +
 +test('a session that fails to start is reported with its reason, and the next message retries', async () => {
 +  start()
-+  mkdirSync(join(dir, 'jobs', 'job12345'), { recursive: true })
 +  hub.deliver('chat:7', 'Desk anchors', message)
 +  await launched()
 +  await Bun.sleep(50)
@@ -225,7 +224,6 @@ index 0000000000000000000000000000000000000000..5f09f8828769fbf9f651fec7707b2131
 +
 +test('a session that connects ends the watch, so a later failed state is ignored', async () => {
 +  start()
-+  mkdirSync(join(dir, 'jobs', 'job12345'), { recursive: true })
 +  hub.deliver('chat:7', 'Desk anchors', message)
 +  await launched()
 +  await session('chat:7')
