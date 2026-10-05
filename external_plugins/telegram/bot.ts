@@ -50,7 +50,8 @@ type Access = {
 function loadAccess(): Access {
   try {
     return { allowFrom: [], ...JSON.parse(readFileSync(ACCESS_FILE, 'utf8')) }
-  } catch {
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') process.stderr.write(`telegram hub: ${ACCESS_FILE} is unreadable, so every sender is dropped: ${err}\n`)
     return { allowFrom: [] }
   }
 }
@@ -243,8 +244,10 @@ async function call(caller: string, tool: string, args: Record<string, unknown>)
     }
     case 'close_thread': {
       if (!extra.message_thread_id) throw new Error('only topics can be closed')
-      await bot.api.closeForumTopic(chat_id, extra.message_thread_id)
-      hub.retire(thread)
+      void hub.retire(thread)
+      await bot.api.closeForumTopic(chat_id, extra.message_thread_id).catch(err => {
+        if (!gone(err)) throw err
+      })
       return `closed "${topicNames.get(thread) ?? thread}"; its session stops once it's idle`
     }
     case 'new_thread': {
@@ -273,12 +276,29 @@ async function call(caller: string, tool: string, args: Record<string, unknown>)
   }
 }
 
+function gone(err: unknown): boolean {
+  return /message thread not found|TOPIC_ID_INVALID/.test(String(err))
+}
+
+// The Bot API has no event for a deleted topic; the first send into one is how it shows.
+async function callOrForget(caller: string, tool: string, args: Record<string, unknown>): Promise<string> {
+  try {
+    return await call(caller, tool, args)
+  } catch (err) {
+    const thread = args.thread ? hub.find(args.thread as string) : caller
+    if (thread === MAIN || !thread.includes(':') || !gone(err)) throw err
+    process.stderr.write(`telegram hub: topic ${thread} was deleted, forgetting it\n`)
+    void hub.retire(thread)
+    throw new Error(`this topic was deleted in Telegram, so it's gone from the thread list now`)
+  }
+}
+
 const hub = startHub({
   stateDir: STATE_DIR,
   channel: 'plugin:telegram@assistant',
   main: MAIN,
   assistantDir: process.env.ASSISTANT_DIR,
-  call,
+  call: callOrForget,
   state: showTyping,
   failed: (thread, reason) => {
     const { chat_id, extra } = target(thread)

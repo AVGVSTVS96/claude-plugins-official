@@ -55,7 +55,8 @@ type Access = {
 function loadAccess(): Access {
   try {
     return { allowFrom: [], ...JSON.parse(readFileSync(ACCESS_FILE, 'utf8')) }
-  } catch {
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') process.stderr.write(`discord hub: ${ACCESS_FILE} is unreadable, so every sender is dropped: ${err}\n`)
     return { allowFrom: [] }
   }
 }
@@ -365,6 +366,11 @@ function serve(token: string) {
 
   client.on('threadUpdate', (before, after) => {
     if (before.name !== after.name) hub.rename(after.id, after.name)
+  })
+
+  client.on('threadDelete', thread => {
+    process.stderr.write(`discord hub: thread ${thread.id} was deleted, forgetting it\n`)
+    void hub.retire(thread.id)
   })
 
   client.on('error', err => {

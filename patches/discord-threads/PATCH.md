@@ -4,7 +4,7 @@ id: discord-threads
 summary: Rework the Discord channel so every thread in a server is its own Claude Code session, Claude-tag style, through the thread hub.
 baseline: d182ca456ca09d31d139f7d3818d1d333b103cce
 patch_file: discord-threads.patch
-patch_sha256: 36fa4f45ff32e2510be8e7d24a6a7fd33b2031e75acad1960c22f18b2ec9a3a4
+patch_sha256: 804956adaabcc5849d881cef630f8b1f1f820328111fa908a53652ba07ec4c25
 ---
 
 ## Intent
@@ -28,8 +28,10 @@ Discord is the place for deeper work, Claude-tag style:
 - Answers can be longer and structured: the instructions say so, the
   chunker splits on paragraphs by default, and a code block cut across
   messages is closed and reopened so both halves render.
-- `new_thread`, `close_thread` (archives the thread; a new message
-  unarchives and resumes it) and `reply` into another thread by name.
+- `new_thread`, `close_thread` (archives the thread and forgets it once its
+  session stops; a new message unarchives it with a fresh session) and
+  `reply` into another thread by name. A thread deleted in Discord is
+  forgotten too.
 - `handoff(to: "telegram")` moves a thread's session to a new Telegram topic.
 - `fetch_messages` reads the thread's own history.
 - The typing indicator follows the session's real busy state.

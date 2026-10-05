@@ -4,7 +4,7 @@ id: telegram-topics
 summary: Rework the Telegram channel so every forum topic in a group is its own Claude Code session, through the thread hub.
 baseline: d182ca456ca09d31d139f7d3818d1d333b103cce
 patch_file: telegram-topics.patch
-patch_sha256: 7dbd0d6ce90ea8a062cf08909e060ced2dbbd32ca5560324aab5e443be87a187
+patch_sha256: f55465e8673efa0ece225004932366a13ff2ca9ab19797e550c958ec427f628f
 ---
 
 ## Intent
@@ -25,7 +25,9 @@ On top of upstream:
   Discord thread with `app: "discord"`. Titles are 1–2 words, enforced.
 - `handoff(to: "discord")` moves a topic's session to a new Discord thread and
   closes the topic. From General, a copy continues there and main stays.
-- `close_thread` closes a topic and stops its session once it's idle.
+- `close_thread` closes a topic, stops its session once it's idle and
+  forgets the topic. The Bot API has no event for a deleted topic, so a call
+  that fails because its topic is gone forgets it too.
 - `reply` can post into another topic by name.
 - The typing indicator follows the session's real busy state.
 - DMs to the bot are forwarded into the main thread (`ASSISTANT_MAIN_THREAD`).

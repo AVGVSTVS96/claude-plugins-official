@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { connect, type Socket } from 'net'
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, chmodSync, existsSync } from 'fs'
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, chmodSync, existsSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { startHub, type Message } from './hub.ts'
@@ -192,6 +192,47 @@ test('an idle thread is stopped, and a busy one is not', async () => {
   expect(stop).toEqual(['stop', SESSION.slice(0, 8)])
 })
 
+test('an idle thread whose session Claude still reports busy is not stopped until it goes idle again', async () => {
+  start({ idleStop: 50, registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'busy' }] })
+  const { send } = await session('chat:7')
+  send({ type: 'state', thread: 'chat:7', busy: false })
+  await until(() => calls().some(args => args[0] === 'agents'))
+  await Bun.sleep(100)
+  expect(calls().some(args => args[0] === 'stop')).toBe(false)
+  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid: 42, status: 'idle' }]))
+  send({ type: 'state', thread: 'chat:7', busy: false })
+  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
+})
+
+test('a bad line from a session is dropped, and the lines after it still work', async () => {
+  start()
+  const { socket, received } = await session('chat:9')
+  socket.write('not json\nnull\n' + JSON.stringify({ type: 'call', id: 1, tool: 'reply', args: {} }) + '\n')
+  await until(() => received.length)
+  expect(received[0]).toEqual({ type: 'result', id: 1, text: 'reply in chat:9' })
+})
+
+test('an unreadable threads.json is moved aside instead of overwritten, and a malformed thread is dropped', async () => {
+  writeFileSync(join(dir, 'threads.json'), '{"chat:7": {"name": "Desk')
+  start()
+  const aside = await until(() => readdirSync(dir).find(file => file.startsWith('threads.json.corrupt-')))
+  expect(readFileSync(join(dir, aside), 'utf8')).toBe('{"chat:7": {"name": "Desk')
+  hub.close()
+  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION }, 'chat:8': null, 'chat:9': { session: SESSION } } })
+  expect(hub.find('chat:7')).toBe('chat:7')
+  expect(() => hub.find('chat:8')).toThrow()
+  expect(() => hub.find('chat:9')).toThrow()
+})
+
+test('a thread.json that can\'t be read fails the start instead of leaving it hanging', async () => {
+  writeFileSync(join(dir, 'assistant', '.claude', 'thread.json'), '{')
+  start()
+  hub.deliver('chat:7', 'Desk anchors', message)
+  await until(() => failures.length)
+  expect(failures[0]![0]).toBe('chat:7')
+  expect(states).toEqual([['chat:7', true], ['chat:7', false]])
+})
+
 test('a local open request starts a session for an existing topic with its prompt', async () => {
   start()
   connect(join(dir, 'hub.sock')).on('connect', function () {
@@ -227,12 +268,34 @@ test('a session that connects ends the watch, so a later failed state is ignored
   expect(failures).toEqual([])
 })
 
-test('closing an idle thread stops its session right away', async () => {
+test('closing an idle thread stops its session right away, then forgets the thread', async () => {
   start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } } })
-  await session('chat:7')
+  const { socket } = await session('chat:7')
   await Bun.sleep(50)
-  hub.retire('chat:7')
+  void hub.retire('chat:7')
   expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
+  expect(registry()['chat:7']).toBeDefined()
+  socket.destroy()
+  await until(() => !registry()['chat:7'])
+})
+
+test('closing a thread with no live session forgets it at once', () => {
+  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } } })
+  void hub.retire('chat:7')
+  expect(registry()['chat:7']).toBeUndefined()
+  expect(calls()).toEqual([])
+})
+
+test('closing a thread whose session Claude reports busy waits for its next idle', async () => {
+  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'busy' }] })
+  const { send } = await session('chat:7')
+  await Bun.sleep(50)
+  void hub.retire('chat:7')
+  await until(() => calls().some(args => args[0] === 'agents'))
+  await Bun.sleep(100)
+  expect(calls().some(args => args[0] === 'stop')).toBe(false)
+  send({ type: 'state', thread: 'chat:7', busy: false })
+  await until(() => calls().find(args => args[0] === 'stop'))
 })
 
 test('closing a busy thread stops its session at its next idle, not before', async () => {
@@ -240,7 +303,7 @@ test('closing a busy thread stops its session at its next idle, not before', asy
   const { send } = await session('chat:7')
   send({ type: 'state', thread: 'chat:7', busy: true })
   await until(() => states.length)
-  hub.retire('chat:7')
+  void hub.retire('chat:7')
   await Bun.sleep(100)
   expect(calls().some(args => args[0] === 'stop')).toBe(false)
   send({ type: 'state', thread: 'chat:7', busy: false })

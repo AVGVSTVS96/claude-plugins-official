@@ -9,6 +9,7 @@ export type Call = (thread: string, tool: string, args: Record<string, unknown>)
 export type State = (thread: string, busy: boolean) => void
 export type Failed = (thread: string, reason: string) => void
 type Thread = { name: string; session?: string }
+type Agent = { sessionId: string; pid?: number; status?: string }
 export type Hub = ReturnType<typeof startHub>
 
 // Every client running in this process, so a thread can move between them.
@@ -42,10 +43,22 @@ export function startHub({ stateDir, channel, main, call, state, failed, idleSto
   const leaving = new Map<string, (session: string) => void>()
   const plugin = channel.replace(/^plugin:/, '')
 
-  function read() {
+  function read(): Record<string, Thread> {
+    let text: string
     try {
-      return JSON.parse(readFileSync(registry, 'utf8'))
+      text = readFileSync(registry, 'utf8')
     } catch {
+      return {}
+    }
+    try {
+      const entries = Object.entries(JSON.parse(text) ?? {})
+      const kept = entries.filter(([, known]: [string, any]) => typeof known?.name === 'string')
+      for (const [thread] of entries.filter(entry => !kept.includes(entry))) process.stderr.write(`hub: dropped malformed thread ${thread} from ${registry}\n`)
+      return Object.fromEntries(kept)
+    } catch (error) {
+      const aside = `${registry}.corrupt-${Date.now()}`
+      renameSync(registry, aside)
+      process.stderr.write(`hub: ${registry} is unreadable (${error}), moved it to ${aside} and started with no threads\n`)
       return {}
     }
   }
@@ -67,7 +80,18 @@ export function startHub({ stateDir, channel, main, call, state, failed, idleSto
     else busy.delete(thread)
     if (working || thread === main || !live.has(thread)) return
     if (retiring.has(thread)) stop(thread)
-    else idle.set(thread, setTimeout(() => stop(thread), idleStop))
+    else idle.set(thread, setTimeout(() => stopIfIdle(thread), idleStop))
+  }
+
+  // The Stop hook ends a turn, but background tasks keep a session busy past it,
+  // so Claude's own status decides; a busy session reports idle again when it's done.
+  function stopIfIdle(thread: string) {
+    idle.delete(thread)
+    const session = threads[thread]?.session
+    if (!session) return
+    agent(session, running => {
+      if (!busy.has(thread) && running?.status !== 'busy') stop(thread)
+    })
   }
 
   function stop(thread: string) {
@@ -77,25 +101,26 @@ export function startHub({ stateDir, channel, main, call, state, failed, idleSto
     if (session) execFile('claude', ['stop', session.slice(0, 8)], () => {})
   }
 
-  function retire(thread: string) {
+  // Resolves with the thread's session once it has stopped and the thread is forgotten.
+  function retire(thread: string): Promise<string> {
     if (thread === main) throw new Error('the main thread stays open')
-    retiring.add(thread)
-    if (!busy.has(thread)) stop(thread)
-  }
-
-  // Resolves with the thread's session once it has stopped, so another client can resume it.
-  function release(thread: string): Promise<string> {
-    if (thread === main) throw new Error('the main thread stays here')
-    if (!threads[thread]?.session) throw new Error('this thread has no session yet')
     return new Promise(resolve => {
       leaving.set(thread, resolve)
-      if (live.has(thread)) retire(thread)
-      else forget(thread)
+      if (!live.has(thread)) return forget(thread)
+      retiring.add(thread)
+      stopIfIdle(thread)
     })
   }
 
+  // Like retire, for a thread whose session another client resumes.
+  function release(thread: string) {
+    if (thread === main) throw new Error('the main thread stays here')
+    if (!threads[thread]?.session) throw new Error('this thread has no session yet')
+    return retire(thread)
+  }
+
   function forget(thread: string) {
-    const session = threads[thread]!.session!
+    const session = threads[thread]?.session ?? ''
     delete threads[thread]
     save()
     leaving.get(thread)!(session)
@@ -136,8 +161,7 @@ export function startHub({ stateDir, channel, main, call, state, failed, idleSto
     if (fork) return start(known, thread, prompt, fork)
     if (!known.session) return start(known, thread, prompt)
     const session = known.session
-    execFile('claude', ['agents', '--json'], (_, stdout) => {
-      const running = parse(stdout).some(agent => agent.sessionId === session && agent.pid)
+    agent(session, running => {
       if (running) return
       // `claude --bg --resume` copies the conversation to a new id while the old
       // session's job record exists, even once stopped; `claude rm` keeps the conversation.
@@ -145,26 +169,34 @@ export function startHub({ stateDir, channel, main, call, state, failed, idleSto
     })
   }
 
-  function parse(json: string): { sessionId: string; pid?: number }[] {
-    try {
-      return JSON.parse(json)
-    } catch {
-      return []
-    }
+  function agent(session: string, then: (running?: Agent) => void) {
+    execFile('claude', ['agents', '--json'], (_, stdout) => {
+      let agents: Agent[] = []
+      try {
+        agents = JSON.parse(stdout)
+      } catch {}
+      then(agents.find(agent => agent.sessionId === session && agent.pid))
+    })
   }
 
   function start(known: Thread, thread: string, prompt?: string, fork?: string) {
-    const launcher = spawn('claude', [
-      '--bg',
-      '--channels', channel,
-      '--name', known.name,
-      ...(fork ? ['--resume', fork, '--fork-session'] : known.session ? ['--resume', known.session] : []),
-      '--settings', JSON.stringify({ ...settings(), enabledPlugins: { [plugin]: true }, env: { ASSISTANT_THREAD: thread, ASSISTANT_HUB: socketPath } }),
-      ...(prompt ? [prompt] : []),
-    ], { cwd: assistantDir, stdio: ['ignore', 'pipe', 'pipe'] })
+    let launcher
+    try {
+      launcher = spawn('claude', [
+        '--bg',
+        '--channels', channel,
+        '--name', known.name,
+        ...(fork ? ['--resume', fork, '--fork-session'] : known.session ? ['--resume', known.session] : []),
+        '--settings', JSON.stringify({ ...settings(), enabledPlugins: { [plugin]: true }, env: { ASSISTANT_THREAD: thread, ASSISTANT_HUB: socketPath } }),
+        ...(prompt ? [prompt] : []),
+      ], { cwd: assistantDir, stdio: ['ignore', 'pipe', 'pipe'] })
+    } catch (error) {
+      return fail(thread, String(error))
+    }
     let output = ''
     launcher.stdout.on('data', chunk => (output += chunk))
     launcher.stderr.on('data', chunk => (output += chunk))
+    launcher.on('error', error => fail(thread, error.message))
     launcher.on('close', code => {
       const job = output.match(/backgrounded · (\w+)/)?.[1]
       if (job) watchJob(thread, job)
@@ -228,19 +260,26 @@ export function startHub({ stateDir, channel, main, call, state, failed, idleSto
     socket.on('data', (chunk: string) => {
       buffer += chunk
       for (let end = buffer.indexOf('\n'); end >= 0; end = buffer.indexOf('\n')) {
-        const request = JSON.parse(buffer.slice(0, end))
+        const line = buffer.slice(0, end)
         buffer = buffer.slice(end + 1)
-        if (request.type === 'hello') welcome(thread = request.thread, request.session, socket)
-        if (request.type === 'state') setState(request.thread, request.busy)
-        if (request.type === 'open') launch(request.thread, request.name, request.prompt)
-        if (request.type === 'call') {
-          call(thread, request.tool, request.args ?? {}).then(
-            text => send(socket, { type: 'result', id: request.id, text }),
-            error => send(socket, { type: 'result', id: request.id, error: error instanceof Error ? error.message : String(error) }),
-          )
+        try {
+          handle(JSON.parse(line))
+        } catch (error) {
+          process.stderr.write(`hub: dropped a bad line from ${thread || 'a session'}: ${error}\n`)
         }
       }
     })
+    function handle(request: any) {
+      if (request.type === 'hello') welcome(thread = request.thread, request.session, socket)
+      if (request.type === 'state') setState(request.thread, request.busy)
+      if (request.type === 'open') launch(request.thread, request.name, request.prompt)
+      if (request.type === 'call') {
+        call(thread, request.tool, request.args ?? {}).then(
+          text => send(socket, { type: 'result', id: request.id, text }),
+          error => send(socket, { type: 'result', id: request.id, error: error instanceof Error ? error.message : String(error) }),
+        )
+      }
+    }
     socket.on('close', () => {
       if (live.get(thread) !== socket) return
       live.delete(thread)

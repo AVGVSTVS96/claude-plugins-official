@@ -4,7 +4,7 @@ id: thread-hub
 summary: Add a client-agnostic hub that gives every chat thread its own Claude Code session and moves threads between clients.
 baseline: d182ca456ca09d31d139f7d3818d1d333b103cce
 patch_file: thread-hub.patch
-patch_sha256: bb69525fbcc978b98c2108115af90569fc2e2f09b26b207feaf389bbb36d23c2
+patch_sha256: 54ec02d7827fa4f71943029bb6e0917202c6b601d5b5b90e6cc7802339ef28a9
 ---
 
 ## Intent
@@ -19,9 +19,11 @@ thread whose session isn't running. It starts that session with
 socket path through the session's `--settings` env. It watches each start
 through Claude's job record and reports a failed start with its reason.
 Sessions report busy and idle through hooks that run `hub/state.ts`; the
-hub hands those to the client and stops a session that stays idle. A client
-can open a thread with a prompt, close one, find threads by name and rename
-them. Each session gets its client's plugin enabled from the hub's channel,
+hub hands those to the client and stops a session that stays idle, unless
+`claude agents --json` still reports it busy (background tasks outlive the
+turn's Stop hook). A client can open a thread with a prompt, close one (its
+session stops once idle and the thread is forgotten), find threads by name
+and rename them. Each session gets its client's plugin enabled from the hub's channel,
 so one `thread.json` serves every client.
 
 `hub/serve.ts` is the service: it runs every client (Telegram, Discord) in
@@ -45,13 +47,18 @@ instead (`fork`, `--fork-session`).
    one conversation never runs in two places.
 6. No timer stands in for state: a start settles on the session's hello or
    its job's `failed` state. The only delay is how long a quiet session stays
-   warm before it's stopped.
+   warm before it's stopped, and Claude's own status decides whether it is
+   still working.
+7. Bad input fails alone: a malformed line on `hub.sock` is logged and
+   dropped, an unreadable `threads.json` is moved aside rather than
+   overwritten, a malformed entry in it is dropped, and an unreadable
+   `thread.json` fails that start. None of them stop the service.
 
 ## Verification
 
 `bun test hub` drives routing, queueing, resume, running sessions, the main
 thread, failed starts, busy and idle, idle stops, closing, naming and
-handoffs (release, adopt, fork) against a fake `claude`. Run `scripts/verify`.
+handoffs (release, adopt, fork) and bad input against a fake `claude`. Run `scripts/verify`.
 
 ## Removal
 

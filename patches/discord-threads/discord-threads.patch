@@ -290,10 +290,10 @@ index ad04f6fa437bfa013f72f71de2b460f3eedeeeee..f8a98d2e2f94bd3e2eb3061938b3b981
 +The bot token lives in `~/.claude/channels/discord-hub/.env` as `DISCORD_BOT_TOKEN=…`, and `access.json` there holds `allowFrom`, the Discord user ids allowed to talk to it. The bot needs the Message Content intent, and in its server: View Channels, Send Messages, Send Messages in Threads, Create Public Threads, Manage Threads, Read Message History, Attach Files and Add Reactions.
 diff --git a/external_plugins/discord/bot.ts b/external_plugins/discord/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..87c352487a080147bfc7f269a73b762ac1deb866
+index 0000000000000000000000000000000000000000..f898322228e6c81ec29927d9afd67343cd16b95f
 --- /dev/null
 +++ b/external_plugins/discord/bot.ts
-@@ -0,0 +1,381 @@
+@@ -0,0 +1,387 @@
 +#!/usr/bin/env bun
 +import {
 +  Client,
@@ -351,7 +351,8 @@ index 0000000000000000000000000000000000000000..87c352487a080147bfc7f269a73b762a
 +function loadAccess(): Access {
 +  try {
 +    return { allowFrom: [], ...JSON.parse(readFileSync(ACCESS_FILE, 'utf8')) }
-+  } catch {
++  } catch (err) {
++    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') process.stderr.write(`discord hub: ${ACCESS_FILE} is unreadable, so every sender is dropped: ${err}\n`)
 +    return { allowFrom: [] }
 +  }
 +}
@@ -661,6 +662,11 @@ index 0000000000000000000000000000000000000000..87c352487a080147bfc7f269a73b762a
 +
 +  client.on('threadUpdate', (before, after) => {
 +    if (before.name !== after.name) hub.rename(after.id, after.name)
++  })
++
++  client.on('threadDelete', thread => {
++    process.stderr.write(`discord hub: thread ${thread.id} was deleted, forgetting it\n`)
++    void hub.retire(thread.id)
 +  })
 +
 +  client.on('error', err => {
