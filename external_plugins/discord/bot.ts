@@ -303,7 +303,7 @@ function serve(token: string) {
 
   const hub = startHub({
     stateDir: STATE_DIR,
-    channel: 'plugin:discord@assistant',
+    channel: 'plugin:discord@hex',
     call,
     state: showTyping,
     failed: (thread, reason) => {

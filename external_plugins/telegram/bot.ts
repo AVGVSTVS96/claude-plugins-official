@@ -295,7 +295,7 @@ async function callOrForget(caller: string, tool: string, args: Record<string, u
 
 const hub = startHub({
   stateDir: STATE_DIR,
-  channel: 'plugin:telegram@assistant',
+  channel: 'plugin:telegram@hex',
   main: MAIN,
   assistantDir: process.env.ASSISTANT_DIR,
   call: callOrForget,

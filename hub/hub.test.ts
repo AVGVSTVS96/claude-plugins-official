@@ -5,7 +5,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { startHub, type Message } from './hub.ts'
 
-const CHANNEL = 'plugin:telegram@assistant'
+const CHANNEL = 'plugin:telegram@hex'
 const SESSION = '0a1b2c3d-0000-4000-8000-000000000000'
 const message: Message = { content: 'hi', meta: { chat_id: '1' } }
 
@@ -18,7 +18,7 @@ const sockets: Socket[] = []
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'hub-'))
   mkdirSync(join(dir, 'assistant', '.claude'), { recursive: true })
-  writeFileSync(join(dir, 'assistant', '.claude', 'thread.json'), JSON.stringify({ enabledPlugins: { 'telegram@assistant': true } }))
+  writeFileSync(join(dir, 'assistant', '.claude', 'thread.json'), JSON.stringify({ enabledPlugins: { 'telegram@hex': true } }))
   mkdirSync(join(dir, 'jobs', 'job12345'), { recursive: true })
   const fake = join(dir, 'claude')
   writeFileSync(fake, `#!/bin/sh
@@ -326,10 +326,10 @@ test('threads are found by name or id, and renames are kept', () => {
 })
 
 test('the channel plugin is enabled for the session whatever thread.json says', async () => {
-  writeFileSync(join(dir, 'assistant', '.claude', 'thread.json'), JSON.stringify({ enabledPlugins: { 'telegram@assistant': false, 'other@assistant': true } }))
+  writeFileSync(join(dir, 'assistant', '.claude', 'thread.json'), JSON.stringify({ enabledPlugins: { 'telegram@hex': false, 'other@hex': true } }))
   start()
   hub.open('chat:7', 'Desk anchors', 'go')
-  expect(settingsOf(await launched()).enabledPlugins).toEqual({ 'telegram@assistant': true })
+  expect(settingsOf(await launched()).enabledPlugins).toEqual({ 'telegram@hex': true })
 })
 
 test('releasing an idle thread stops its session, then forgets it once the socket closes', async () => {

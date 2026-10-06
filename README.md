@@ -10,8 +10,8 @@
 >   ([telegram-topics](patches/telegram-topics/PATCH.md)), and
 >   [`external_plugins/discord`](external_plugins/discord/) its Discord counterpart
 >   ([discord-threads](patches/discord-threads/PATCH.md)).
-> - The marketplace is named `assistant`, so plugins install as `telegram@assistant`
->   ([assistant-marketplace](patches/assistant-marketplace/PATCH.md)).
+> - The marketplace is named `hex`, so plugins install as `telegram@hex`
+>   ([hex-marketplace](patches/hex-marketplace/PATCH.md)).
 >
 > Everything below is the upstream README, unchanged.
 

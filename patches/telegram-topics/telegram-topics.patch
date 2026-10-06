@@ -286,7 +286,7 @@ index d72dbc1a759e601dd0188cc7a8c3b58edc04373c..7b1989d4e8318f7548664ae2b09cd21c
 +The bot token lives in `~/.claude/channels/telegram-hub/.env` as `TELEGRAM_BOT_TOKEN=…`, and `access.json` there holds `allowFrom`, the Telegram user ids allowed to talk to it.
 diff --git a/external_plugins/telegram/bot.ts b/external_plugins/telegram/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..ebedff48bb894927dc8f64b2c36f230ccc5bacce
+index 0000000000000000000000000000000000000000..ac69e5626101521fe3358b99e6e31037d50f6176
 --- /dev/null
 +++ b/external_plugins/telegram/bot.ts
 @@ -0,0 +1,503 @@
@@ -587,7 +587,7 @@ index 0000000000000000000000000000000000000000..ebedff48bb894927dc8f64b2c36f230c
 +
 +const hub = startHub({
 +  stateDir: STATE_DIR,
-+  channel: 'plugin:telegram@assistant',
++  channel: 'plugin:telegram@hex',
 +  main: MAIN,
 +  assistantDir: process.env.ASSISTANT_DIR,
 +  call: callOrForget,

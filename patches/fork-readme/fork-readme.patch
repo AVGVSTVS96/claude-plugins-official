@@ -1,5 +1,5 @@
 diff --git a/README.md b/README.md
-index 43104e240ff500c762adebb0c31dc4b7ff7b50dd..7f519a93cd2fccc4b9f8b974f976bcc9dc02fb95 100644
+index 43104e240ff500c762adebb0c31dc4b7ff7b50dd..59be6325118dc56994b24bffb2bfd62e73881c8d 100644
 --- a/README.md
 +++ b/README.md
 @@ -1,3 +1,20 @@
@@ -15,8 +15,8 @@ index 43104e240ff500c762adebb0c31dc4b7ff7b50dd..7f519a93cd2fccc4b9f8b974f976bcc9
 +>   ([telegram-topics](patches/telegram-topics/PATCH.md)), and
 +>   [`external_plugins/discord`](external_plugins/discord/) its Discord counterpart
 +>   ([discord-threads](patches/discord-threads/PATCH.md)).
-+> - The marketplace is named `assistant`, so plugins install as `telegram@assistant`
-+>   ([assistant-marketplace](patches/assistant-marketplace/PATCH.md)).
++> - The marketplace is named `hex`, so plugins install as `telegram@hex`
++>   ([hex-marketplace](patches/hex-marketplace/PATCH.md)).
 +>
 +> Everything below is the upstream README, unchanged.
 +

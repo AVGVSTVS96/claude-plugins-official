@@ -1,6 +1,6 @@
 diff --git a/hub/hub.test.ts b/hub/hub.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..36f9fd9cd5d27bb394d2edabce6e587e8ae9ae43
+index 0000000000000000000000000000000000000000..d504611e98cc83e2cd3005c0e412b4974364c7f6
 --- /dev/null
 +++ b/hub/hub.test.ts
 @@ -0,0 +1,398 @@
@@ -11,7 +11,7 @@ index 0000000000000000000000000000000000000000..36f9fd9cd5d27bb394d2edabce6e587e
 +import { join } from 'path'
 +import { startHub, type Message } from './hub.ts'
 +
-+const CHANNEL = 'plugin:telegram@assistant'
++const CHANNEL = 'plugin:telegram@hex'
 +const SESSION = '0a1b2c3d-0000-4000-8000-000000000000'
 +const message: Message = { content: 'hi', meta: { chat_id: '1' } }
 +
@@ -24,7 +24,7 @@ index 0000000000000000000000000000000000000000..36f9fd9cd5d27bb394d2edabce6e587e
 +beforeEach(() => {
 +  dir = mkdtempSync(join(tmpdir(), 'hub-'))
 +  mkdirSync(join(dir, 'assistant', '.claude'), { recursive: true })
-+  writeFileSync(join(dir, 'assistant', '.claude', 'thread.json'), JSON.stringify({ enabledPlugins: { 'telegram@assistant': true } }))
++  writeFileSync(join(dir, 'assistant', '.claude', 'thread.json'), JSON.stringify({ enabledPlugins: { 'telegram@hex': true } }))
 +  mkdirSync(join(dir, 'jobs', 'job12345'), { recursive: true })
 +  const fake = join(dir, 'claude')
 +  writeFileSync(fake, `#!/bin/sh
@@ -332,10 +332,10 @@ index 0000000000000000000000000000000000000000..36f9fd9cd5d27bb394d2edabce6e587e
 +})
 +
 +test('the channel plugin is enabled for the session whatever thread.json says', async () => {
-+  writeFileSync(join(dir, 'assistant', '.claude', 'thread.json'), JSON.stringify({ enabledPlugins: { 'telegram@assistant': false, 'other@assistant': true } }))
++  writeFileSync(join(dir, 'assistant', '.claude', 'thread.json'), JSON.stringify({ enabledPlugins: { 'telegram@hex': false, 'other@hex': true } }))
 +  start()
 +  hub.open('chat:7', 'Desk anchors', 'go')
-+  expect(settingsOf(await launched()).enabledPlugins).toEqual({ 'telegram@assistant': true })
++  expect(settingsOf(await launched()).enabledPlugins).toEqual({ 'telegram@hex': true })
 +})
 +
 +test('releasing an idle thread stops its session, then forgets it once the socket closes', async () => {
