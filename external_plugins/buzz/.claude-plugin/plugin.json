@@ -1,0 +1,12 @@
+{
+  "name": "buzz",
+  "description": "Buzz channel where every thread is its own session.",
+  "version": "0.1.0",
+  "keywords": [
+    "buzz",
+    "nostr",
+    "messaging",
+    "channel",
+    "mcp"
+  ]
+}

@@ -4,7 +4,7 @@ id: telegram-topics
 summary: Rework the Telegram channel so every forum topic in a group is its own Claude Code session, through the thread hub.
 baseline: d4226d062928f8d9505dbdeadd10217d23361052
 patch_file: telegram-topics.patch
-patch_sha256: 2da0102baf2147578a2af0b3d8ba90836baf5ec6d3b9c105dda303b43ec881fa
+patch_sha256: 06e6885f18c02e47d0964a43b86f4d045b194d17a1a1b930980683e9baf76322
 ---
 
 ## Intent
@@ -23,9 +23,10 @@ serves a session per forum topic through `hub/`:
 On top of upstream:
 
 - `new_thread(title, prompt)` opens a topic with a fresh session, or a
-  Discord thread with `app: "discord"`. Titles are 1–2 words, enforced.
-- `handoff(to: "discord")` moves a topic's session to a new Discord thread and
-  closes the topic. From General, a copy continues there and main stays.
+  Discord or Buzz thread with `app: "discord"` or `app: "buzz"`. Titles are
+  1–2 words, enforced.
+- `handoff(to: "discord" | "buzz")` moves a topic's session to a new thread
+  there and closes the topic. From General, a copy continues there and main stays.
 - `close_thread` closes a topic, stops its session once it's idle and
   forgets the topic. The Bot API has no event for a deleted topic, so a call
   that fails because its topic is gone forgets it too.

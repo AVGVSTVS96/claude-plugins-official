@@ -293,6 +293,22 @@ test('a session that connects ends the watch, so a later failed state is ignored
   expect(failures).toEqual([])
 })
 
+test('stopping a thread ends its session now, and its next message resumes it', async () => {
+  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } } })
+  const { socket, send } = await session('chat:7')
+  send({ type: 'state', thread: 'chat:7', busy: true })
+  await until(() => states.length)
+  hub.stop('chat:7')
+  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
+  socket.destroy()
+  await until(() => states.length === 2)
+  writeFileSync(join(dir, 'agents'), '[]')
+  hub.deliver('chat:7', 'Desk anchors', message)
+  const args = await launched()
+  expect(args[args.indexOf('--resume') + 1]).toBe(SESSION)
+  expect(registry()['chat:7']).toEqual({ name: 'Desk anchors', session: SESSION })
+})
+
 test('closing an idle thread stops its session right away, then forgets the thread', async () => {
   start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } } })
   const { socket } = await session('chat:7')
@@ -347,6 +363,8 @@ test('threads are found by name or id, and renames are kept', () => {
   expect(() => hub.find('Nope')).toThrow('no thread named "Nope"')
   hub.rename('chat:8', 'Theo clips')
   expect(hub.find('Theo clips')).toBe('chat:8')
+  expect(hub.name('chat:8')).toBe('Theo clips')
+  expect(hub.name('chat:9')).toBeUndefined()
   expect(registry()['chat:8'].name).toBe('Theo clips')
 })
 
@@ -361,11 +379,12 @@ test('sessions start through the launcher, in the hex folder, with nothing of th
   const launcher = join(dir, 'launch')
   writeFileSync(launcher, `#!/bin/sh
 pwd > "${dir}/cwd"
-env | grep -c -e _BOT_TOKEN= -e ^HEX_ > "${dir}/leaked"
+env | grep -c -e _BOT_TOKEN= -e ^HEX_ -e ^BUZZ_ > "${dir}/leaked"
 exec claude "$@"
 `)
   chmodSync(launcher, 0o755)
   process.env.TELEGRAM_BOT_TOKEN = 'secret'
+  process.env.BUZZ_PRIVATE_KEY = 'secret'
   process.env.HEX_DIR = 'somewhere'
   try {
     start({ launcher })
@@ -373,6 +392,7 @@ exec claude "$@"
     await launched()
   } finally {
     delete process.env.TELEGRAM_BOT_TOKEN
+    delete process.env.BUZZ_PRIVATE_KEY
     delete process.env.HEX_DIR
   }
   expect(readFileSync(join(dir, 'cwd'), 'utf8').trim()).toBe(join(dir, 'hex'))

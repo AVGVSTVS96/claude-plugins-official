@@ -10,6 +10,8 @@ on:
       - "scripts/**"
       - "hub/**"
       - "external_plugins/telegram/**"
+      - "external_plugins/discord/**"
+      - "external_plugins/buzz/**"
       - ".claude-plugin/**"
 
 permissions:

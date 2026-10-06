@@ -1,0 +1,14 @@
+{
+  "name": "claude-channel-buzz",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "start": "bun install --no-summary 1>&2 && bun server.ts"
+  },
+  "dependencies": {
+    "@agentclientprotocol/claude-agent-acp": "^0.86.0",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "nostr-tools": "^2.25.2"
+  }
+}

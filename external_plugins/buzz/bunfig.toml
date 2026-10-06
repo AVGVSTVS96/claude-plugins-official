@@ -1,0 +1,4 @@
+# claude-agent-acp's SDK optionally installs a ~230 MB Claude Code binary per platform;
+# only its transcript converter is used here.
+[install]
+optional = false

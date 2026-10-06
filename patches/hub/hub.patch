@@ -1,9 +1,9 @@
 diff --git a/hub/hub.test.ts b/hub/hub.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..1d760a641dd611286d00cf3a362dc667a33255d5
+index 0000000000000000000000000000000000000000..4a048e4e2e1235ab8586343bd47b76c5476a8b13
 --- /dev/null
 +++ b/hub/hub.test.ts
-@@ -0,0 +1,445 @@
+@@ -0,0 +1,465 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { connect, type Socket } from 'net'
 +import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, chmodSync, existsSync } from 'fs'
@@ -299,6 +299,22 @@ index 0000000000000000000000000000000000000000..1d760a641dd611286d00cf3a362dc667
 +  expect(failures).toEqual([])
 +})
 +
++test('stopping a thread ends its session now, and its next message resumes it', async () => {
++  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } } })
++  const { socket, send } = await session('chat:7')
++  send({ type: 'state', thread: 'chat:7', busy: true })
++  await until(() => states.length)
++  hub.stop('chat:7')
++  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
++  socket.destroy()
++  await until(() => states.length === 2)
++  writeFileSync(join(dir, 'agents'), '[]')
++  hub.deliver('chat:7', 'Desk anchors', message)
++  const args = await launched()
++  expect(args[args.indexOf('--resume') + 1]).toBe(SESSION)
++  expect(registry()['chat:7']).toEqual({ name: 'Desk anchors', session: SESSION })
++})
++
 +test('closing an idle thread stops its session right away, then forgets the thread', async () => {
 +  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } } })
 +  const { socket } = await session('chat:7')
@@ -353,6 +369,8 @@ index 0000000000000000000000000000000000000000..1d760a641dd611286d00cf3a362dc667
 +  expect(() => hub.find('Nope')).toThrow('no thread named "Nope"')
 +  hub.rename('chat:8', 'Theo clips')
 +  expect(hub.find('Theo clips')).toBe('chat:8')
++  expect(hub.name('chat:8')).toBe('Theo clips')
++  expect(hub.name('chat:9')).toBeUndefined()
 +  expect(registry()['chat:8'].name).toBe('Theo clips')
 +})
 +
@@ -367,11 +385,12 @@ index 0000000000000000000000000000000000000000..1d760a641dd611286d00cf3a362dc667
 +  const launcher = join(dir, 'launch')
 +  writeFileSync(launcher, `#!/bin/sh
 +pwd > "${dir}/cwd"
-+env | grep -c -e _BOT_TOKEN= -e ^HEX_ > "${dir}/leaked"
++env | grep -c -e _BOT_TOKEN= -e ^HEX_ -e ^BUZZ_ > "${dir}/leaked"
 +exec claude "$@"
 +`)
 +  chmodSync(launcher, 0o755)
 +  process.env.TELEGRAM_BOT_TOKEN = 'secret'
++  process.env.BUZZ_PRIVATE_KEY = 'secret'
 +  process.env.HEX_DIR = 'somewhere'
 +  try {
 +    start({ launcher })
@@ -379,6 +398,7 @@ index 0000000000000000000000000000000000000000..1d760a641dd611286d00cf3a362dc667
 +    await launched()
 +  } finally {
 +    delete process.env.TELEGRAM_BOT_TOKEN
++    delete process.env.BUZZ_PRIVATE_KEY
 +    delete process.env.HEX_DIR
 +  }
 +  expect(readFileSync(join(dir, 'cwd'), 'utf8').trim()).toBe(join(dir, 'hex'))
@@ -451,10 +471,10 @@ index 0000000000000000000000000000000000000000..1d760a641dd611286d00cf3a362dc667
 +})
 diff --git a/hub/hub.ts b/hub/hub.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..3d15ccb40a2873f28dff02f5c0816fc504dfa25d
+index 0000000000000000000000000000000000000000..fda6eb075764292a15b93499e77797ea30a678ab
 --- /dev/null
 +++ b/hub/hub.ts
-@@ -0,0 +1,335 @@
+@@ -0,0 +1,337 @@
 +import { createServer, type Socket } from 'net'
 +import { execFile, spawn } from 'child_process'
 +import { readFileSync, writeFileSync, renameSync, rmSync, watch, type FSWatcher } from 'fs'
@@ -476,7 +496,7 @@ index 0000000000000000000000000000000000000000..3d15ccb40a2873f28dff02f5c0816fc5
 +const JOBS = join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'jobs')
 +const IDLE_STOP = 30 * 60_000
 +const RELAUNCH = 30_000
-+const PRIVATE = /_BOT_TOKEN$|^HEX_/
++const PRIVATE = /_BOT_TOKEN$|^HEX_|^BUZZ_/
 +
 +export function startHub({ stateDir, channel, main, mainName = 'main', call, state, failed, idleStop = IDLE_STOP, relaunch = RELAUNCH, jobsDir = JOBS, hexDir = process.cwd(), launcher = 'claude' }: {
 +  stateDir: string
@@ -765,6 +785,8 @@ index 0000000000000000000000000000000000000000..3d15ccb40a2873f28dff02f5c0816fc5
 +    fork: (thread: string, name: string, session: string, prompt: string) => launch(thread, name, prompt, session),
 +    main,
 +    session: (thread: string) => threads[thread]?.session,
++    name: (thread: string) => threads[thread]?.name,
++    stop,
 +    release,
 +    adopt,
 +    retire,
@@ -792,13 +814,14 @@ index 0000000000000000000000000000000000000000..3d15ccb40a2873f28dff02f5c0816fc5
 +}
 diff --git a/hub/serve.ts b/hub/serve.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..5218c12ff63db964314d9bfefbe97d24edd93c82
+index 0000000000000000000000000000000000000000..d9059b11503bfced6c842a2dbf7ab5bff1e4a425
 --- /dev/null
 +++ b/hub/serve.ts
-@@ -0,0 +1,4 @@
+@@ -0,0 +1,5 @@
 +await Promise.all([
 +  import('../external_plugins/telegram/bot.ts'),
 +  import('../external_plugins/discord/bot.ts'),
++  import('../external_plugins/buzz/bot.ts'),
 +])
 diff --git a/hub/state.ts b/hub/state.ts
 new file mode 100644

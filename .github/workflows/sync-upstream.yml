@@ -173,7 +173,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for plugin in telegram discord; do
+          for plugin in telegram discord buzz; do
             (cd "external_plugins/$plugin" && bun update && git checkout -- package.json && bun install)
           done
 

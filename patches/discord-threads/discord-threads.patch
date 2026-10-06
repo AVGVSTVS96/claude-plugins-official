@@ -703,7 +703,7 @@ index eac89c3befd8ebb90758a9acdf7f400de8c9f298..87aff60aefe5d5610abfa8d4e6e2b719
    "dependencies": {
      "@modelcontextprotocol/sdk": "^1.0.0",
 diff --git a/external_plugins/discord/server.ts b/external_plugins/discord/server.ts
-index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..3c28d949fb76e203ce91ebb79bb996bfb22297b1 100644
+index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..add1251fca1990767857dac6f9137de4fc262b8b 100644
 --- a/external_plugins/discord/server.ts
 +++ b/external_plugins/discord/server.ts
 @@ -1,533 +1,40 @@
@@ -1356,7 +1356,7 @@ index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..3c28d949fb76e203ce91ebb79bb996bf
 +      inputSchema: {
 +        type: 'object',
 +        properties: {
-+          to: { type: 'string', enum: ['telegram'] },
++          to: { type: 'string', enum: ['telegram', 'buzz'] },
 +          title: { type: 'string', description: 'Name there, 1–2 words. Defaults to this thread\'s name.' },
          },
 -        required: ['channel'],

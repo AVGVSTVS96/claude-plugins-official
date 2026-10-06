@@ -1,5 +1,5 @@
 diff --git a/.claude-plugin/marketplace.json b/.claude-plugin/marketplace.json
-index 126078d9b7dc2cd423a345c53a451c155f2fde5e..b2b675886eb96eaea04d9efc9f9cc72f25183b77 100644
+index 126078d9b7dc2cd423a345c53a451c155f2fde5e..b37bb561cb7e20afe554e4bed7e38710940bfd26 100644
 --- a/.claude-plugin/marketplace.json
 +++ b/.claude-plugin/marketplace.json
 @@ -1,6 +1,6 @@
@@ -10,3 +10,16 @@ index 126078d9b7dc2cd423a345c53a451c155f2fde5e..b2b675886eb96eaea04d9efc9f9cc72f
    "description": "Directory of popular Claude Code extensions including development tools, productivity plugins, and MCP integrations",
    "owner": {
      "name": "Anthropic",
+@@ -663,6 +663,12 @@
+       },
+       "homepage": "https://buildkite.com"
+     },
++    {
++      "name": "buzz",
++      "description": "Buzz channel where every thread is its own session, with Buzz's activity and memory panels.",
++      "category": "productivity",
++      "source": "./external_plugins/buzz"
++    },
+     {
+       "name": "canva",
+       "description": "Create, edit, review, resize, and brand-check Canva designs with the Canva MCP server.",

@@ -19,7 +19,7 @@ export const clients = new Map<string, { hub: Hub; place: (name: string, where?:
 const JOBS = join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'jobs')
 const IDLE_STOP = 30 * 60_000
 const RELAUNCH = 30_000
-const PRIVATE = /_BOT_TOKEN$|^HEX_/
+const PRIVATE = /_BOT_TOKEN$|^HEX_|^BUZZ_/
 
 export function startHub({ stateDir, channel, main, mainName = 'main', call, state, failed, idleStop = IDLE_STOP, relaunch = RELAUNCH, jobsDir = JOBS, hexDir = process.cwd(), launcher = 'claude' }: {
   stateDir: string
@@ -308,6 +308,8 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
     fork: (thread: string, name: string, session: string, prompt: string) => launch(thread, name, prompt, session),
     main,
     session: (thread: string) => threads[thread]?.session,
+    name: (thread: string) => threads[thread]?.name,
+    stop,
     release,
     adopt,
     retire,

@@ -664,6 +664,12 @@
       "homepage": "https://buildkite.com"
     },
     {
+      "name": "buzz",
+      "description": "Buzz channel where every thread is its own session, with Buzz's activity and memory panels.",
+      "category": "productivity",
+      "source": "./external_plugins/buzz"
+    },
+    {
       "name": "canva",
       "description": "Create, edit, review, resize, and brand-check Canva designs with the Canva MCP server.",
       "author": {
