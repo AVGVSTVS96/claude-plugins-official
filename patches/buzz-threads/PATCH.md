@@ -4,7 +4,7 @@ id: buzz-threads
 summary: Add a Buzz channel where every Buzz thread is its own Claude Code session through the thread hub, with Buzz's activity, memory and files panels.
 baseline: d4226d062928f8d9505dbdeadd10217d23361052
 patch_file: buzz-threads.patch
-patch_sha256: 272d00f16db90d0d77b111ba7731465a672be3a4664324cca29664d905798362
+patch_sha256: d796c69aef13d66a065890f67410c24b303f0f9bd91fd100d5601ed27f63483d
 ---
 
 ## Intent
@@ -47,10 +47,13 @@ agent panels:
   with turn start, liveness and completion, a `session/new` carrying what the
   session loaded, and remote logs on `log_follow`.
 - `memory.ts`: NIP-AE engrams (kind 30174), `SOUL.md` as the core record and
-  each `## ` section of `MEMORY.md` as a memory; and Agent Files (kinds
-  30180 / 4180 / 4181) for the files in `access.json`'s `share` list,
-  applying the owner's edits with a sha256 check and committing them. A relay
-  without Agent Files refuses those kinds; sharing then stays off.
+  each `## ` section of `MEMORY.md` as a memory; and NIP-AF Agent Files
+  (kinds 30180 / 4180 / 4181) for the files in `access.json`'s `share` list:
+  a record per file (content inlined only when it's UTF-8 and fits), a
+  tombstone for each file deleted or unshared, even while Hex was down, and
+  one answer per owner edit request, decided by the file on disk (applied
+  edits are written, republished and committed). Symlinks are never followed.
+  A relay without Agent Files refuses those kinds; sharing then stays off.
 
 `provider.ts` is `buzz-backend-hex`, a Buzz Desktop provider: Desktop hands it
 the agent's key and auth tag, and it writes them over SSH to
@@ -73,8 +76,8 @@ the agent's key and auth tag, and it writes them over SSH to
 ## Verification
 
 `bun test external_plugins/buzz` runs the bot against an in-process relay,
-the activity and memory panels against a fake relay (including NIP-AE's test
-vectors), and the provider against a fake ssh. `scripts/verify` builds the
+the activity and memory panels against a fake relay (including NIP-AE's and
+NIP-AF's test vectors), and the provider against a fake ssh. `scripts/verify` builds the
 bot, the channel and the provider.
 
 ## Removal

@@ -1,6 +1,6 @@
 import { createHash, createHmac } from 'crypto'
 import { execFile } from 'child_process'
-import { readFileSync, readdirSync, renameSync, statSync, watch, writeFileSync, type FSWatcher } from 'fs'
+import { lstatSync, readFileSync, readdirSync, renameSync, statSync, watch, writeFileSync, type FSWatcher } from 'fs'
 import { join, posix } from 'path'
 import { promisify } from 'util'
 import { verifyEvent, type Event } from 'nostr-tools/pure'
@@ -15,6 +15,7 @@ const LIMIT = 65535
 const SHARE = ['AGENTS.md', 'SOUL.md', 'MEMORY.md', 'schedules.json']
 const SETTLE = 500
 const RESYNC = 10 * 60_000
+const HEX64 = /^[0-9a-f]{64}$/
 
 const exec = promisify(execFile)
 const now = () => Math.floor(Date.now() / 1000)
@@ -34,8 +35,8 @@ export function startMemory({ relay, secretKey, owner, hexDir, share = SHARE }: 
   share?: string[]
 }) {
   const key = getConversationKey(secretKey, owner)
-  const engrams = book(ENGRAM, 'agent-memory/v1/d-tag', 'slug')
-  const records = book(FILE, 'agent-files/v1/d-tag', 'path')
+  const engrams = book(ENGRAM, 'agent-memory/v1/d-tag', body => body?.slug)
+  const records = book(FILE, 'agent-files/v1/d-tag', recordPath)
   const shared = share.map(entry => posix.normalize(entry).replace(/\/$/, '')).filter(entry => valid(entry) || void log(`can't share ${entry}, paths stay inside the hex folder`))
   const answered = new Set<string>()
   const watchers: FSWatcher[] = []
@@ -58,14 +59,14 @@ export function startMemory({ relay, secretKey, owner, hexDir, share = SHARE }: 
   }
 
   // Own addressable records, newest per name, so only what changed is published again.
-  function book(kind: number, domain: string, field: 'slug' | 'path') {
+  function book(kind: number, domain: string, nameOf: (body: any) => unknown) {
     const heads = new Map<string, { text: string; at: number; id: string }>()
     let loaded: Promise<void> | undefined
 
     async function load() {
       for (const event of await relay.query([{ kinds: [kind], authors: [relay.pubkey], '#p': [owner] }])) {
         const opened = open(event)
-        const name = opened?.body?.[field]
+        const name = opened && nameOf(opened.body)
         if (typeof name !== 'string' || address(domain, name) !== tag(event, 'd')) continue
         const head = heads.get(name)
         if (head && (head.at > event.created_at || (head.at === event.created_at && head.id < event.id))) continue
@@ -129,17 +130,13 @@ export function startMemory({ relay, secretKey, owner, hexDir, share = SHARE }: 
       if (!valid(path)) return
       const full = join(hexDir, path)
       try {
-        const stat = statSync(full)
+        const stat = lstatSync(full)
         if (stat.isFile()) found.set(path, readFileSync(full))
         if (stat.isDirectory()) for (const name of readdirSync(full)) if (!name.startsWith('.')) visit(`${path}/${name}`)
       } catch {}
     }
     for (const entry of shared) visit(entry)
     return new Map([...found].map(([path, bytes]) => [path, record(path, bytes)]))
-  }
-
-  function covered(path: string) {
-    return valid(path) && shared.some(entry => path === entry || (path.startsWith(`${entry}/`) && !path.slice(entry.length).includes('/.')))
   }
 
   function run(task: () => Promise<unknown>) {
@@ -175,26 +172,30 @@ export function startMemory({ relay, secretKey, owner, hexDir, share = SHARE }: 
     return relay.subscribe([{ kinds: [EDIT], authors: [owner], '#p': [relay.pubkey] }], event => run(() => answer(event)))
   }
 
+  // A request that can't be read or names an invalid path gets no answer, as NIP-AF says.
   async function answer(event: Event) {
     if (answered.has(event.id) || event.pubkey !== owner) return
-    const request = open(event)?.body
-    if (!request) return log(`couldn't read edit request ${event.id}`)
+    const addressed = event.tags.filter(tag => tag[0] === 'p')
+    const request = addressed.length === 1 && addressed[0]![1] === relay.pubkey ? open(event)?.body : undefined
+    if (!editRequest(request)) {
+      answered.add(event.id)
+      return log(`ignored an unreadable edit request ${event.id}`)
+    }
     const result = await edit(request)
     await relay.publish({ kind: RESULT, content: encrypt(JSON.stringify(result), key), tags: [['p', owner], ['e', event.id]] })
     answered.add(event.id)
   }
 
-  // A file that already has the requested content counts as applied, so a request
-  // seen again after its answer was lost gets the same answer.
-  async function edit({ path, base_sha256: base, content }: any) {
-    if (typeof path !== 'string' || typeof base !== 'string' || typeof content !== 'string') return { status: 'declined', path: String(path), reason: 'not an edit request' }
-    if (!covered(path)) return { status: 'declined', path, reason: `${path} isn't shared` }
+  // The file on disk decides, as found by the same scan that shares it, so a
+  // symlink or a path outside the share list is never written.
+  async function edit({ path, base_sha256: base, content }: { path: string; base_sha256: string; content: string }) {
+    const current = files().get(path)
+    if (!current) return { status: 'declined', path, reason: 'file is not shared' }
+    if (!('content' in current)) return { status: 'declined', path, reason: 'file is too large or not text' }
+    if (current.sha256 !== base) return { status: 'conflict', path, sha256: current.sha256 }
     const full = join(hexDir, path)
     const bytes = Buffer.from(content)
     const sha = sha256(bytes)
-    const current = hash(full)
-    if (current === sha) return { status: 'applied', path, sha256: sha }
-    if (current !== base) return { status: 'conflict', path, sha256: current }
     writeFileSync(`${full}.tmp`, bytes, { mode: statSync(full).mode })
     renameSync(`${full}.tmp`, full)
     await commit(path)
@@ -243,19 +244,27 @@ export function startMemory({ relay, secretKey, owner, hexDir, share = SHARE }: 
   }
 }
 
-function hash(path: string) {
-  try {
-    return sha256(readFileSync(path))
-  } catch {}
-}
-
-function record(path: string, bytes: Buffer) {
+function record(path: string, bytes: Buffer): { path: string; sha256: string; size: number; content?: string } {
   const listed = { path, sha256: sha256(bytes), size: bytes.length }
   try {
     const inlined = { ...listed, content: utf8.decode(bytes) }
     if (Buffer.byteLength(JSON.stringify(inlined)) <= LIMIT) return inlined
   } catch {}
   return listed
+}
+
+// A file record body as NIP-AF defines it; anything else never counts as a head.
+function recordPath(body: any) {
+  if (typeof body?.path !== 'string' || !valid(body.path)) return
+  if ('removed' in body) return body.removed === true ? body.path : undefined
+  const { sha256: sha, size, content } = body
+  if (typeof sha !== 'string' || !HEX64.test(sha) || !Number.isSafeInteger(size) || size < 0) return
+  if (content !== undefined && (typeof content !== 'string' || Buffer.byteLength(content) !== size || sha256(Buffer.from(content)) !== sha)) return
+  return body.path
+}
+
+function editRequest(body: any): body is { path: string; base_sha256: string; content: string } {
+  return typeof body?.path === 'string' && valid(body.path) && typeof body.base_sha256 === 'string' && HEX64.test(body.base_sha256) && typeof body.content === 'string'
 }
 
 function slugify(heading: string) {

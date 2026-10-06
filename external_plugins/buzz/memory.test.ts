@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { execFileSync } from 'child_process'
 import { createHash, createHmac } from 'crypto'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { finalizeEvent, getEventHash, getPublicKey, type Event } from 'nostr-tools/pure'
@@ -250,30 +250,43 @@ test('an edit request is written, committed, republished and answered', async ()
   expect(execFileSync('git', ['-C', dir, 'status', '--porcelain'], { encoding: 'utf8' })).toBe('?? MEMORY.md\n')
 })
 
-test('a stale edit is a conflict unless the file already matches it, and paths outside the share list are declined', async () => {
+test('the file on disk decides: stale edits conflict, unshared, hidden, linked and uninlined files are declined, invalid paths get no answer', async () => {
   write('AGENTS.md', 'now\n')
   write('notes/.env', 'TOKEN=1\n')
+  write('notes/big.txt', 'x'.repeat(70_000))
   write('state/access.json', '{}')
+  write('outside.md', 'mine\n')
+  symlinkSync(join(dir, 'outside.md'), join(dir, 'notes/link.md'))
   const relay = fakeRelay()
   start(relay, ['AGENTS.md', 'notes'])
   await until(() => relay.subs.size)
   request(relay, { path: 'AGENTS.md', base_sha256: sha256('before\n'), content: 'mine\n' })
   request(relay, { path: 'notes/.env', base_sha256: sha256('TOKEN=1\n'), content: 'TOKEN=2\n' })
   request(relay, { path: 'state/access.json', base_sha256: sha256('{}'), content: '[]' })
-  request(relay, { path: '../outside', base_sha256: sha256(''), content: 'x' })
+  request(relay, { path: 'notes/link.md', base_sha256: sha256('mine\n'), content: 'yours\n' })
+  request(relay, { path: 'notes/big.txt', base_sha256: sha256('x'.repeat(70_000)), content: 'x' })
   request(relay, { path: 'notes/gone.md', base_sha256: sha256(''), content: 'x' })
-  request(relay, { path: 'AGENTS.md', base_sha256: sha256('before\n'), content: 'now\n' })
-  await until(() => results(relay).length === 6)
+  request(relay, { path: '../outside.md', base_sha256: sha256('mine\n'), content: 'x' })
+  request(relay, { path: 'AGENTS.md', base_sha256: 'BEFORE', content: 'x' })
+  request(relay, { path: 'AGENTS.md', base_sha256: sha256('now\n'), content: 'next\n' })
+  request(relay, { path: 'AGENTS.md', base_sha256: sha256('now\n'), content: 'next\n' })
+  await until(() => results(relay).length === 8)
+  await Bun.sleep(100)
+  const notShared = (path: string) => ({ status: 'declined', path, reason: 'file is not shared' })
   expect(results(relay).map(({ tags, ...result }) => result)).toEqual([
     { status: 'conflict', path: 'AGENTS.md', sha256: sha256('now\n') },
-    { status: 'declined', path: 'notes/.env', reason: "notes/.env isn't shared" },
-    { status: 'declined', path: 'state/access.json', reason: "state/access.json isn't shared" },
-    { status: 'declined', path: '../outside', reason: "../outside isn't shared" },
-    { status: 'conflict', path: 'notes/gone.md' },
-    { status: 'applied', path: 'AGENTS.md', sha256: sha256('now\n') },
+    notShared('notes/.env'),
+    notShared('state/access.json'),
+    notShared('notes/link.md'),
+    { status: 'declined', path: 'notes/big.txt', reason: 'file is too large or not text' },
+    notShared('notes/gone.md'),
+    { status: 'applied', path: 'AGENTS.md', sha256: sha256('next\n') },
+    { status: 'conflict', path: 'AGENTS.md', sha256: sha256('next\n') },
   ])
-  expect(readFileSync(join(dir, 'AGENTS.md'), 'utf8')).toBe('now\n')
+  expect(readFileSync(join(dir, 'AGENTS.md'), 'utf8')).toBe('next\n')
   expect(readFileSync(join(dir, 'notes/.env'), 'utf8')).toBe('TOKEN=1\n')
+  expect(readFileSync(join(dir, 'outside.md'), 'utf8')).toBe('mine\n')
+  expect(opened(relay, 30180).map(({ body }) => body.path)).not.toContain('notes/link.md')
 })
 
 test('after a restart, answered requests are not applied again and ones sent while offline are', async () => {
@@ -305,4 +318,115 @@ test('a relay without Agent Files refuses one record and memory keeps working', 
   expect(opened(relay, 30174).map(({ body }) => body.profile)).toEqual(['me\n', 'me, changed\n'])
   expect(relay.attempts.filter(kind => kind === 30180)).toEqual([30180])
   expect(relay.subs.size).toBe(0)
+})
+
+const FILES = {
+  notes: {
+    body: '{"path":"notes.md","sha256":"38d997fefd1b7e6bb304b744dc708cc5e42ff41414e3e2878e3656c8f5ad02e4","size":19,"content":"hello, agent files\\n"}',
+    d: '6a2ae802e89df6c3311cc145e4fd40280669b2853d13ca80b920ec7ac36a1160',
+    created_at: 1700000000,
+    nonce: 1,
+    content: 'AgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABeWYcxyTrp5d68LBgA38mWthpZhLbxJYMfhJBIaLKj/BibYNSQQWLt6lkAXZKid+iG4Qbw5alru2O5QNHEsvgLDxoohNxwegWO+R8ZglzvKJvONpvb2DQgtDOCoAHlk4U79qce+Bc6EPESBbYYhyTsoZ3K4phyhQbPf4Wf17d6VrIjF90VGEnjdGQ8+kf9Q+LvFbLZK5Yy8TJmm+uSe6nruhmEJtEgN+E4HqYl3hm3wi0I7zDVq6XE5YP8+33SUgi3Fw=',
+    id: 'ffedcefb2ceca14ebd23fc5832be2eaece81364e5749b40551febb34ece68129',
+    sig: '851749264f0ee6cc356343942f6a8987687eeeb36718624459c8057ebd910676afa566280b06896b627e024b99a5ac65508c98becca7359873e2241ef9b46db6',
+  },
+  plan: {
+    body: '{"path":"PLANS/agent files.md","sha256":"c3964bb3b70a957ec9b233c7dd3653f6ba17701ab00facf88ae1393dc6155577","size":7,"content":"# Plan\\n"}',
+    d: 'f1a77048f250f512bdae879a96da177787f71a9b33e5218d255d99c8cf33a134',
+    created_at: 1700000001,
+    nonce: 2,
+    content: 'AgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACGzxBPvRUxTMAxOGGRKGhZiqgsEArQCRWg50Ke1gDJx+TGj9/Fewz3WSyeAfivT3k1gBothiBPJ5s4cOhoEO8II+l0uqLSfcuoPyWdKtqiGzypCM6179dYp0PvWim9j+wvCOLYun2TmeW8X9jYUNEs30aK7W0KxbM0JFd90vjbhlIh9YFQzQmV/gd5sN2BqBULXmmZgc5sMVzdb8DKkbG4CfkSf4eefdbfkQh4P8Adrk5gFTQ3MMFjBFsMXvjpLUQrAs=',
+    id: '7057f1c1826c58d24cd61bd2ca084e6ebe3ac23e9d664deb286629e029d43da4',
+    sig: 'c72a734e84af6b038e7c28dfefba7576b0bcb02f385bd38a99ce7c4795b867dc6d27e72d446aed33c2fcf4a211099fd55fc135ee3236f863180baa56a18ff751',
+  },
+  big: {
+    body: '{"path":"logs/big.log","sha256":"66915c0872933db504e7578828dd85b7e74a4e0a061f9756793b89c4151bd4b5","size":70000}',
+    d: '3eba5168333f7a57b7d9967429fc681a45affe7e5a182e84d5c588c1f8da1d47',
+    created_at: 1700000002,
+    nonce: 3,
+    content: 'AgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADufi8i0aj4uoLnp2rR/0icXfrLlipO1/EFjgIaMEZgjMtBxFfHRl2FE2vy5jJ/Z0ZfIqS0LWZbYrASsnxSWX0T0d1keXs2rhM8a/1YsmLEwPZUyetBJ6AUQpEoMjyKlwhJ8hHY02Z/WmOvJ+eAcSak81lFyUYqr/Q+r9Vu8cOmTJd+doLd9zrrbg1weUnGD1ZxHH403ggde05EdOMG+BgzCWm',
+    id: '6ba315bfc0b986c56662e78e94de1a5df07fdee30e410e2b84e62b1608b3fba7',
+    sig: '5b73e8ffda0caeb76fac13150a2e617b2b4bb0b1c1a38dbee6619a5ee5852ed81ee1b0a3e6d80733e0d47f57625303988d842285880189c4656a0c4a81254947',
+  },
+  removed: {
+    body: '{"path":"notes.md","removed":true}',
+    d: '6a2ae802e89df6c3311cc145e4fd40280669b2853d13ca80b920ec7ac36a1160',
+    created_at: 1700000003,
+    nonce: 4,
+    content: 'AgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEEZ1HAFvscs/AcKaYSSZ7c4DJyiq9MWbCVhh3F5cJYKzzNVHP0Co4mCrkLHwQYMHhOrSCVp2209axj77xAk5tDKg8mc1ZeRGDsVVtCEMHNYahgYEMzcE4bH/po+T3shhnl0c=',
+    id: '1bec75664cb1939429d2f18b0a431dac23c5557668ac28665fa4ce7b2024c38a',
+    sig: 'ff395138e65c57fa113c59c70e60f82a6ef47738a2de72fc9ab527c399f852836f7b74ce792b568ac7fec7986801d674c4881d87d21df4f87b4b413fc8bc0600',
+  },
+  applied: {
+    body: '{"status":"applied","path":"PLANS/agent files.md","sha256":"e62b5d89e5ee431c4431bed125f015eaf4b952c81d55d5577487a5f1efc89786"}',
+    created_at: 1700000005,
+    nonce: 6,
+    content: 'AgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAG2YpLVPS9j3qTMUV7xmqgMArZz1CjPEhhG0JsgG4XHf+FPtdlkCm4jFwS+VjJVE34cm3MoDwj2pcQhaj+htkGXJs4d7jd6KwsQ0BEMJzlNzuIPtLQz4n4ondlvElmfJ8A9ERMkc7h/IEgSUNSLF1J/9bVHdCtJeL7A08N2xOw5vsXZv/FO37yF0CVL7K6pCUlCPFHr6K/KbMaFHDFC8bu0Ajk',
+    id: '5bc47d506d8eb863d57d5c00308f8e864d0f201ce5e881d58be43ab4ab3492e3',
+    sig: '3cc169f878ebda8ff972e3864475b14184dd14d8b6a62f22e88f2a84955391e4c8902761553a78e345245c4d6e2ce809d594f1cc4447a998f062424f3944ada9',
+  },
+}
+
+// NIP-AF's Event 5, the owner's edit request, exactly as published.
+const EDIT_REQUEST: Event = {
+  kind: 4180,
+  pubkey: OWNER,
+  created_at: 1700000004,
+  tags: [['p', AGENT]],
+  content: 'AgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFxUvaeNKl0ciXDyss+prpTNPK3paTrOuWRaJv0G9O6yQ57/2WtCobF8+8BMczu9OQI4Q9KwSBdWkY8Ip329LNeWAYp5u5pPq6pcxk/n3lIITYflSIQ+xSL+Q7Z3J4Nl1W4sFSQVcEqz7vBIYEE1qQDNS9vhdTUr+iNPkyvK4eTC4HtGywJUG1vzo4lQxPLf9go1gQAgGTZd97QXNgYSm9wmuVLpCkQm34rQJWejJvvI7CTY5h5m6BsjqGG39EahG9EzE=',
+  id: '3fe347efff08d8f3da196d35a02d73207fe91cb463c8d122d9681af4552493f1',
+  sig: '06819ae9d529f977ebfb4e569efac6e232d13cbf197824f6302c373178b5d1e90228fa397217f58e10616dba1fd98d48e05ca673c2b7a400026df038a1fac0c9',
+}
+
+function expectFileVector(published: { event: Event; text: string }, vector: { body: string; d?: string; created_at: number; nonce: number; content: string; id: string; sig: string }) {
+  expect(published.text).toBe(vector.body)
+  if (vector.d) expect(published.event.tags).toEqual([['d', vector.d], ['p', OWNER]])
+  const content = encrypt(published.text, KEY, Buffer.from(vector.nonce.toString(16).padStart(64, '0'), 'hex'))
+  const id = getEventHash({ kind: published.event.kind, pubkey: AGENT, created_at: vector.created_at, tags: published.event.tags, content })
+  const sig = Buffer.from(schnorr.sign(Buffer.from(id, 'hex'), AGENT_KEY, new Uint8Array(32))).toString('hex')
+  expect({ content, id, sig }).toEqual({ content: vector.content, id: vector.id, sig: vector.sig })
+}
+
+test('shared files reproduce the NIP-AF test vectors: records, a tombstone for a file deleted while down, and an applied edit', async () => {
+  write('notes.md', 'hello, agent files\n')
+  write('PLANS/agent files.md', '# Plan\n')
+  write('logs/big.log', 'a'.repeat(70_000))
+  const relay = fakeRelay()
+  start(relay, ['notes.md', 'PLANS', 'logs'])
+  await until(() => opened(relay, 30180).length === 3)
+  const byPath = (path: string) => opened(relay, 30180).findLast(({ body }) => body.path === path)!
+  expectFileVector(byPath('notes.md'), FILES.notes)
+  expectFileVector(byPath('PLANS/agent files.md'), FILES.plan)
+  expectFileVector(byPath('logs/big.log'), FILES.big)
+
+  running.pop()!.close()
+  rmSync(join(dir, 'notes.md'))
+  start(relay, ['notes.md', 'PLANS', 'logs'])
+  await until(() => opened(relay, 30180).length === 4)
+  expectFileVector(opened(relay, 30180)[3]!, FILES.removed)
+  expect(opened(relay, 30180)[3]!.event.created_at).toBeGreaterThan(opened(relay, 30180)[0]!.event.created_at)
+
+  relay.feed(EDIT_REQUEST)
+  const answer = await until(() => opened(relay, 4181)[0])
+  expect(answer.event.tags).toEqual([['p', OWNER], ['e', EDIT_REQUEST.id]])
+  expectFileVector(answer, FILES.applied)
+  expect(readFileSync(join(dir, 'PLANS/agent files.md'), 'utf8')).toBe('# Plan\n\n- ship it\n')
+  expect(byPath('PLANS/agent files.md').body).toEqual({ path: 'PLANS/agent files.md', sha256: sha256('# Plan\n\n- ship it\n'), size: 18, content: '# Plan\n\n- ship it\n' })
+})
+
+test('heads that break NIP-AF are not heads, and a new record lands after the newest valid one', async () => {
+  write('notes.md', 'hello, agent files\n')
+  const relay = fakeRelay()
+  const future = Math.floor(Date.now() / 1000) + 600
+  const forged = (body: object, created_at: number) =>
+    relay.feed(finalizeEvent({ kind: 30180, created_at, tags: [['d', fileTag('notes.md')], ['p', OWNER]], content: encrypt(JSON.stringify(body), KEY) }, AGENT_KEY))
+  forged({ path: 'notes.md', sha256: sha256('hello, agent files\n'), size: 19, content: 'hello, agent files\n' }, future)
+  forged({ path: 'notes.md', sha256: sha256('hello, agent files\n'), size: 19, content: 'tampered\n' }, future + 5)
+  start(relay, ['notes.md'])
+  await Bun.sleep(300)
+  expect(opened(relay, 30180).length).toBe(2)
+
+  write('notes.md', 'changed\n')
+  await until(() => opened(relay, 30180).length === 3)
+  expect(opened(relay, 30180)[2]!.event.created_at).toBe(future + 1)
 })
