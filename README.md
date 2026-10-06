@@ -5,7 +5,7 @@
 > upstream, heals conflicts with Claude, runs `scripts/verify`, and commits the result
 > to `main`.
 >
-> - [`hub/`](hub/) gives every chat thread its own session ([thread-hub](patches/thread-hub/PATCH.md)).
+> - [`hub/`](hub/) gives every chat thread its own session ([hub](patches/hub/PATCH.md)).
 > - [`external_plugins/telegram`](external_plugins/telegram/) is the reworked channel
 >   ([telegram-topics](patches/telegram-topics/PATCH.md)), and
 >   [`external_plugins/discord`](external_plugins/discord/) its Discord counterpart
