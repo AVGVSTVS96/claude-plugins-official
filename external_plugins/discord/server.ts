@@ -3,12 +3,9 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { connect, type Socket } from 'net'
-import { homedir } from 'os'
-import { join } from 'path'
 
-const STATE_DIR = process.env.DISCORD_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'hex', 'discord')
-const SOCKET = join(STATE_DIR, 'hub.sock')
-const THREAD = process.env.HEX_THREAD
+const SOCKET = process.env.HEX_HUB
+const THREAD = process.env.HEX_CHANNEL?.startsWith('plugin:discord@') ? process.env.HEX_THREAD : undefined
 
 const mcp = new Server(
   { name: 'discord', version: '1.0.0' },
@@ -171,7 +168,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
 })
 
 function connectHub(): void {
-  const socket = connect(SOCKET)
+  const socket = connect(SOCKET!)
   let buffer = ''
   socket.setEncoding('utf8')
   socket.on('connect', () => {
@@ -210,7 +207,7 @@ function connectHub(): void {
 }
 
 mcp.oninitialized = () => {
-  if (THREAD) connectHub()
+  if (THREAD && SOCKET) connectHub()
 }
 
 await mcp.connect(new StdioServerTransport())

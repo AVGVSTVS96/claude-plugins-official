@@ -16,20 +16,24 @@ export type Hub = ReturnType<typeof startHub>
 // place() opens an empty thread on the client and returns its id and a link to it.
 export const clients = new Map<string, { hub: Hub; place: (name: string, where?: string) => Promise<{ thread: string; link: string }> }>()
 
-const HEX = join(homedir(), 'hex')
 const JOBS = join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'jobs')
 const IDLE_STOP = 30 * 60_000
+const RELAUNCH = 30_000
+const PRIVATE = /_BOT_TOKEN$|^HEX_/
 
-export function startHub({ stateDir, channel, main, call, state, failed, idleStop = IDLE_STOP, jobsDir = JOBS, hexDir = HEX }: {
+export function startHub({ stateDir, channel, main, mainName = 'main', call, state, failed, idleStop = IDLE_STOP, relaunch = RELAUNCH, jobsDir = JOBS, hexDir = process.cwd(), launcher = 'claude' }: {
   stateDir: string
   channel: string
   main?: string
+  mainName?: string
   call: Call
   state: State
   failed: Failed
   idleStop?: number
+  relaunch?: number
   jobsDir?: string
   hexDir?: string
+  launcher?: string
 }) {
   const registry = join(stateDir, 'threads.json')
   const socketPath = join(stateDir, 'hub.sock')
@@ -42,6 +46,8 @@ export function startHub({ stateDir, channel, main, call, state, failed, idleSto
   const retiring = new Set<string>()
   const leaving = new Map<string, (session: string) => void>()
   const plugin = channel.replace(/^plugin:/, '')
+  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !PRIVATE.test(name)))
+  let closed = false
 
   function read(): Record<string, Thread> {
     let text: string
@@ -66,10 +72,6 @@ export function startHub({ stateDir, channel, main, call, state, failed, idleSto
   function save() {
     writeFileSync(`${registry}.tmp`, JSON.stringify(threads, null, 2) + '\n')
     renameSync(`${registry}.tmp`, registry)
-  }
-
-  function settings() {
-    return JSON.parse(readFileSync(join(hexDir, '.claude', 'thread.json'), 'utf8'))
   }
 
   function setState(thread: string, working: boolean) {
@@ -153,10 +155,10 @@ export function startHub({ stateDir, channel, main, call, state, failed, idleSto
   }
 
   function launch(thread: string, name: string, prompt?: string, fork?: string) {
-    if (thread === main || launching.has(thread)) return
+    if (launching.has(thread)) return
     retiring.delete(thread)
     const known = threads[thread] ?? (threads[thread] = { name })
-    setState(thread, true)
+    if (prompt || queued.has(thread)) setState(thread, true)
     launching.set(thread, undefined)
     if (fork) return start(known, thread, prompt, fork)
     if (!known.session) return start(known, thread, prompt)
@@ -180,24 +182,25 @@ export function startHub({ stateDir, channel, main, call, state, failed, idleSto
   }
 
   function start(known: Thread, thread: string, prompt?: string, fork?: string) {
-    let launcher
+    const bound = { HEX_CHANNEL: channel, HEX_THREAD: thread, HEX_HUB: socketPath, ...(thread === main ? { HEX_MAIN: '1' } : {}) }
+    let child
     try {
-      launcher = spawn('claude', [
+      child = spawn(launcher, [
         '--bg',
         '--channels', channel,
         '--name', known.name,
         ...(fork ? ['--resume', fork, '--fork-session'] : known.session ? ['--resume', known.session] : []),
-        '--settings', JSON.stringify({ ...settings(), enabledPlugins: { [plugin]: true }, env: { HEX_THREAD: thread, HEX_HUB: socketPath } }),
+        '--settings', JSON.stringify({ enabledPlugins: { [plugin]: true }, env: bound }),
         ...(prompt ? [prompt] : []),
-      ], { cwd: hexDir, stdio: ['ignore', 'pipe', 'pipe'] })
+      ], { cwd: hexDir, env, stdio: ['ignore', 'pipe', 'pipe'] })
     } catch (error) {
       return fail(thread, String(error))
     }
     let output = ''
-    launcher.stdout.on('data', chunk => (output += chunk))
-    launcher.stderr.on('data', chunk => (output += chunk))
-    launcher.on('error', error => fail(thread, error.message))
-    launcher.on('close', code => {
+    child.stdout.on('data', chunk => (output += chunk))
+    child.stderr.on('data', chunk => (output += chunk))
+    child.on('error', error => fail(thread, error.message))
+    child.on('close', code => {
       const job = output.match(/backgrounded · (\w+)/)?.[1]
       if (job) watchJob(thread, job)
       else fail(thread, output.trim() || `claude --bg exited with code ${code}`)
@@ -285,9 +288,19 @@ export function startHub({ stateDir, channel, main, call, state, failed, idleSto
       live.delete(thread)
       setState(thread, false)
       if (leaving.has(thread)) forget(thread)
+      if (thread === main) setTimeout(revive, relaunch)
     })
     socket.on('error', () => {})
   }).listen(socketPath)
+
+  // The main thread is always running: started with the hub, and started again
+  // when its session has been gone long enough that it isn't just reconnecting.
+  function revive() {
+    if (!main || closed || live.has(main)) return
+    rename(main, mainName)
+    launch(main, mainName)
+  }
+  revive()
 
   return {
     deliver,
@@ -300,7 +313,10 @@ export function startHub({ stateDir, channel, main, call, state, failed, idleSto
     retire,
     find,
     rename,
-    close: () => server.close(),
+    close: () => {
+      closed = true
+      server.close()
+    },
   }
 }
 

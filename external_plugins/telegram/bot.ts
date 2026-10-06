@@ -3,7 +3,7 @@ import { Bot, GrammyError, InputFile, type Context } from 'grammy'
 import type { ReactionTypeEmoji } from 'grammy/types'
 import { readFileSync, writeFileSync, mkdirSync, statSync, realpathSync, chmodSync } from 'fs'
 import { homedir } from 'os'
-import { join, extname, sep } from 'path'
+import { basename, join, extname, sep } from 'path'
 import { startHub, clients, move, type Message } from '../../hub/hub.ts'
 
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'hex', 'telegram')
@@ -59,8 +59,8 @@ function loadAccess(): Access {
 const MAX_CHUNK_LIMIT = 4096
 const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
 
-// reply's files param takes any path, but the server's own state (the token
-// in .env) is the one thing Claude has no reason to ever send.
+// reply's files param takes any path, but channel state and .env files (tokens)
+// are the things Claude has no reason to ever send.
 function assertSendable(f: string): void {
   let real, stateReal: string
   try {
@@ -71,6 +71,7 @@ function assertSendable(f: string): void {
   if (real.startsWith(stateReal + sep) && !real.startsWith(inbox + sep)) {
     throw new Error(`refusing to send channel state: ${f}`)
   }
+  if (basename(real) === '.env') throw new Error(`refusing to send secrets: ${f}`)
 }
 
 function chunk(text: string, limit: number, mode: 'length' | 'newline'): string[] {
@@ -298,6 +299,8 @@ const hub = startHub({
   channel: 'plugin:telegram@hex',
   main: MAIN,
   hexDir: process.env.HEX_DIR,
+  launcher: process.env.HEX_LAUNCHER,
+  mainName: process.env.HEX_NAME,
   call: callOrForget,
   state: showTyping,
   failed: (thread, reason) => {

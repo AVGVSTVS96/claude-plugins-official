@@ -17,8 +17,7 @@ const sockets: Socket[] = []
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'hub-'))
-  mkdirSync(join(dir, 'hex', '.claude'), { recursive: true })
-  writeFileSync(join(dir, 'hex', '.claude', 'thread.json'), JSON.stringify({ enabledPlugins: { 'telegram@hex': true } }))
+  mkdirSync(join(dir, 'hex'), { recursive: true })
   mkdirSync(join(dir, 'jobs', 'job12345'), { recursive: true })
   const fake = join(dir, 'claude')
   writeFileSync(fake, `#!/bin/sh
@@ -37,7 +36,7 @@ afterEach(() => {
   process.env.PATH = process.env.PATH!.split(':').slice(1).join(':')
 })
 
-function start(options: { main?: string; idleStop?: number; registry?: object; agents?: object[] } = {}) {
+function start(options: { main?: string; idleStop?: number; relaunch?: number; launcher?: string; registry?: object; agents?: object[] } = {}) {
   if (options.registry) writeFileSync(join(dir, 'threads.json'), JSON.stringify(options.registry))
   if (options.agents) writeFileSync(join(dir, 'agents'), JSON.stringify(options.agents))
   const seen: [string, boolean][] = (states = [])
@@ -52,6 +51,9 @@ function start(options: { main?: string; idleStop?: number; registry?: object; a
     jobsDir: join(dir, 'jobs'),
     hexDir: join(dir, 'hex'),
     idleStop: options.idleStop,
+    relaunch: options.relaunch,
+    launcher: options.launcher,
+    mainName: 'hex',
   })
 }
 
@@ -103,7 +105,7 @@ test('a message for a new thread starts a session bound to that thread', async (
   const args = await launched()
   expect(args.slice(0, 5)).toEqual(['--bg', '--channels', CHANNEL, '--name', 'Desk anchors'])
   expect(args).not.toContain('--resume')
-  expect(settingsOf(args).env).toEqual({ HEX_THREAD: 'chat:7', HEX_HUB: join(dir, 'hub.sock') })
+  expect(settingsOf(args).env).toEqual({ HEX_CHANNEL: CHANNEL, HEX_THREAD: 'chat:7', HEX_HUB: join(dir, 'hub.sock') })
   expect(states).toEqual([['chat:7', true]])
 })
 
@@ -145,15 +147,39 @@ test('a thread whose session is still running is never relaunched', async () => 
   expect(received[0].content).toBe('hi')
 })
 
-test('the main thread is never launched by the hub', async () => {
+test('the main thread starts with the hub, under its name, with no prompt and no typing', async () => {
   start({ main: 'chat' })
-  hub.deliver('chat', 'main', message)
-  await Bun.sleep(150)
-  expect(calls()).toEqual([])
+  const args = await launched()
+  expect(args.slice(0, 5)).toEqual(['--bg', '--channels', CHANNEL, '--name', 'hex'])
+  expect(args.at(-2)).toBe('--settings')
+  expect(settingsOf(args).env.HEX_MAIN).toBe('1')
+  expect(states).toEqual([])
+})
+
+test('a running main thread is left to reconnect, and gets its messages when it does', async () => {
+  start({ main: 'chat', registry: { chat: { name: 'chat', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42 }] })
+  hub.deliver('chat', 'hex', message)
+  await until(() => calls().length)
+  await Bun.sleep(100)
+  expect(calls()).toEqual([['agents', '--json']])
+  expect(registry().chat.name).toBe('hex')
   const { received } = await session('chat')
   await until(() => received.length)
   expect(received[0].content).toBe('hi')
 })
+
+test('a main thread whose session is gone is resumed again, and is never stopped for being idle', async () => {
+  start({ main: 'chat', registry: { chat: { name: 'hex', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42 }], relaunch: 50, idleStop: 20 })
+  const { socket, send } = await session('chat')
+  send({ type: 'state', thread: 'chat', busy: false })
+  await Bun.sleep(100)
+  expect(calls().filter(args => args[0] === 'stop')).toEqual([])
+  writeFileSync(join(dir, 'agents'), '[]')
+  socket.destroy()
+  const args = await launched()
+  expect(args[args.indexOf('--resume') + 1]).toBe(SESSION)
+})
+
 
 test('tool calls act on the calling session\'s own thread', async () => {
   start()
@@ -224,9 +250,8 @@ test('an unreadable threads.json is moved aside instead of overwritten, and a ma
   expect(() => hub.find('chat:9')).toThrow()
 })
 
-test('a thread.json that can\'t be read fails the start instead of leaving it hanging', async () => {
-  writeFileSync(join(dir, 'hex', '.claude', 'thread.json'), '{')
-  start()
+test('a launcher that can\'t run fails the start instead of leaving it hanging', async () => {
+  start({ launcher: join(dir, 'missing') })
   hub.deliver('chat:7', 'Desk anchors', message)
   await until(() => failures.length)
   expect(failures[0]![0]).toBe('chat:7')
@@ -325,11 +350,33 @@ test('threads are found by name or id, and renames are kept', () => {
   expect(registry()['chat:8'].name).toBe('Theo clips')
 })
 
-test('the channel plugin is enabled for the session whatever thread.json says', async () => {
-  writeFileSync(join(dir, 'hex', '.claude', 'thread.json'), JSON.stringify({ enabledPlugins: { 'telegram@hex': false, 'other@hex': true } }))
+test('a session\'s settings enable only its channel plugin', async () => {
   start()
   hub.open('chat:7', 'Desk anchors', 'go')
+  expect(Object.keys(settingsOf(await launched()))).toEqual(['enabledPlugins', 'env'])
   expect(settingsOf(await launched()).enabledPlugins).toEqual({ 'telegram@hex': true })
+})
+
+test('sessions start through the launcher, in the hex folder, with nothing of the hub\'s own in its env', async () => {
+  const launcher = join(dir, 'launch')
+  writeFileSync(launcher, `#!/bin/sh
+pwd > "${dir}/cwd"
+env | grep -c -e _BOT_TOKEN= -e ^HEX_ > "${dir}/leaked"
+exec claude "$@"
+`)
+  chmodSync(launcher, 0o755)
+  process.env.TELEGRAM_BOT_TOKEN = 'secret'
+  process.env.HEX_DIR = 'somewhere'
+  try {
+    start({ launcher })
+    hub.open('chat:7', 'Desk anchors', 'go')
+    await launched()
+  } finally {
+    delete process.env.TELEGRAM_BOT_TOKEN
+    delete process.env.HEX_DIR
+  }
+  expect(readFileSync(join(dir, 'cwd'), 'utf8').trim()).toBe(join(dir, 'hex'))
+  expect(readFileSync(join(dir, 'leaked'), 'utf8').trim()).toBe('0')
 })
 
 test('releasing an idle thread stops its session, then forgets it once the socket closes', async () => {

@@ -4,7 +4,7 @@ id: telegram-topics
 summary: Rework the Telegram channel so every forum topic in a group is its own Claude Code session, through the thread hub.
 baseline: d4226d062928f8d9505dbdeadd10217d23361052
 patch_file: telegram-topics.patch
-patch_sha256: 96fb3ccf5f026191fd723f155a906ec5b9d933b682d970cd86dd2dc7e7ecaeff
+patch_sha256: 2da0102baf2147578a2af0b3d8ba90836baf5ec6d3b9c105dda303b43ec881fa
 ---
 
 ## Intent
@@ -16,8 +16,9 @@ serves a session per forum topic through `hub/`:
   and the Telegram calls. It runs in the hub service (`hub/serve.ts`), embeds
   the hub, and maps each forum topic, or a plain chat, to a thread.
 - `server.ts` keeps upstream's tools and instructions as the channel every
-  session loads. It learns its thread from `HEX_THREAD`, connects to the
-  hub, and forwards its calls there.
+  session loads. It learns its thread and its hub's socket from the session's
+  env (`HEX_THREAD`, `HEX_HUB`), connects only when
+  `HEX_CHANNEL` names this plugin, and forwards its calls there.
 
 On top of upstream:
 
@@ -32,6 +33,8 @@ On top of upstream:
 - The typing indicator follows the session's real busy state.
 - DMs to the bot are forwarded into the main thread (`HEX_MAIN_THREAD`).
 - A session that fails to start says why, in its topic.
+- `reply` refuses to attach channel state or any `.env` file.
+- General is the hub's main thread, named after `HEX_NAME`.
 
 ## Invariants
 

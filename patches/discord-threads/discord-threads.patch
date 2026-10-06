@@ -169,7 +169,7 @@ index 550f06acb7eec0c22b5e35bd91cf90ae632aeec7..00000000000000000000000000000000
 -}
 -```
 diff --git a/external_plugins/discord/README.md b/external_plugins/discord/README.md
-index ad04f6fa437bfa013f72f71de2b460f3eedeeeee..60944051b5b407071a701844ab8d215fb04faf69 100644
+index ad04f6fa437bfa013f72f71de2b460f3eedeeeee..ba2d961c0f87a99cc5f532545276a2402bd2a8eb 100644
 --- a/external_plugins/discord/README.md
 +++ b/external_plugins/discord/README.md
 @@ -1,111 +1,8 @@
@@ -179,8 +179,8 @@ index ad04f6fa437bfa013f72f71de2b460f3eedeeeee..60944051b5b407071a701844ab8d215f
 +A fork of the official Discord channel where every thread in a server is its own Claude Code session, Claude-tag style: tag the bot in a channel and it starts a thread on your message, with a fresh session working inside it. Its intent, invariants and what changed from upstream live in [`patches/discord-threads/PATCH.md`](../../patches/discord-threads/PATCH.md).
  
 -When the bot receives a message, the MCP server forwards it to Claude and provides tools to reply, react, and edit messages.
-+- `bot.ts` holds the one gateway connection. It runs in the hub service (`bun hub/serve.ts`) next to Telegram, so a conversation can move between them. It runs sessions in `HEX_DIR`, `~/hex` by default.
-+- `server.ts` is the channel each session loads. A session learns its thread from `HEX_THREAD`.
++- `bot.ts` holds the one gateway connection. It runs in the hub service (`bun hub/serve.ts`) next to Telegram, so a conversation can move between them. It starts sessions in `HEX_DIR` (the service's folder by default) through `HEX_LAUNCHER` (`claude` by default).
++- `server.ts` is the channel each session loads. A session learns its thread and its hub from `HEX_THREAD` and `HEX_HUB`.
  
 -## Prerequisites
 -
@@ -290,10 +290,10 @@ index ad04f6fa437bfa013f72f71de2b460f3eedeeeee..60944051b5b407071a701844ab8d215f
 +The bot token lives in `~/.claude/channels/hex/discord/.env` as `DISCORD_BOT_TOKEN=…`, and `access.json` there holds `allowFrom`, the Discord user ids allowed to talk to it. The bot needs the Message Content intent, and in its server: View Channels, Send Messages, Send Messages in Threads, Create Public Threads, Manage Threads, Read Message History, Attach Files and Add Reactions.
 diff --git a/external_plugins/discord/bot.ts b/external_plugins/discord/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..017d060b05b66142b0195b267a839d02163a1b12
+index 0000000000000000000000000000000000000000..dbc774d1d446b1e37b8f62f52f141c31cc7db11c
 --- /dev/null
 +++ b/external_plugins/discord/bot.ts
-@@ -0,0 +1,387 @@
+@@ -0,0 +1,389 @@
 +#!/usr/bin/env bun
 +import {
 +  Client,
@@ -306,7 +306,7 @@ index 0000000000000000000000000000000000000000..017d060b05b66142b0195b267a839d02
 +} from 'discord.js'
 +import { readFileSync, writeFileSync, mkdirSync, statSync, realpathSync, chmodSync } from 'fs'
 +import { homedir } from 'os'
-+import { join, sep } from 'path'
++import { basename, join, sep } from 'path'
 +import { startHub, clients, move, type Message } from '../../hub/hub.ts'
 +
 +const STATE_DIR = process.env.DISCORD_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'hex', 'discord')
@@ -360,8 +360,8 @@ index 0000000000000000000000000000000000000000..017d060b05b66142b0195b267a839d02
 +const MAX_CHUNK_LIMIT = 2000
 +const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 +
-+// reply's files param takes any path, but the server's own state (the token
-+// in .env) is the one thing Claude has no reason to ever send.
++// reply's files param takes any path, but channel state and .env files (tokens)
++// are the things Claude has no reason to ever send.
 +function assertSendable(f: string): void {
 +  let real, stateReal: string
 +  try {
@@ -372,6 +372,7 @@ index 0000000000000000000000000000000000000000..017d060b05b66142b0195b267a839d02
 +  if (real.startsWith(stateReal + sep) && !real.startsWith(inbox + sep)) {
 +    throw new Error(`refusing to send channel state: ${f}`)
 +  }
++  if (basename(real) === '.env') throw new Error(`refusing to send secrets: ${f}`)
 +}
 +
 +function chunk(text: string, limit: number, mode: 'length' | 'newline'): string[] {
@@ -606,6 +607,7 @@ index 0000000000000000000000000000000000000000..017d060b05b66142b0195b267a839d02
 +      void threadChannel(thread).then(ch => ch.send(`Couldn't start this thread's session: ${reason}`)).catch(() => {})
 +    },
 +    hexDir: process.env.HEX_DIR,
++    launcher: process.env.HEX_LAUNCHER,
 +  })
 +
 +  clients.set('discord', { hub, place })
@@ -615,7 +617,7 @@ index 0000000000000000000000000000000000000000..017d060b05b66142b0195b267a839d02
 +  async function threadOf(msg: DiscordMessage): Promise<ThreadChannel | undefined> {
 +    if (msg.channel.isThread()) return msg.channel
 +    if (msg.channel.type !== ChannelType.GuildText || !client.user || !msg.mentions.has(client.user)) return
-+    const words = msg.content.replace(/<@!?\d+>/g, '').trim().split(/\s+/).filter(Boolean)
++    const words = msg.content.replace(/<@[!&]?\d+>/g, '').trim().split(/\s+/).filter(Boolean)
 +    return msg.startThread({ name: words.slice(0, 2).join(' ') || 'New thread' })
 +  }
 +
@@ -641,7 +643,7 @@ index 0000000000000000000000000000000000000000..017d060b05b66142b0195b267a839d02
 +    }
 +
 +    const message: Message = {
-+      content: msg.content.replace(/<@!?\d+>/g, '').trim() || (atts.length > 0 ? '(attachment)' : ''),
++      content: msg.content.replace(/<@[!&]?\d+>/g, '').trim() || (atts.length > 0 ? '(attachment)' : ''),
 +      meta: {
 +        chat_id: ch.id,
 +        message_id: msg.id,
@@ -701,10 +703,10 @@ index eac89c3befd8ebb90758a9acdf7f400de8c9f298..87aff60aefe5d5610abfa8d4e6e2b719
    "dependencies": {
      "@modelcontextprotocol/sdk": "^1.0.0",
 diff --git a/external_plugins/discord/server.ts b/external_plugins/discord/server.ts
-index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..d652754ae2384802947a40f70f6e1e341d7b4cb6 100644
+index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..3c28d949fb76e203ce91ebb79bb996bfb22297b1 100644
 --- a/external_plugins/discord/server.ts
 +++ b/external_plugins/discord/server.ts
-@@ -1,533 +1,43 @@
+@@ -1,533 +1,40 @@
  #!/usr/bin/env bun
 -/**
 - * Discord channel for Claude Code.
@@ -738,9 +740,7 @@ index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..d652754ae2384802947a40f70f6e1e34
 -} from 'discord.js'
 -import { randomBytes } from 'crypto'
 -import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync } from 'fs'
-+import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
-+import { connect, type Socket } from 'net'
- import { homedir } from 'os'
+-import { homedir } from 'os'
 -import { join, sep } from 'path'
 -
 -const STATE_DIR = process.env.DISCORD_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'discord')
@@ -1107,7 +1107,8 @@ index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..d652754ae2384802947a40f70f6e1e34
 -  }
 -  return ch
 -}
-+import { join } from 'path'
++import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
++import { connect, type Socket } from 'net'
  
 -// Outbound gate — tools can only target chats the inbound gate would deliver
 -// from. DM channel ID ≠ user ID, so we inspect the fetched channel's type.
@@ -1146,9 +1147,8 @@ index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..d652754ae2384802947a40f70f6e1e34
 -function safeAttName(att: Attachment): string {
 -  return (att.name ?? att.id).replace(/[\[\]\r\n;]/g, '_')
 -}
-+const STATE_DIR = process.env.DISCORD_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'hex', 'discord')
-+const SOCKET = join(STATE_DIR, 'hub.sock')
-+const THREAD = process.env.HEX_THREAD
++const SOCKET = process.env.HEX_HUB
++const THREAD = process.env.HEX_CHANNEL?.startsWith('plugin:discord@') ? process.env.HEX_THREAD : undefined
  
  const mcp = new Server(
    { name: 'discord', version: '1.0.0' },
@@ -1251,7 +1251,7 @@ index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..d652754ae2384802947a40f70f6e1e34
            reply_to: {
              type: 'string',
              description: 'Message ID to thread under. Use message_id from the inbound <channel> block, or an id from fetch_messages.',
-@@ -538,7 +48,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
+@@ -538,7 +45,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
              description: 'Absolute file paths to attach (images, logs, etc). Max 10 files, 25MB each.',
            },
          },
@@ -1260,7 +1260,7 @@ index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..d652754ae2384802947a40f70f6e1e34
        },
      },
      {
-@@ -547,11 +57,10 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
+@@ -547,11 +54,10 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
        inputSchema: {
          type: 'object',
          properties: {
@@ -1273,7 +1273,7 @@ index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..d652754ae2384802947a40f70f6e1e34
        },
      },
      {
-@@ -560,341 +69,151 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
+@@ -560,341 +66,151 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
        inputSchema: {
          type: 'object',
          properties: {
@@ -1579,7 +1579,7 @@ index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..d652754ae2384802947a40f70f6e1e34
 -    method: 'notifications/claude/channel/permission',
 -    params: { request_id, behavior },
 +function connectHub(): void {
-+  const socket = connect(SOCKET)
++  const socket = connect(SOCKET!)
 +  let buffer = ''
 +  socket.setEncoding('utf8')
 +  socket.on('connect', () => {
@@ -1714,7 +1714,7 @@ index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..d652754ae2384802947a40f70f6e1e34
 -  process.stderr.write(`discord channel: gateway connected as ${c.user.tag}\n`)
 -})
 +mcp.oninitialized = () => {
-+  if (THREAD) connectHub()
++  if (THREAD && SOCKET) connectHub()
 +}
  
 -client.login(TOKEN).catch(err => {

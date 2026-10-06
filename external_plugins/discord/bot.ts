@@ -10,7 +10,7 @@ import {
 } from 'discord.js'
 import { readFileSync, writeFileSync, mkdirSync, statSync, realpathSync, chmodSync } from 'fs'
 import { homedir } from 'os'
-import { join, sep } from 'path'
+import { basename, join, sep } from 'path'
 import { startHub, clients, move, type Message } from '../../hub/hub.ts'
 
 const STATE_DIR = process.env.DISCORD_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'hex', 'discord')
@@ -64,8 +64,8 @@ function loadAccess(): Access {
 const MAX_CHUNK_LIMIT = 2000
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 
-// reply's files param takes any path, but the server's own state (the token
-// in .env) is the one thing Claude has no reason to ever send.
+// reply's files param takes any path, but channel state and .env files (tokens)
+// are the things Claude has no reason to ever send.
 function assertSendable(f: string): void {
   let real, stateReal: string
   try {
@@ -76,6 +76,7 @@ function assertSendable(f: string): void {
   if (real.startsWith(stateReal + sep) && !real.startsWith(inbox + sep)) {
     throw new Error(`refusing to send channel state: ${f}`)
   }
+  if (basename(real) === '.env') throw new Error(`refusing to send secrets: ${f}`)
 }
 
 function chunk(text: string, limit: number, mode: 'length' | 'newline'): string[] {
@@ -310,6 +311,7 @@ function serve(token: string) {
       void threadChannel(thread).then(ch => ch.send(`Couldn't start this thread's session: ${reason}`)).catch(() => {})
     },
     hexDir: process.env.HEX_DIR,
+    launcher: process.env.HEX_LAUNCHER,
   })
 
   clients.set('discord', { hub, place })
@@ -319,7 +321,7 @@ function serve(token: string) {
   async function threadOf(msg: DiscordMessage): Promise<ThreadChannel | undefined> {
     if (msg.channel.isThread()) return msg.channel
     if (msg.channel.type !== ChannelType.GuildText || !client.user || !msg.mentions.has(client.user)) return
-    const words = msg.content.replace(/<@!?\d+>/g, '').trim().split(/\s+/).filter(Boolean)
+    const words = msg.content.replace(/<@[!&]?\d+>/g, '').trim().split(/\s+/).filter(Boolean)
     return msg.startThread({ name: words.slice(0, 2).join(' ') || 'New thread' })
   }
 
@@ -345,7 +347,7 @@ function serve(token: string) {
     }
 
     const message: Message = {
-      content: msg.content.replace(/<@!?\d+>/g, '').trim() || (atts.length > 0 ? '(attachment)' : ''),
+      content: msg.content.replace(/<@[!&]?\d+>/g, '').trim() || (atts.length > 0 ? '(attachment)' : ''),
       meta: {
         chat_id: ch.id,
         message_id: msg.id,

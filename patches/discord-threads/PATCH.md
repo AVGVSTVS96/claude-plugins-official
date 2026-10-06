@@ -4,7 +4,7 @@ id: discord-threads
 summary: Rework the Discord channel so every thread in a server is its own Claude Code session, Claude-tag style, through the thread hub.
 baseline: d4226d062928f8d9505dbdeadd10217d23361052
 patch_file: discord-threads.patch
-patch_sha256: db87ddd7a61008b59bfbb420921713238a8d415c311a31144a33236a39f30235
+patch_sha256: 5e6f6e3f5862e690648dfb096a5ecacd415af679da8064091435a864b6e814fd
 ---
 
 ## Intent
@@ -17,8 +17,9 @@ session per Discord thread through `hub/`:
   Discord calls. It runs in the hub service (`hub/serve.ts`), embeds the hub,
   and maps each thread to its own session by the thread's channel id.
 - `server.ts` keeps upstream's tools and instructions as the channel every
-  session loads. It learns its thread from `HEX_THREAD`, connects to the
-  hub, and forwards its calls there.
+  session loads. It learns its thread and its hub's socket from the session's
+  env (`HEX_THREAD`, `HEX_HUB`), connects only when
+  `HEX_CHANNEL` names this plugin, and forwards its calls there.
 
 Discord is the place for deeper work, Claude-tag style:
 
@@ -36,6 +37,9 @@ Discord is the place for deeper work, Claude-tag style:
 - `fetch_messages` reads the thread's own history.
 - The typing indicator follows the session's real busy state.
 - A session that fails to start says why, in its thread.
+- `reply` refuses to attach channel state or any `.env` file.
+- User, nickname and role mentions are stripped from a message and from the
+  thread name it starts.
 
 ## Invariants
 

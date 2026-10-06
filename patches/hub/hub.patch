@@ -1,9 +1,9 @@
 diff --git a/hub/hub.test.ts b/hub/hub.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..8d4299b8e96187c9ea65384f39aa68d6ff9ec95e
+index 0000000000000000000000000000000000000000..1d760a641dd611286d00cf3a362dc667a33255d5
 --- /dev/null
 +++ b/hub/hub.test.ts
-@@ -0,0 +1,398 @@
+@@ -0,0 +1,445 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { connect, type Socket } from 'net'
 +import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, chmodSync, existsSync } from 'fs'
@@ -23,8 +23,7 @@ index 0000000000000000000000000000000000000000..8d4299b8e96187c9ea65384f39aa68d6
 +
 +beforeEach(() => {
 +  dir = mkdtempSync(join(tmpdir(), 'hub-'))
-+  mkdirSync(join(dir, 'hex', '.claude'), { recursive: true })
-+  writeFileSync(join(dir, 'hex', '.claude', 'thread.json'), JSON.stringify({ enabledPlugins: { 'telegram@hex': true } }))
++  mkdirSync(join(dir, 'hex'), { recursive: true })
 +  mkdirSync(join(dir, 'jobs', 'job12345'), { recursive: true })
 +  const fake = join(dir, 'claude')
 +  writeFileSync(fake, `#!/bin/sh
@@ -43,7 +42,7 @@ index 0000000000000000000000000000000000000000..8d4299b8e96187c9ea65384f39aa68d6
 +  process.env.PATH = process.env.PATH!.split(':').slice(1).join(':')
 +})
 +
-+function start(options: { main?: string; idleStop?: number; registry?: object; agents?: object[] } = {}) {
++function start(options: { main?: string; idleStop?: number; relaunch?: number; launcher?: string; registry?: object; agents?: object[] } = {}) {
 +  if (options.registry) writeFileSync(join(dir, 'threads.json'), JSON.stringify(options.registry))
 +  if (options.agents) writeFileSync(join(dir, 'agents'), JSON.stringify(options.agents))
 +  const seen: [string, boolean][] = (states = [])
@@ -58,6 +57,9 @@ index 0000000000000000000000000000000000000000..8d4299b8e96187c9ea65384f39aa68d6
 +    jobsDir: join(dir, 'jobs'),
 +    hexDir: join(dir, 'hex'),
 +    idleStop: options.idleStop,
++    relaunch: options.relaunch,
++    launcher: options.launcher,
++    mainName: 'hex',
 +  })
 +}
 +
@@ -109,7 +111,7 @@ index 0000000000000000000000000000000000000000..8d4299b8e96187c9ea65384f39aa68d6
 +  const args = await launched()
 +  expect(args.slice(0, 5)).toEqual(['--bg', '--channels', CHANNEL, '--name', 'Desk anchors'])
 +  expect(args).not.toContain('--resume')
-+  expect(settingsOf(args).env).toEqual({ HEX_THREAD: 'chat:7', HEX_HUB: join(dir, 'hub.sock') })
++  expect(settingsOf(args).env).toEqual({ HEX_CHANNEL: CHANNEL, HEX_THREAD: 'chat:7', HEX_HUB: join(dir, 'hub.sock') })
 +  expect(states).toEqual([['chat:7', true]])
 +})
 +
@@ -151,15 +153,39 @@ index 0000000000000000000000000000000000000000..8d4299b8e96187c9ea65384f39aa68d6
 +  expect(received[0].content).toBe('hi')
 +})
 +
-+test('the main thread is never launched by the hub', async () => {
++test('the main thread starts with the hub, under its name, with no prompt and no typing', async () => {
 +  start({ main: 'chat' })
-+  hub.deliver('chat', 'main', message)
-+  await Bun.sleep(150)
-+  expect(calls()).toEqual([])
++  const args = await launched()
++  expect(args.slice(0, 5)).toEqual(['--bg', '--channels', CHANNEL, '--name', 'hex'])
++  expect(args.at(-2)).toBe('--settings')
++  expect(settingsOf(args).env.HEX_MAIN).toBe('1')
++  expect(states).toEqual([])
++})
++
++test('a running main thread is left to reconnect, and gets its messages when it does', async () => {
++  start({ main: 'chat', registry: { chat: { name: 'chat', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42 }] })
++  hub.deliver('chat', 'hex', message)
++  await until(() => calls().length)
++  await Bun.sleep(100)
++  expect(calls()).toEqual([['agents', '--json']])
++  expect(registry().chat.name).toBe('hex')
 +  const { received } = await session('chat')
 +  await until(() => received.length)
 +  expect(received[0].content).toBe('hi')
 +})
++
++test('a main thread whose session is gone is resumed again, and is never stopped for being idle', async () => {
++  start({ main: 'chat', registry: { chat: { name: 'hex', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42 }], relaunch: 50, idleStop: 20 })
++  const { socket, send } = await session('chat')
++  send({ type: 'state', thread: 'chat', busy: false })
++  await Bun.sleep(100)
++  expect(calls().filter(args => args[0] === 'stop')).toEqual([])
++  writeFileSync(join(dir, 'agents'), '[]')
++  socket.destroy()
++  const args = await launched()
++  expect(args[args.indexOf('--resume') + 1]).toBe(SESSION)
++})
++
 +
 +test('tool calls act on the calling session\'s own thread', async () => {
 +  start()
@@ -230,9 +256,8 @@ index 0000000000000000000000000000000000000000..8d4299b8e96187c9ea65384f39aa68d6
 +  expect(() => hub.find('chat:9')).toThrow()
 +})
 +
-+test('a thread.json that can\'t be read fails the start instead of leaving it hanging', async () => {
-+  writeFileSync(join(dir, 'hex', '.claude', 'thread.json'), '{')
-+  start()
++test('a launcher that can\'t run fails the start instead of leaving it hanging', async () => {
++  start({ launcher: join(dir, 'missing') })
 +  hub.deliver('chat:7', 'Desk anchors', message)
 +  await until(() => failures.length)
 +  expect(failures[0]![0]).toBe('chat:7')
@@ -331,11 +356,33 @@ index 0000000000000000000000000000000000000000..8d4299b8e96187c9ea65384f39aa68d6
 +  expect(registry()['chat:8'].name).toBe('Theo clips')
 +})
 +
-+test('the channel plugin is enabled for the session whatever thread.json says', async () => {
-+  writeFileSync(join(dir, 'hex', '.claude', 'thread.json'), JSON.stringify({ enabledPlugins: { 'telegram@hex': false, 'other@hex': true } }))
++test('a session\'s settings enable only its channel plugin', async () => {
 +  start()
 +  hub.open('chat:7', 'Desk anchors', 'go')
++  expect(Object.keys(settingsOf(await launched()))).toEqual(['enabledPlugins', 'env'])
 +  expect(settingsOf(await launched()).enabledPlugins).toEqual({ 'telegram@hex': true })
++})
++
++test('sessions start through the launcher, in the hex folder, with nothing of the hub\'s own in its env', async () => {
++  const launcher = join(dir, 'launch')
++  writeFileSync(launcher, `#!/bin/sh
++pwd > "${dir}/cwd"
++env | grep -c -e _BOT_TOKEN= -e ^HEX_ > "${dir}/leaked"
++exec claude "$@"
++`)
++  chmodSync(launcher, 0o755)
++  process.env.TELEGRAM_BOT_TOKEN = 'secret'
++  process.env.HEX_DIR = 'somewhere'
++  try {
++    start({ launcher })
++    hub.open('chat:7', 'Desk anchors', 'go')
++    await launched()
++  } finally {
++    delete process.env.TELEGRAM_BOT_TOKEN
++    delete process.env.HEX_DIR
++  }
++  expect(readFileSync(join(dir, 'cwd'), 'utf8').trim()).toBe(join(dir, 'hex'))
++  expect(readFileSync(join(dir, 'leaked'), 'utf8').trim()).toBe('0')
 +})
 +
 +test('releasing an idle thread stops its session, then forgets it once the socket closes', async () => {
@@ -404,10 +451,10 @@ index 0000000000000000000000000000000000000000..8d4299b8e96187c9ea65384f39aa68d6
 +})
 diff --git a/hub/hub.ts b/hub/hub.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..3265578d6c02984b2f4d3b015e56eb76cf9317ac
+index 0000000000000000000000000000000000000000..3d15ccb40a2873f28dff02f5c0816fc504dfa25d
 --- /dev/null
 +++ b/hub/hub.ts
-@@ -0,0 +1,319 @@
+@@ -0,0 +1,335 @@
 +import { createServer, type Socket } from 'net'
 +import { execFile, spawn } from 'child_process'
 +import { readFileSync, writeFileSync, renameSync, rmSync, watch, type FSWatcher } from 'fs'
@@ -426,20 +473,24 @@ index 0000000000000000000000000000000000000000..3265578d6c02984b2f4d3b015e56eb76
 +// place() opens an empty thread on the client and returns its id and a link to it.
 +export const clients = new Map<string, { hub: Hub; place: (name: string, where?: string) => Promise<{ thread: string; link: string }> }>()
 +
-+const HEX = join(homedir(), 'hex')
 +const JOBS = join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'jobs')
 +const IDLE_STOP = 30 * 60_000
++const RELAUNCH = 30_000
++const PRIVATE = /_BOT_TOKEN$|^HEX_/
 +
-+export function startHub({ stateDir, channel, main, call, state, failed, idleStop = IDLE_STOP, jobsDir = JOBS, hexDir = HEX }: {
++export function startHub({ stateDir, channel, main, mainName = 'main', call, state, failed, idleStop = IDLE_STOP, relaunch = RELAUNCH, jobsDir = JOBS, hexDir = process.cwd(), launcher = 'claude' }: {
 +  stateDir: string
 +  channel: string
 +  main?: string
++  mainName?: string
 +  call: Call
 +  state: State
 +  failed: Failed
 +  idleStop?: number
++  relaunch?: number
 +  jobsDir?: string
 +  hexDir?: string
++  launcher?: string
 +}) {
 +  const registry = join(stateDir, 'threads.json')
 +  const socketPath = join(stateDir, 'hub.sock')
@@ -452,6 +503,8 @@ index 0000000000000000000000000000000000000000..3265578d6c02984b2f4d3b015e56eb76
 +  const retiring = new Set<string>()
 +  const leaving = new Map<string, (session: string) => void>()
 +  const plugin = channel.replace(/^plugin:/, '')
++  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !PRIVATE.test(name)))
++  let closed = false
 +
 +  function read(): Record<string, Thread> {
 +    let text: string
@@ -476,10 +529,6 @@ index 0000000000000000000000000000000000000000..3265578d6c02984b2f4d3b015e56eb76
 +  function save() {
 +    writeFileSync(`${registry}.tmp`, JSON.stringify(threads, null, 2) + '\n')
 +    renameSync(`${registry}.tmp`, registry)
-+  }
-+
-+  function settings() {
-+    return JSON.parse(readFileSync(join(hexDir, '.claude', 'thread.json'), 'utf8'))
 +  }
 +
 +  function setState(thread: string, working: boolean) {
@@ -563,10 +612,10 @@ index 0000000000000000000000000000000000000000..3265578d6c02984b2f4d3b015e56eb76
 +  }
 +
 +  function launch(thread: string, name: string, prompt?: string, fork?: string) {
-+    if (thread === main || launching.has(thread)) return
++    if (launching.has(thread)) return
 +    retiring.delete(thread)
 +    const known = threads[thread] ?? (threads[thread] = { name })
-+    setState(thread, true)
++    if (prompt || queued.has(thread)) setState(thread, true)
 +    launching.set(thread, undefined)
 +    if (fork) return start(known, thread, prompt, fork)
 +    if (!known.session) return start(known, thread, prompt)
@@ -590,24 +639,25 @@ index 0000000000000000000000000000000000000000..3265578d6c02984b2f4d3b015e56eb76
 +  }
 +
 +  function start(known: Thread, thread: string, prompt?: string, fork?: string) {
-+    let launcher
++    const bound = { HEX_CHANNEL: channel, HEX_THREAD: thread, HEX_HUB: socketPath, ...(thread === main ? { HEX_MAIN: '1' } : {}) }
++    let child
 +    try {
-+      launcher = spawn('claude', [
++      child = spawn(launcher, [
 +        '--bg',
 +        '--channels', channel,
 +        '--name', known.name,
 +        ...(fork ? ['--resume', fork, '--fork-session'] : known.session ? ['--resume', known.session] : []),
-+        '--settings', JSON.stringify({ ...settings(), enabledPlugins: { [plugin]: true }, env: { HEX_THREAD: thread, HEX_HUB: socketPath } }),
++        '--settings', JSON.stringify({ enabledPlugins: { [plugin]: true }, env: bound }),
 +        ...(prompt ? [prompt] : []),
-+      ], { cwd: hexDir, stdio: ['ignore', 'pipe', 'pipe'] })
++      ], { cwd: hexDir, env, stdio: ['ignore', 'pipe', 'pipe'] })
 +    } catch (error) {
 +      return fail(thread, String(error))
 +    }
 +    let output = ''
-+    launcher.stdout.on('data', chunk => (output += chunk))
-+    launcher.stderr.on('data', chunk => (output += chunk))
-+    launcher.on('error', error => fail(thread, error.message))
-+    launcher.on('close', code => {
++    child.stdout.on('data', chunk => (output += chunk))
++    child.stderr.on('data', chunk => (output += chunk))
++    child.on('error', error => fail(thread, error.message))
++    child.on('close', code => {
 +      const job = output.match(/backgrounded · (\w+)/)?.[1]
 +      if (job) watchJob(thread, job)
 +      else fail(thread, output.trim() || `claude --bg exited with code ${code}`)
@@ -695,9 +745,19 @@ index 0000000000000000000000000000000000000000..3265578d6c02984b2f4d3b015e56eb76
 +      live.delete(thread)
 +      setState(thread, false)
 +      if (leaving.has(thread)) forget(thread)
++      if (thread === main) setTimeout(revive, relaunch)
 +    })
 +    socket.on('error', () => {})
 +  }).listen(socketPath)
++
++  // The main thread is always running: started with the hub, and started again
++  // when its session has been gone long enough that it isn't just reconnecting.
++  function revive() {
++    if (!main || closed || live.has(main)) return
++    rename(main, mainName)
++    launch(main, mainName)
++  }
++  revive()
 +
 +  return {
 +    deliver,
@@ -710,7 +770,10 @@ index 0000000000000000000000000000000000000000..3265578d6c02984b2f4d3b015e56eb76
 +    retire,
 +    find,
 +    rename,
-+    close: () => server.close(),
++    close: () => {
++      closed = true
++      server.close()
++    },
 +  }
 +}
 +

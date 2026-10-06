@@ -178,7 +178,7 @@ index f762daf561baba3df6406e5bbe3038843810a7c2..00000000000000000000000000000000
 -}
 -```
 diff --git a/external_plugins/telegram/README.md b/external_plugins/telegram/README.md
-index d72dbc1a759e601dd0188cc7a8c3b58edc04373c..0713ddb497412420df679a5a3ca965bfdc69312b 100644
+index d72dbc1a759e601dd0188cc7a8c3b58edc04373c..3ecbd0bfb8cc26bae0b85f8a1a1c44e8264d373b 100644
 --- a/external_plugins/telegram/README.md
 +++ b/external_plugins/telegram/README.md
 @@ -1,98 +1,8 @@
@@ -188,8 +188,8 @@ index d72dbc1a759e601dd0188cc7a8c3b58edc04373c..0713ddb497412420df679a5a3ca965bf
 +A fork of the official Telegram channel where every forum topic in a group is its own Claude Code session. Its intent, invariants and what changed from upstream live in [`patches/telegram-topics/PATCH.md`](../../patches/telegram-topics/PATCH.md).
  
 -The MCP server logs into Telegram as a bot and provides tools to Claude to reply, react, or edit messages. When you message the bot, the server forwards the message to your Claude Code session.
-+- `bot.ts` holds the one bot connection. It runs in the hub service (`bun hub/serve.ts`) next to Discord, so a conversation can move between them; `bun run bot` runs it alone. It runs sessions in `HEX_DIR`, `~/hex` by default.
-+- `server.ts` is the channel each session loads. A session learns its topic from `HEX_THREAD`.
++- `bot.ts` holds the one bot connection. It runs in the hub service (`bun hub/serve.ts`) next to Discord, so a conversation can move between them; `bun run bot` runs it alone. It starts sessions in `HEX_DIR` (the service's folder by default) through `HEX_LAUNCHER` (`claude` by default).
++- `server.ts` is the channel each session loads. A session learns its topic and its hub from `HEX_THREAD` and `HEX_HUB`.
  
 -## Prerequisites
 -
@@ -286,16 +286,16 @@ index d72dbc1a759e601dd0188cc7a8c3b58edc04373c..0713ddb497412420df679a5a3ca965bf
 +The bot token lives in `~/.claude/channels/hex/telegram/.env` as `TELEGRAM_BOT_TOKEN=…`, and `access.json` there holds `allowFrom`, the Telegram user ids allowed to talk to it.
 diff --git a/external_plugins/telegram/bot.ts b/external_plugins/telegram/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..c4be70f9cfac069769772d94b1d7b0e553a74d29
+index 0000000000000000000000000000000000000000..278b42475f80b386f8b23084a788d1eb83533422
 --- /dev/null
 +++ b/external_plugins/telegram/bot.ts
-@@ -0,0 +1,503 @@
+@@ -0,0 +1,506 @@
 +#!/usr/bin/env bun
 +import { Bot, GrammyError, InputFile, type Context } from 'grammy'
 +import type { ReactionTypeEmoji } from 'grammy/types'
 +import { readFileSync, writeFileSync, mkdirSync, statSync, realpathSync, chmodSync } from 'fs'
 +import { homedir } from 'os'
-+import { join, extname, sep } from 'path'
++import { basename, join, extname, sep } from 'path'
 +import { startHub, clients, move, type Message } from '../../hub/hub.ts'
 +
 +const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'hex', 'telegram')
@@ -351,8 +351,8 @@ index 0000000000000000000000000000000000000000..c4be70f9cfac069769772d94b1d7b0e5
 +const MAX_CHUNK_LIMIT = 4096
 +const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
 +
-+// reply's files param takes any path, but the server's own state (the token
-+// in .env) is the one thing Claude has no reason to ever send.
++// reply's files param takes any path, but channel state and .env files (tokens)
++// are the things Claude has no reason to ever send.
 +function assertSendable(f: string): void {
 +  let real, stateReal: string
 +  try {
@@ -363,6 +363,7 @@ index 0000000000000000000000000000000000000000..c4be70f9cfac069769772d94b1d7b0e5
 +  if (real.startsWith(stateReal + sep) && !real.startsWith(inbox + sep)) {
 +    throw new Error(`refusing to send channel state: ${f}`)
 +  }
++  if (basename(real) === '.env') throw new Error(`refusing to send secrets: ${f}`)
 +}
 +
 +function chunk(text: string, limit: number, mode: 'length' | 'newline'): string[] {
@@ -590,6 +591,8 @@ index 0000000000000000000000000000000000000000..c4be70f9cfac069769772d94b1d7b0e5
 +  channel: 'plugin:telegram@hex',
 +  main: MAIN,
 +  hexDir: process.env.HEX_DIR,
++  launcher: process.env.HEX_LAUNCHER,
++  mainName: process.env.HEX_NAME,
 +  call: callOrForget,
 +  state: showTyping,
 +  failed: (thread, reason) => {
@@ -813,10 +816,10 @@ index b80fcea0f4f395012586cf5fac3682270e7fb14f..a8d061bfa3c603151ab2491dc06af4fa
    "dependencies": {
      "@modelcontextprotocol/sdk": "^1.0.0",
 diff --git a/external_plugins/telegram/server.ts b/external_plugins/telegram/server.ts
-index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..4dc948f9480ccce849cc9129fdac4ca234c7125e 100644
+index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..fea3d0892a0c3a66898f6e38e196695cb2913ecf 100644
 --- a/external_plugins/telegram/server.ts
 +++ b/external_plugins/telegram/server.ts
-@@ -1,467 +1,52 @@
+@@ -1,467 +1,49 @@
  #!/usr/bin/env bun
 -/**
 - * Telegram channel for Claude Code.
@@ -839,9 +842,7 @@ index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..4dc948f9480ccce849cc9129fdac4ca2
 -import type { ReactionTypeEmoji } from 'grammy/types'
 -import { randomBytes } from 'crypto'
 -import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync } from 'fs'
-+import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
-+import { connect, type Socket } from 'net'
- import { homedir } from 'os'
+-import { homedir } from 'os'
 -import { execFileSync } from 'child_process'
 -import { join, extname, sep } from 'path'
 -
@@ -1204,14 +1205,14 @@ index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..4dc948f9480ccce849cc9129fdac4ca2
 -  if (rest) out.push(rest)
 -  return out
 -}
-+import { join } from 'path'
++import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
++import { connect, type Socket } from 'net'
  
 -// .jpg/.jpeg/.png/.gif/.webp go as photos (Telegram compresses + shows inline);
 -// everything else goes as documents (raw file, no compression).
 -const PHOTO_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp'])
-+const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'hex', 'telegram')
-+const SOCKET = join(STATE_DIR, 'hub.sock')
-+const THREAD = process.env.HEX_THREAD
++const SOCKET = process.env.HEX_HUB
++const THREAD = process.env.HEX_CHANNEL?.startsWith('plugin:telegram@') ? process.env.HEX_THREAD : undefined
  
  const mcp = new Server(
    { name: 'telegram', version: '1.0.0' },
@@ -1305,7 +1306,7 @@ index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..4dc948f9480ccce849cc9129fdac4ca2
            reply_to: {
              type: 'string',
              description: 'Message ID to thread under. Use message_id from the inbound <channel> block.',
-@@ -471,13 +56,9 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
+@@ -471,13 +53,9 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
              items: { type: 'string' },
              description: 'Absolute file paths to attach. Images send as photos (inline preview); other types as documents. Max 50MB each.',
            },
@@ -1321,7 +1322,7 @@ index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..4dc948f9480ccce849cc9129fdac4ca2
        },
      },
      {
-@@ -486,11 +67,10 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
+@@ -486,11 +64,10 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
        inputSchema: {
          type: 'object',
          properties: {
@@ -1334,7 +1335,7 @@ index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..4dc948f9480ccce849cc9129fdac4ca2
        },
      },
      {
-@@ -510,536 +90,122 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
+@@ -510,536 +87,122 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
        inputSchema: {
          type: 'object',
          properties: {
@@ -1665,7 +1666,7 @@ index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..4dc948f9480ccce849cc9129fdac4ca2
 -    method: 'notifications/claude/channel/permission',
 -    params: { request_id, behavior },
 +function connectHub(): void {
-+  const socket = connect(SOCKET)
++  const socket = connect(SOCKET!)
 +  let buffer = ''
 +  socket.setEncoding('utf8')
 +  socket.on('connect', () => {
@@ -1821,7 +1822,7 @@ index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..4dc948f9480ccce849cc9129fdac4ca2
 -function safeName(s: string | undefined): string | undefined {
 -  return s?.replace(/[<>\[\]\r\n;]/g, '_')
 +mcp.oninitialized = () => {
-+  if (THREAD) connectHub()
++  if (THREAD && SOCKET) connectHub()
  }
  
 -async function handleInbound(
