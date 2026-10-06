@@ -17,8 +17,8 @@ const sockets: Socket[] = []
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'hub-'))
-  mkdirSync(join(dir, 'assistant', '.claude'), { recursive: true })
-  writeFileSync(join(dir, 'assistant', '.claude', 'thread.json'), JSON.stringify({ enabledPlugins: { 'telegram@hex': true } }))
+  mkdirSync(join(dir, 'hex', '.claude'), { recursive: true })
+  writeFileSync(join(dir, 'hex', '.claude', 'thread.json'), JSON.stringify({ enabledPlugins: { 'telegram@hex': true } }))
   mkdirSync(join(dir, 'jobs', 'job12345'), { recursive: true })
   const fake = join(dir, 'claude')
   writeFileSync(fake, `#!/bin/sh
@@ -50,7 +50,7 @@ function start(options: { main?: string; idleStop?: number; registry?: object; a
     state: (thread, busy) => void seen.push([thread, busy]),
     failed: (thread, reason) => void failedSeen.push([thread, reason]),
     jobsDir: join(dir, 'jobs'),
-    assistantDir: join(dir, 'assistant'),
+    hexDir: join(dir, 'hex'),
     idleStop: options.idleStop,
   })
 }
@@ -103,7 +103,7 @@ test('a message for a new thread starts a session bound to that thread', async (
   const args = await launched()
   expect(args.slice(0, 5)).toEqual(['--bg', '--channels', CHANNEL, '--name', 'Desk anchors'])
   expect(args).not.toContain('--resume')
-  expect(settingsOf(args).env).toEqual({ ASSISTANT_THREAD: 'chat:7', ASSISTANT_HUB: join(dir, 'hub.sock') })
+  expect(settingsOf(args).env).toEqual({ HEX_THREAD: 'chat:7', HEX_HUB: join(dir, 'hub.sock') })
   expect(states).toEqual([['chat:7', true]])
 })
 
@@ -225,7 +225,7 @@ test('an unreadable threads.json is moved aside instead of overwritten, and a ma
 })
 
 test('a thread.json that can\'t be read fails the start instead of leaving it hanging', async () => {
-  writeFileSync(join(dir, 'assistant', '.claude', 'thread.json'), '{')
+  writeFileSync(join(dir, 'hex', '.claude', 'thread.json'), '{')
   start()
   hub.deliver('chat:7', 'Desk anchors', message)
   await until(() => failures.length)
@@ -241,7 +241,7 @@ test('a local open request starts a session for an existing topic with its promp
   const args = await launched()
   expect(args.slice(3, 5)).toEqual(['--name', 'Theo clips'])
   expect(args.at(-1)).toBe('pick it up')
-  expect(settingsOf(args).env.ASSISTANT_THREAD).toBe('chat:5')
+  expect(settingsOf(args).env.HEX_THREAD).toBe('chat:5')
 })
 
 test('a session that fails to start is reported with its reason, and the next message retries', async () => {
@@ -326,7 +326,7 @@ test('threads are found by name or id, and renames are kept', () => {
 })
 
 test('the channel plugin is enabled for the session whatever thread.json says', async () => {
-  writeFileSync(join(dir, 'assistant', '.claude', 'thread.json'), JSON.stringify({ enabledPlugins: { 'telegram@hex': false, 'other@hex': true } }))
+  writeFileSync(join(dir, 'hex', '.claude', 'thread.json'), JSON.stringify({ enabledPlugins: { 'telegram@hex': false, 'other@hex': true } }))
   start()
   hub.open('chat:7', 'Desk anchors', 'go')
   expect(settingsOf(await launched()).enabledPlugins).toEqual({ 'telegram@hex': true })

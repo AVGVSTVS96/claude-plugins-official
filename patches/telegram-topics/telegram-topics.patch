@@ -178,7 +178,7 @@ index f762daf561baba3df6406e5bbe3038843810a7c2..00000000000000000000000000000000
 -}
 -```
 diff --git a/external_plugins/telegram/README.md b/external_plugins/telegram/README.md
-index d72dbc1a759e601dd0188cc7a8c3b58edc04373c..7b1989d4e8318f7548664ae2b09cd21cbefc6dab 100644
+index d72dbc1a759e601dd0188cc7a8c3b58edc04373c..0713ddb497412420df679a5a3ca965bfdc69312b 100644
 --- a/external_plugins/telegram/README.md
 +++ b/external_plugins/telegram/README.md
 @@ -1,98 +1,8 @@
@@ -188,8 +188,8 @@ index d72dbc1a759e601dd0188cc7a8c3b58edc04373c..7b1989d4e8318f7548664ae2b09cd21c
 +A fork of the official Telegram channel where every forum topic in a group is its own Claude Code session. Its intent, invariants and what changed from upstream live in [`patches/telegram-topics/PATCH.md`](../../patches/telegram-topics/PATCH.md).
  
 -The MCP server logs into Telegram as a bot and provides tools to Claude to reply, react, or edit messages. When you message the bot, the server forwards the message to your Claude Code session.
-+- `bot.ts` holds the one bot connection. It runs in the hub service (`bun hub/serve.ts`) next to Discord, so a conversation can move between them; `bun run bot` runs it alone. It runs sessions in `ASSISTANT_DIR`, `~/assistant` by default.
-+- `server.ts` is the channel each session loads. A session learns its topic from `ASSISTANT_THREAD`.
++- `bot.ts` holds the one bot connection. It runs in the hub service (`bun hub/serve.ts`) next to Discord, so a conversation can move between them; `bun run bot` runs it alone. It runs sessions in `HEX_DIR`, `~/hex` by default.
++- `server.ts` is the channel each session loads. A session learns its topic from `HEX_THREAD`.
  
 -## Prerequisites
 -
@@ -283,10 +283,10 @@ index d72dbc1a759e601dd0188cc7a8c3b58edc04373c..7b1989d4e8318f7548664ae2b09cd21c
 -This also means there's no `download_attachment` tool for historical messages
 -— photos are downloaded eagerly on arrival since there's no way to fetch them
 -later.
-+The bot token lives in `~/.claude/channels/telegram-hub/.env` as `TELEGRAM_BOT_TOKEN=…`, and `access.json` there holds `allowFrom`, the Telegram user ids allowed to talk to it.
++The bot token lives in `~/.claude/channels/hex/telegram/.env` as `TELEGRAM_BOT_TOKEN=…`, and `access.json` there holds `allowFrom`, the Telegram user ids allowed to talk to it.
 diff --git a/external_plugins/telegram/bot.ts b/external_plugins/telegram/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..ac69e5626101521fe3358b99e6e31037d50f6176
+index 0000000000000000000000000000000000000000..c4be70f9cfac069769772d94b1d7b0e553a74d29
 --- /dev/null
 +++ b/external_plugins/telegram/bot.ts
 @@ -0,0 +1,503 @@
@@ -298,11 +298,11 @@ index 0000000000000000000000000000000000000000..ac69e5626101521fe3358b99e6e31037
 +import { join, extname, sep } from 'path'
 +import { startHub, clients, move, type Message } from '../../hub/hub.ts'
 +
-+const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'telegram-hub')
++const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'hex', 'telegram')
 +const ACCESS_FILE = join(STATE_DIR, 'access.json')
 +const ENV_FILE = join(STATE_DIR, '.env')
 +const INBOX_DIR = join(STATE_DIR, 'inbox')
-+const MAIN = process.env.ASSISTANT_MAIN_THREAD
++const MAIN = process.env.HEX_MAIN_THREAD
 +
 +try {
 +  chmodSync(ENV_FILE, 0o600)
@@ -454,7 +454,7 @@ index 0000000000000000000000000000000000000000..ac69e5626101521fe3358b99e6e31037
 +}
 +
 +async function place(name: string) {
-+  if (!MAIN) throw new Error('topics need ASSISTANT_MAIN_THREAD, the group they open in')
++  if (!MAIN) throw new Error('topics need HEX_MAIN_THREAD, the group they open in')
 +  const { chat_id } = target(MAIN)
 +  const topic = await bot.api.createForumTopic(chat_id, name)
 +  const thread = `${chat_id}:${topic.message_thread_id}`
@@ -589,7 +589,7 @@ index 0000000000000000000000000000000000000000..ac69e5626101521fe3358b99e6e31037
 +  stateDir: STATE_DIR,
 +  channel: 'plugin:telegram@hex',
 +  main: MAIN,
-+  assistantDir: process.env.ASSISTANT_DIR,
++  hexDir: process.env.HEX_DIR,
 +  call: callOrForget,
 +  state: showTyping,
 +  failed: (thread, reason) => {
@@ -813,7 +813,7 @@ index b80fcea0f4f395012586cf5fac3682270e7fb14f..a8d061bfa3c603151ab2491dc06af4fa
    "dependencies": {
      "@modelcontextprotocol/sdk": "^1.0.0",
 diff --git a/external_plugins/telegram/server.ts b/external_plugins/telegram/server.ts
-index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..6e4b16026ad8421f64dc63b078c0835e378345ec 100644
+index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..4dc948f9480ccce849cc9129fdac4ca234c7125e 100644
 --- a/external_plugins/telegram/server.ts
 +++ b/external_plugins/telegram/server.ts
 @@ -1,467 +1,52 @@
@@ -1209,9 +1209,9 @@ index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..6e4b16026ad8421f64dc63b078c0835e
 -// .jpg/.jpeg/.png/.gif/.webp go as photos (Telegram compresses + shows inline);
 -// everything else goes as documents (raw file, no compression).
 -const PHOTO_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp'])
-+const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'telegram-hub')
++const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'hex', 'telegram')
 +const SOCKET = join(STATE_DIR, 'hub.sock')
-+const THREAD = process.env.ASSISTANT_THREAD
++const THREAD = process.env.HEX_THREAD
  
  const mcp = new Server(
    { name: 'telegram', version: '1.0.0' },
@@ -1397,7 +1397,7 @@ index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..6e4b16026ad8421f64dc63b078c0835e
 +const pending = new Map<number, { resolve: (text: string) => void; reject: (error: Error) => void }>()
 +
 +function request(tool: string, args: Record<string, unknown>): Promise<string> {
-+  if (!THREAD) return Promise.reject(new Error('this session is not bound to a Telegram thread (ASSISTANT_THREAD is unset)'))
++  if (!THREAD) return Promise.reject(new Error('this session is not bound to a Telegram thread (HEX_THREAD is unset)'))
 +  if (!hub) return Promise.reject(new Error('the Telegram hub is not running'))
 +  const id = ++nextId
 +  const socket = hub

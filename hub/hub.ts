@@ -16,11 +16,11 @@ export type Hub = ReturnType<typeof startHub>
 // place() opens an empty thread on the client and returns its id and a link to it.
 export const clients = new Map<string, { hub: Hub; place: (name: string, where?: string) => Promise<{ thread: string; link: string }> }>()
 
-const ASSISTANT = join(homedir(), 'assistant')
+const HEX = join(homedir(), 'hex')
 const JOBS = join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'jobs')
 const IDLE_STOP = 30 * 60_000
 
-export function startHub({ stateDir, channel, main, call, state, failed, idleStop = IDLE_STOP, jobsDir = JOBS, assistantDir = ASSISTANT }: {
+export function startHub({ stateDir, channel, main, call, state, failed, idleStop = IDLE_STOP, jobsDir = JOBS, hexDir = HEX }: {
   stateDir: string
   channel: string
   main?: string
@@ -29,7 +29,7 @@ export function startHub({ stateDir, channel, main, call, state, failed, idleSto
   failed: Failed
   idleStop?: number
   jobsDir?: string
-  assistantDir?: string
+  hexDir?: string
 }) {
   const registry = join(stateDir, 'threads.json')
   const socketPath = join(stateDir, 'hub.sock')
@@ -69,7 +69,7 @@ export function startHub({ stateDir, channel, main, call, state, failed, idleSto
   }
 
   function settings() {
-    return JSON.parse(readFileSync(join(assistantDir, '.claude', 'thread.json'), 'utf8'))
+    return JSON.parse(readFileSync(join(hexDir, '.claude', 'thread.json'), 'utf8'))
   }
 
   function setState(thread: string, working: boolean) {
@@ -187,9 +187,9 @@ export function startHub({ stateDir, channel, main, call, state, failed, idleSto
         '--channels', channel,
         '--name', known.name,
         ...(fork ? ['--resume', fork, '--fork-session'] : known.session ? ['--resume', known.session] : []),
-        '--settings', JSON.stringify({ ...settings(), enabledPlugins: { [plugin]: true }, env: { ASSISTANT_THREAD: thread, ASSISTANT_HUB: socketPath } }),
+        '--settings', JSON.stringify({ ...settings(), enabledPlugins: { [plugin]: true }, env: { HEX_THREAD: thread, HEX_HUB: socketPath } }),
         ...(prompt ? [prompt] : []),
-      ], { cwd: assistantDir, stdio: ['ignore', 'pipe', 'pipe'] })
+      ], { cwd: hexDir, stdio: ['ignore', 'pipe', 'pipe'] })
     } catch (error) {
       return fail(thread, String(error))
     }

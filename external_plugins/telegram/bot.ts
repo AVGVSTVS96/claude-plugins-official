@@ -6,11 +6,11 @@ import { homedir } from 'os'
 import { join, extname, sep } from 'path'
 import { startHub, clients, move, type Message } from '../../hub/hub.ts'
 
-const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'telegram-hub')
+const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'hex', 'telegram')
 const ACCESS_FILE = join(STATE_DIR, 'access.json')
 const ENV_FILE = join(STATE_DIR, '.env')
 const INBOX_DIR = join(STATE_DIR, 'inbox')
-const MAIN = process.env.ASSISTANT_MAIN_THREAD
+const MAIN = process.env.HEX_MAIN_THREAD
 
 try {
   chmodSync(ENV_FILE, 0o600)
@@ -162,7 +162,7 @@ function title(text: string): string {
 }
 
 async function place(name: string) {
-  if (!MAIN) throw new Error('topics need ASSISTANT_MAIN_THREAD, the group they open in')
+  if (!MAIN) throw new Error('topics need HEX_MAIN_THREAD, the group they open in')
   const { chat_id } = target(MAIN)
   const topic = await bot.api.createForumTopic(chat_id, name)
   const thread = `${chat_id}:${topic.message_thread_id}`
@@ -297,7 +297,7 @@ const hub = startHub({
   stateDir: STATE_DIR,
   channel: 'plugin:telegram@hex',
   main: MAIN,
-  assistantDir: process.env.ASSISTANT_DIR,
+  hexDir: process.env.HEX_DIR,
   call: callOrForget,
   state: showTyping,
   failed: (thread, reason) => {

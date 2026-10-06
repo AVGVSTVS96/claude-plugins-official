@@ -1,6 +1,6 @@
 diff --git a/hub/hub.test.ts b/hub/hub.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..d504611e98cc83e2cd3005c0e412b4974364c7f6
+index 0000000000000000000000000000000000000000..8d4299b8e96187c9ea65384f39aa68d6ff9ec95e
 --- /dev/null
 +++ b/hub/hub.test.ts
 @@ -0,0 +1,398 @@
@@ -23,8 +23,8 @@ index 0000000000000000000000000000000000000000..d504611e98cc83e2cd3005c0e412b497
 +
 +beforeEach(() => {
 +  dir = mkdtempSync(join(tmpdir(), 'hub-'))
-+  mkdirSync(join(dir, 'assistant', '.claude'), { recursive: true })
-+  writeFileSync(join(dir, 'assistant', '.claude', 'thread.json'), JSON.stringify({ enabledPlugins: { 'telegram@hex': true } }))
++  mkdirSync(join(dir, 'hex', '.claude'), { recursive: true })
++  writeFileSync(join(dir, 'hex', '.claude', 'thread.json'), JSON.stringify({ enabledPlugins: { 'telegram@hex': true } }))
 +  mkdirSync(join(dir, 'jobs', 'job12345'), { recursive: true })
 +  const fake = join(dir, 'claude')
 +  writeFileSync(fake, `#!/bin/sh
@@ -56,7 +56,7 @@ index 0000000000000000000000000000000000000000..d504611e98cc83e2cd3005c0e412b497
 +    state: (thread, busy) => void seen.push([thread, busy]),
 +    failed: (thread, reason) => void failedSeen.push([thread, reason]),
 +    jobsDir: join(dir, 'jobs'),
-+    assistantDir: join(dir, 'assistant'),
++    hexDir: join(dir, 'hex'),
 +    idleStop: options.idleStop,
 +  })
 +}
@@ -109,7 +109,7 @@ index 0000000000000000000000000000000000000000..d504611e98cc83e2cd3005c0e412b497
 +  const args = await launched()
 +  expect(args.slice(0, 5)).toEqual(['--bg', '--channels', CHANNEL, '--name', 'Desk anchors'])
 +  expect(args).not.toContain('--resume')
-+  expect(settingsOf(args).env).toEqual({ ASSISTANT_THREAD: 'chat:7', ASSISTANT_HUB: join(dir, 'hub.sock') })
++  expect(settingsOf(args).env).toEqual({ HEX_THREAD: 'chat:7', HEX_HUB: join(dir, 'hub.sock') })
 +  expect(states).toEqual([['chat:7', true]])
 +})
 +
@@ -231,7 +231,7 @@ index 0000000000000000000000000000000000000000..d504611e98cc83e2cd3005c0e412b497
 +})
 +
 +test('a thread.json that can\'t be read fails the start instead of leaving it hanging', async () => {
-+  writeFileSync(join(dir, 'assistant', '.claude', 'thread.json'), '{')
++  writeFileSync(join(dir, 'hex', '.claude', 'thread.json'), '{')
 +  start()
 +  hub.deliver('chat:7', 'Desk anchors', message)
 +  await until(() => failures.length)
@@ -247,7 +247,7 @@ index 0000000000000000000000000000000000000000..d504611e98cc83e2cd3005c0e412b497
 +  const args = await launched()
 +  expect(args.slice(3, 5)).toEqual(['--name', 'Theo clips'])
 +  expect(args.at(-1)).toBe('pick it up')
-+  expect(settingsOf(args).env.ASSISTANT_THREAD).toBe('chat:5')
++  expect(settingsOf(args).env.HEX_THREAD).toBe('chat:5')
 +})
 +
 +test('a session that fails to start is reported with its reason, and the next message retries', async () => {
@@ -332,7 +332,7 @@ index 0000000000000000000000000000000000000000..d504611e98cc83e2cd3005c0e412b497
 +})
 +
 +test('the channel plugin is enabled for the session whatever thread.json says', async () => {
-+  writeFileSync(join(dir, 'assistant', '.claude', 'thread.json'), JSON.stringify({ enabledPlugins: { 'telegram@hex': false, 'other@hex': true } }))
++  writeFileSync(join(dir, 'hex', '.claude', 'thread.json'), JSON.stringify({ enabledPlugins: { 'telegram@hex': false, 'other@hex': true } }))
 +  start()
 +  hub.open('chat:7', 'Desk anchors', 'go')
 +  expect(settingsOf(await launched()).enabledPlugins).toEqual({ 'telegram@hex': true })
@@ -404,7 +404,7 @@ index 0000000000000000000000000000000000000000..d504611e98cc83e2cd3005c0e412b497
 +})
 diff --git a/hub/hub.ts b/hub/hub.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..663fe70facbea8259598c7a605547261e9026120
+index 0000000000000000000000000000000000000000..3265578d6c02984b2f4d3b015e56eb76cf9317ac
 --- /dev/null
 +++ b/hub/hub.ts
 @@ -0,0 +1,319 @@
@@ -426,11 +426,11 @@ index 0000000000000000000000000000000000000000..663fe70facbea8259598c7a605547261
 +// place() opens an empty thread on the client and returns its id and a link to it.
 +export const clients = new Map<string, { hub: Hub; place: (name: string, where?: string) => Promise<{ thread: string; link: string }> }>()
 +
-+const ASSISTANT = join(homedir(), 'assistant')
++const HEX = join(homedir(), 'hex')
 +const JOBS = join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'jobs')
 +const IDLE_STOP = 30 * 60_000
 +
-+export function startHub({ stateDir, channel, main, call, state, failed, idleStop = IDLE_STOP, jobsDir = JOBS, assistantDir = ASSISTANT }: {
++export function startHub({ stateDir, channel, main, call, state, failed, idleStop = IDLE_STOP, jobsDir = JOBS, hexDir = HEX }: {
 +  stateDir: string
 +  channel: string
 +  main?: string
@@ -439,7 +439,7 @@ index 0000000000000000000000000000000000000000..663fe70facbea8259598c7a605547261
 +  failed: Failed
 +  idleStop?: number
 +  jobsDir?: string
-+  assistantDir?: string
++  hexDir?: string
 +}) {
 +  const registry = join(stateDir, 'threads.json')
 +  const socketPath = join(stateDir, 'hub.sock')
@@ -479,7 +479,7 @@ index 0000000000000000000000000000000000000000..663fe70facbea8259598c7a605547261
 +  }
 +
 +  function settings() {
-+    return JSON.parse(readFileSync(join(assistantDir, '.claude', 'thread.json'), 'utf8'))
++    return JSON.parse(readFileSync(join(hexDir, '.claude', 'thread.json'), 'utf8'))
 +  }
 +
 +  function setState(thread: string, working: boolean) {
@@ -597,9 +597,9 @@ index 0000000000000000000000000000000000000000..663fe70facbea8259598c7a605547261
 +        '--channels', channel,
 +        '--name', known.name,
 +        ...(fork ? ['--resume', fork, '--fork-session'] : known.session ? ['--resume', known.session] : []),
-+        '--settings', JSON.stringify({ ...settings(), enabledPlugins: { [plugin]: true }, env: { ASSISTANT_THREAD: thread, ASSISTANT_HUB: socketPath } }),
++        '--settings', JSON.stringify({ ...settings(), enabledPlugins: { [plugin]: true }, env: { HEX_THREAD: thread, HEX_HUB: socketPath } }),
 +        ...(prompt ? [prompt] : []),
-+      ], { cwd: assistantDir, stdio: ['ignore', 'pipe', 'pipe'] })
++      ], { cwd: hexDir, stdio: ['ignore', 'pipe', 'pipe'] })
 +    } catch (error) {
 +      return fail(thread, String(error))
 +    }
@@ -739,13 +739,13 @@ index 0000000000000000000000000000000000000000..5218c12ff63db964314d9bfefbe97d24
 +])
 diff --git a/hub/state.ts b/hub/state.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..8b8048e2c5298bd6a345b325e37329e675f40ee5
+index 0000000000000000000000000000000000000000..679d5fb40e7d3e8920c61f721751379ea3aabdb4
 --- /dev/null
 +++ b/hub/state.ts
 @@ -0,0 +1,17 @@
 +import { connect } from 'net'
 +
-+const { ASSISTANT_HUB, ASSISTANT_THREAD } = process.env
++const { HEX_HUB, HEX_THREAD } = process.env
 +const busy = process.argv[2] === 'busy'
 +
 +async function fromChat() {
@@ -753,10 +753,10 @@ index 0000000000000000000000000000000000000000..8b8048e2c5298bd6a345b325e37329e6
 +  return typeof prompt === 'string' && prompt.startsWith('<channel source=')
 +}
 +
-+if (ASSISTANT_HUB && ASSISTANT_THREAD && (!busy || (await fromChat()))) {
-+  connect(ASSISTANT_HUB)
++if (HEX_HUB && HEX_THREAD && (!busy || (await fromChat()))) {
++  connect(HEX_HUB)
 +    .on('connect', function () {
-+      this.end(JSON.stringify({ type: 'state', thread: ASSISTANT_THREAD, busy }) + '\n')
++      this.end(JSON.stringify({ type: 'state', thread: HEX_THREAD, busy }) + '\n')
 +    })
 +    .on('error', () => {})
 +}

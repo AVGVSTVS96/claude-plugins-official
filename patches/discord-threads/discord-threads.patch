@@ -169,7 +169,7 @@ index 550f06acb7eec0c22b5e35bd91cf90ae632aeec7..00000000000000000000000000000000
 -}
 -```
 diff --git a/external_plugins/discord/README.md b/external_plugins/discord/README.md
-index ad04f6fa437bfa013f72f71de2b460f3eedeeeee..f8a98d2e2f94bd3e2eb3061938b3b98150d51091 100644
+index ad04f6fa437bfa013f72f71de2b460f3eedeeeee..60944051b5b407071a701844ab8d215fb04faf69 100644
 --- a/external_plugins/discord/README.md
 +++ b/external_plugins/discord/README.md
 @@ -1,111 +1,8 @@
@@ -179,8 +179,8 @@ index ad04f6fa437bfa013f72f71de2b460f3eedeeeee..f8a98d2e2f94bd3e2eb3061938b3b981
 +A fork of the official Discord channel where every thread in a server is its own Claude Code session, Claude-tag style: tag the bot in a channel and it starts a thread on your message, with a fresh session working inside it. Its intent, invariants and what changed from upstream live in [`patches/discord-threads/PATCH.md`](../../patches/discord-threads/PATCH.md).
  
 -When the bot receives a message, the MCP server forwards it to Claude and provides tools to reply, react, and edit messages.
-+- `bot.ts` holds the one gateway connection. It runs in the hub service (`bun hub/serve.ts`) next to Telegram, so a conversation can move between them. It runs sessions in `ASSISTANT_DIR`, `~/assistant` by default.
-+- `server.ts` is the channel each session loads. A session learns its thread from `ASSISTANT_THREAD`.
++- `bot.ts` holds the one gateway connection. It runs in the hub service (`bun hub/serve.ts`) next to Telegram, so a conversation can move between them. It runs sessions in `HEX_DIR`, `~/hex` by default.
++- `server.ts` is the channel each session loads. A session learns its thread from `HEX_THREAD`.
  
 -## Prerequisites
 -
@@ -287,10 +287,10 @@ index ad04f6fa437bfa013f72f71de2b460f3eedeeeee..f8a98d2e2f94bd3e2eb3061938b3b981
 -
 -Same path for attachments on historical messages found via `fetch_messages`
 -(messages with attachments are marked `+Natt`).
-+The bot token lives in `~/.claude/channels/discord-hub/.env` as `DISCORD_BOT_TOKEN=…`, and `access.json` there holds `allowFrom`, the Discord user ids allowed to talk to it. The bot needs the Message Content intent, and in its server: View Channels, Send Messages, Send Messages in Threads, Create Public Threads, Manage Threads, Read Message History, Attach Files and Add Reactions.
++The bot token lives in `~/.claude/channels/hex/discord/.env` as `DISCORD_BOT_TOKEN=…`, and `access.json` there holds `allowFrom`, the Discord user ids allowed to talk to it. The bot needs the Message Content intent, and in its server: View Channels, Send Messages, Send Messages in Threads, Create Public Threads, Manage Threads, Read Message History, Attach Files and Add Reactions.
 diff --git a/external_plugins/discord/bot.ts b/external_plugins/discord/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..aeb24c6507b05af2f1d05e2f98054fb0900d0ea2
+index 0000000000000000000000000000000000000000..017d060b05b66142b0195b267a839d02163a1b12
 --- /dev/null
 +++ b/external_plugins/discord/bot.ts
 @@ -0,0 +1,387 @@
@@ -309,7 +309,7 @@ index 0000000000000000000000000000000000000000..aeb24c6507b05af2f1d05e2f98054fb0
 +import { join, sep } from 'path'
 +import { startHub, clients, move, type Message } from '../../hub/hub.ts'
 +
-+const STATE_DIR = process.env.DISCORD_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'discord-hub')
++const STATE_DIR = process.env.DISCORD_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'hex', 'discord')
 +const ACCESS_FILE = join(STATE_DIR, 'access.json')
 +const ENV_FILE = join(STATE_DIR, '.env')
 +const INBOX_DIR = join(STATE_DIR, 'inbox')
@@ -605,7 +605,7 @@ index 0000000000000000000000000000000000000000..aeb24c6507b05af2f1d05e2f98054fb0
 +    failed: (thread, reason) => {
 +      void threadChannel(thread).then(ch => ch.send(`Couldn't start this thread's session: ${reason}`)).catch(() => {})
 +    },
-+    assistantDir: process.env.ASSISTANT_DIR,
++    hexDir: process.env.HEX_DIR,
 +  })
 +
 +  clients.set('discord', { hub, place })
@@ -701,7 +701,7 @@ index eac89c3befd8ebb90758a9acdf7f400de8c9f298..87aff60aefe5d5610abfa8d4e6e2b719
    "dependencies": {
      "@modelcontextprotocol/sdk": "^1.0.0",
 diff --git a/external_plugins/discord/server.ts b/external_plugins/discord/server.ts
-index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..a13eb423a5b4a07458f885dbf33b49730791b2f6 100644
+index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..d652754ae2384802947a40f70f6e1e341d7b4cb6 100644
 --- a/external_plugins/discord/server.ts
 +++ b/external_plugins/discord/server.ts
 @@ -1,533 +1,43 @@
@@ -1146,9 +1146,9 @@ index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..a13eb423a5b4a07458f885dbf33b4973
 -function safeAttName(att: Attachment): string {
 -  return (att.name ?? att.id).replace(/[\[\]\r\n;]/g, '_')
 -}
-+const STATE_DIR = process.env.DISCORD_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'discord-hub')
++const STATE_DIR = process.env.DISCORD_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'hex', 'discord')
 +const SOCKET = join(STATE_DIR, 'hub.sock')
-+const THREAD = process.env.ASSISTANT_THREAD
++const THREAD = process.env.HEX_THREAD
  
  const mcp = new Server(
    { name: 'discord', version: '1.0.0' },
@@ -1371,7 +1371,7 @@ index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..a13eb423a5b4a07458f885dbf33b4973
 +const pending = new Map<number, { resolve: (text: string) => void; reject: (error: Error) => void }>()
 +
 +function request(tool: string, args: Record<string, unknown>): Promise<string> {
-+  if (!THREAD) return Promise.reject(new Error('this session is not bound to a Discord thread (ASSISTANT_THREAD is unset)'))
++  if (!THREAD) return Promise.reject(new Error('this session is not bound to a Discord thread (HEX_THREAD is unset)'))
 +  if (!hub) return Promise.reject(new Error('the Discord hub is not running'))
 +  const id = ++nextId
 +  const socket = hub

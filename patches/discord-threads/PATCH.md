@@ -4,7 +4,7 @@ id: discord-threads
 summary: Rework the Discord channel so every thread in a server is its own Claude Code session, Claude-tag style, through the thread hub.
 baseline: d4226d062928f8d9505dbdeadd10217d23361052
 patch_file: discord-threads.patch
-patch_sha256: 0d68279ddc1ef41b4500e1780eebecc5894fbed3be1574228aefd2661560ef27
+patch_sha256: db87ddd7a61008b59bfbb420921713238a8d415c311a31144a33236a39f30235
 ---
 
 ## Intent
@@ -17,7 +17,7 @@ session per Discord thread through `hub/`:
   Discord calls. It runs in the hub service (`hub/serve.ts`), embeds the hub,
   and maps each thread to its own session by the thread's channel id.
 - `server.ts` keeps upstream's tools and instructions as the channel every
-  session loads. It learns its thread from `ASSISTANT_THREAD`, connects to the
+  session loads. It learns its thread from `HEX_THREAD`, connects to the
   hub, and forwards its calls there.
 
 Discord is the place for deeper work, Claude-tag style:

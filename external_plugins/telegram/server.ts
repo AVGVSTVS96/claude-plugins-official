@@ -6,9 +6,9 @@ import { connect, type Socket } from 'net'
 import { homedir } from 'os'
 import { join } from 'path'
 
-const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'telegram-hub')
+const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'hex', 'telegram')
 const SOCKET = join(STATE_DIR, 'hub.sock')
-const THREAD = process.env.ASSISTANT_THREAD
+const THREAD = process.env.HEX_THREAD
 
 const mcp = new Server(
   { name: 'telegram', version: '1.0.0' },
@@ -142,7 +142,7 @@ let nextId = 0
 const pending = new Map<number, { resolve: (text: string) => void; reject: (error: Error) => void }>()
 
 function request(tool: string, args: Record<string, unknown>): Promise<string> {
-  if (!THREAD) return Promise.reject(new Error('this session is not bound to a Telegram thread (ASSISTANT_THREAD is unset)'))
+  if (!THREAD) return Promise.reject(new Error('this session is not bound to a Telegram thread (HEX_THREAD is unset)'))
   if (!hub) return Promise.reject(new Error('the Telegram hub is not running'))
   const id = ++nextId
   const socket = hub

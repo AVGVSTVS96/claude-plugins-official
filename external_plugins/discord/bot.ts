@@ -13,7 +13,7 @@ import { homedir } from 'os'
 import { join, sep } from 'path'
 import { startHub, clients, move, type Message } from '../../hub/hub.ts'
 
-const STATE_DIR = process.env.DISCORD_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'discord-hub')
+const STATE_DIR = process.env.DISCORD_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'hex', 'discord')
 const ACCESS_FILE = join(STATE_DIR, 'access.json')
 const ENV_FILE = join(STATE_DIR, '.env')
 const INBOX_DIR = join(STATE_DIR, 'inbox')
@@ -309,7 +309,7 @@ function serve(token: string) {
     failed: (thread, reason) => {
       void threadChannel(thread).then(ch => ch.send(`Couldn't start this thread's session: ${reason}`)).catch(() => {})
     },
-    assistantDir: process.env.ASSISTANT_DIR,
+    hexDir: process.env.HEX_DIR,
   })
 
   clients.set('discord', { hub, place })
