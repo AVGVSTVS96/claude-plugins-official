@@ -3,6 +3,8 @@ import {
   Client,
   GatewayIntentBits,
   ChannelType,
+  PermissionFlagsBits,
+  SnowflakeUtil,
   type Message as DiscordMessage,
   type Attachment,
   type TextChannel,
@@ -63,6 +65,7 @@ function loadAccess(): Access {
 
 const MAX_CHUNK_LIMIT = 2000
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
+const READ = [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory]
 
 // reply's files param takes any path, but channel state and .env files (tokens)
 // are the things Claude has no reason to ever send.
@@ -163,10 +166,46 @@ function serve(token: string) {
     const g = guild()
     const wanted = name?.replace(/^#/, '').toLowerCase()
     const found = wanted
-      ? (await g.channels.fetch()).find(ch => ch?.type === ChannelType.GuildText && ch.name.toLowerCase() === wanted)
+      ? (await g.channels.fetch()).find(ch => ch?.type === ChannelType.GuildText && (ch.id === wanted || ch.name.toLowerCase() === wanted))
       : g.systemChannel
     if (found?.type !== ChannelType.GuildText) throw new Error(wanted ? `no text channel named #${wanted}` : 'name a channel to open the thread in')
     return found
+  }
+
+  async function readable(id: string): Promise<TextChannel | ThreadChannel> {
+    const ch = await client.channels.fetch(id).catch(() => null)
+    const text = ch?.type === ChannelType.GuildText || ch?.isThread() ? ch : undefined
+    if (!text || text.guildId !== guild().id || !text.permissionsFor(client.user!)?.has(READ)) {
+      throw new Error(`the bot can't read ${id}; list_channels shows the channels it can`)
+    }
+    return text
+  }
+
+  async function history(caller: string, args: Record<string, unknown>): Promise<string> {
+    const limit = Math.min((args.limit as number) ?? 20, 100)
+    const named = args.thread as string | undefined
+    const id = named ? (/^\d+$/.test(named) ? named : hub.find(named)) : args.channel ? (await textChannel(args.channel as string)).id : caller
+    const ch = id === caller ? await threadChannel(caller) : await readable(id)
+    const msgs = await ch.messages.fetch({ limit, ...(args.before ? { before: args.before as string } : {}) })
+    const me = client.user?.id
+    const arr = [...msgs.values()].reverse()
+    if (arr.length === 0) return '(no messages)'
+    // The result is newline-joined, so multi-line content would forge adjacent rows.
+    return arr
+      .map(m => {
+        const who = m.author.id === me ? 'me' : m.author.username
+        const atts = m.attachments.size > 0 ? ` +${m.attachments.size}att` : ''
+        const last = m.thread?.lastMessageId ? `, last reply ${new Date(SnowflakeUtil.timestampFrom(m.thread.lastMessageId)).toISOString()}` : ''
+        const thread = m.thread ? `, ${m.thread.messageCount ?? 0} replies${last}` : ''
+        const text = m.content.replace(/[\r\n]+/g, ' ⏎ ')
+        return `[${m.createdAt.toISOString()}] ${who}: ${text}  (id: ${m.id}${atts}${thread})`
+      })
+      .join('\n')
+  }
+
+  async function listChannels(): Promise<string> {
+    const found = (await guild().channels.fetch()).filter(ch => ch?.type === ChannelType.GuildText && !!ch.permissionsFor(client.user!)?.has(READ))
+    return found.map(ch => `#${ch!.name}  (id: ${ch!.id})`).join('\n') || '(none)'
   }
 
   const link = (thread: string) => `https://discord.com/channels/${guild().id}/${thread}`
@@ -201,6 +240,8 @@ function serve(token: string) {
       hub.open(thread, name, args.prompt as string)
       return `started thread "${name}": ${link}`
     }
+    if (tool === 'fetch_messages') return history(caller, args)
+    if (tool === 'list_channels') return listChannels()
     const thread = args.thread ? hub.find(args.thread as string) : caller
     const ch = await threadChannel(thread)
     const access = loadAccess()
@@ -240,22 +281,6 @@ function serve(token: string) {
         }
 
         return sentIds.length === 1 ? `sent (id: ${sentIds[0]})` : `sent ${sentIds.length} parts (ids: ${sentIds.join(', ')})`
-      }
-      case 'fetch_messages': {
-        const limit = Math.min((args.limit as number) ?? 20, 100)
-        const msgs = await ch.messages.fetch({ limit })
-        const me = client.user?.id
-        const arr = [...msgs.values()].reverse()
-        if (arr.length === 0) return '(no messages)'
-        // The result is newline-joined, so multi-line content would forge adjacent rows.
-        return arr
-          .map(m => {
-            const who = m.author.id === me ? 'me' : m.author.username
-            const atts = m.attachments.size > 0 ? ` +${m.attachments.size}att` : ''
-            const text = m.content.replace(/[\r\n]+/g, ' ⏎ ')
-            return `[${m.createdAt.toISOString()}] ${who}: ${text}  (id: ${m.id}${atts})`
-          })
-          .join('\n')
       }
       case 'react': {
         const msg = await ch.messages.fetch(args.message_id as string)
@@ -354,6 +379,7 @@ function serve(token: string) {
         user: msg.author.username,
         user_id: msg.author.id,
         ts: msg.createdAt.toISOString(),
+        ...(ch.parent ? { channel: ch.parent.name } : {}),
         ...(fresh ? { new_thread: 'true' } : {}),
         ...(atts.length > 0 ? { attachment_count: String(atts.length), attachments: atts.join('; ') } : {}),
       },

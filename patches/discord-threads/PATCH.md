@@ -4,7 +4,7 @@ id: discord-threads
 summary: Rework the Discord channel so every thread in a server is its own Claude Code session, Claude-tag style, through the thread hub.
 baseline: d4226d062928f8d9505dbdeadd10217d23361052
 patch_file: discord-threads.patch
-patch_sha256: ebd370ca4b4c75e281f9f172318bf2b0a940e1e1477282495b7dc871e6349354
+patch_sha256: 7b6000190848b75eba4deb89402054962cf5add703a56303c0eb7125657a41be
 ---
 
 ## Intent
@@ -35,7 +35,13 @@ Discord is the place for deeper work, Claude-tag style:
   forgotten too.
 - `handoff(to: "telegram" | "buzz")` moves a thread's session to a new
   Telegram topic or Buzz thread.
-- `fetch_messages` reads the thread's own history.
+- A session reads the whole server, not just its own thread: its inbound
+  messages name their `channel`, `fetch_messages({channel})` returns a text
+  channel's top-level messages, each with its thread's reply count and last
+  reply, and `fetch_messages({thread})` reads any thread by its starter
+  message id or name. `before` pages back, and `list_channels` lists the
+  text channels the bot can read. Only text channels and threads in the
+  bot's server that it can see are read, never a DM. Bots can't search.
 - The typing indicator follows the session's real busy state.
 - A session that fails to start says why, in its thread.
 - `reply` refuses to attach channel state or any `.env` file.
@@ -47,7 +53,8 @@ Discord is the place for deeper work, Claude-tag style:
 1. One gateway connection, owned by the service. Sessions never connect to
    Discord.
 2. Tools act on the caller's own thread unless they name another one, so
-   they take no `chat_id`.
+   they take no `chat_id`. Reading may name any channel the bot can see;
+   posting stays in the caller's thread or a thread it names.
 3. The bot always posts as itself.
 4. Without `DISCORD_BOT_TOKEN`, Discord stays off and the rest of the hub
    service runs.
@@ -59,7 +66,10 @@ Discord is the place for deeper work, Claude-tag style:
 
 ## Verification
 
-Both halves build and the hub tests pass. Run `scripts/verify`.
+Both halves build and the hub tests pass. `bun test external_plugins/discord`
+runs the reading tools against a fake Discord client: channel paging, thread
+drill-in, the channel named on arrival, and refusal of hidden channels, DMs
+and other servers. Run `scripts/verify`.
 
 ## Removal
 

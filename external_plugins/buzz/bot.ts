@@ -68,6 +68,8 @@ function secretKeyOf(key: string): Uint8Array {
 // Buzz clients cap a message at 64 KiB, and a character takes at most 4 bytes.
 const MAX_CHUNK_LIMIT = 16 * 1024
 const MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024
+// Chat messages, Buzz's older message kind, and diffs: what a channel's history is made of.
+const MESSAGES = [9, 40002, 40008]
 
 // reply's files param takes any path, but channel state and .env files (keys)
 // are the things Claude has no reason to ever send.
@@ -125,6 +127,14 @@ function title(text: string): string {
 
 function now() {
   return Math.floor(Date.now() / 1000)
+}
+
+function iso(seconds: number) {
+  return new Date(seconds * 1000).toISOString()
+}
+
+function byTime(a: Event, b: Event) {
+  return a.created_at - b.created_at || a.id.localeCompare(b.id)
 }
 
 function tag(event: Event, name: string) {
@@ -191,7 +201,7 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
   async function channelOf(thread: string): Promise<string> {
     if (isChannel(thread)) return thread
     if (!homes.has(thread)) {
-      const [root] = await relay.query([{ kinds: [9], ids: [thread] }])
+      const [root] = await relay.query([{ kinds: MESSAGES, ids: [thread] }])
       const channel = root && tag(root, 'h')
       if (!channel) throw new Error(`can't find the channel of thread ${thread}`)
       homes.set(thread, channel)
@@ -208,6 +218,13 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
       : open.find(([, channel]) => channel.name.toLowerCase() === 'general') ?? open[0]
     if (!found) throw new Error(wanted ? `Hex is in no channel named #${wanted}` : 'Hex is in no Buzz channel')
     return found[0]
+  }
+
+  // The relay also serves open channels Hex isn't in; sessions read only Hex's own.
+  function readable(caller: string, channel: string): string {
+    if (!channels.has(channel)) throw new Error('Hex isn\'t in that channel; list_channels shows the ones it is in')
+    if (channels.get(channel)!.dm && channel !== caller) throw new Error('that is a direct message with someone else')
+    return channel
   }
 
   const link = (channel: string, id: string) => `buzz://message?channel=${channel}&id=${id}`
@@ -270,9 +287,80 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
   }
 
   async function message(thread: string, id: string): Promise<Event> {
-    const [found] = await relay.query([{ kinds: [9], ids: [id], '#h': [await channelOf(thread)] }])
+    const [found] = await relay.query([{ kinds: MESSAGES, ids: [id], '#h': [await channelOf(thread)] }])
     if (!found) throw new Error(`no message ${id} in this thread`)
     return found
+  }
+
+  // The relay's NIP-98 signed HTTP query, which serves the channel windows
+  // Desktop reads (NIP-CW): top-level messages with their thread summaries.
+  async function bridge(filters: object[]): Promise<Event[]> {
+    const url = `${http}/query`
+    const body = JSON.stringify(filters)
+    const auth = finalizeEvent({
+      kind: 27235,
+      content: '',
+      created_at: now(),
+      tags: [['u', url], ['method', 'POST'], ['payload', createHash('sha256').update(body).digest('hex')], ['nonce', crypto.randomUUID()]],
+    }, secretKey)
+    const headers = { Authorization: `Nostr ${Buffer.from(JSON.stringify(auth)).toString('base64')}`, 'x-auth-tag': JSON.stringify(authTag), 'Content-Type': 'application/json' }
+    const res = await fetch(url, { method: 'POST', body, headers })
+    if (!res.ok) throw new Error(`the relay refused the read: ${res.status} ${await res.text()}`)
+    return await res.json() as Event[]
+  }
+
+  async function rows(events: Event[], note: (event: Event) => string = () => ''): Promise<string> {
+    if (events.length === 0) return '(no messages)'
+    const lines = await Promise.all(events.map(async m => {
+      const who = m.pubkey === me ? 'me' : await nameOf(m.pubkey)
+      const files = filesOf(m).length
+      const atts = files > 0 ? ` +${files}att` : ''
+      // The result is newline-joined, so multi-line content would forge adjacent rows.
+      const text = m.content.replace(/[\r\n]+/g, ' ⏎ ')
+      return `[${iso(m.created_at)}] ${who}: ${text}  (id: ${m.id}${atts}${note(m)})`
+    }))
+    return lines.join('\n')
+  }
+
+  async function channelWindow(channel: string, limit: number, before?: Event): Promise<string> {
+    const page = await bridge([{ kinds: MESSAGES, '#h': [channel], limit, top_level: true, include_summaries: true, ...(before ? { until: before.created_at, before_id: before.id } : {}) }])
+    if (!page.some(event => event.kind === 39006)) throw new Error('the relay won\'t show Hex that channel')
+    const threads = new Map(page.filter(event => event.kind === 39005).map(event => [tag(event, 'd'), JSON.parse(event.content)]))
+    return rows(page.filter(event => MESSAGES.includes(event.kind)).reverse(), event => {
+      const thread = threads.get(event.id)
+      return thread ? `, ${thread.descendant_count} replies${thread.last_reply_at ? `, last reply ${iso(thread.last_reply_at)}` : ''}` : ''
+    })
+  }
+
+  async function history(caller: string, args: Record<string, unknown>): Promise<string> {
+    const limit = Math.min((args.limit as number) ?? 20, 100)
+    const named = args.thread as string | undefined
+    const thread = named ? (/^[0-9a-f]{64}$/.test(named) ? named : hub.find(named)) : args.channel ? channelNamed(args.channel as string) : caller
+    const channel = await channelOf(thread)
+    if (thread !== caller) readable(caller, channel)
+    const before = args.before ? await message(channel, args.before as string) : undefined
+    if (isChannel(thread) && !channels.get(thread)?.dm) return channelWindow(thread, limit, before)
+    const page = before ? { until: before.created_at, limit: limit + 1 } : { limit }
+    const events = await relay.query(isChannel(thread)
+      ? [{ kinds: MESSAGES, '#h': [channel], ...page }]
+      : [{ kinds: MESSAGES, ids: [thread], '#h': [channel] }, { kinds: MESSAGES, '#h': [channel], '#e': [thread], ...page }])
+    return rows(events.filter(event => !before || byTime(event, before) < 0).sort(byTime).slice(-limit))
+  }
+
+  async function search(caller: string, args: Record<string, unknown>): Promise<string> {
+    const limit = Math.min((args.limit as number) ?? 20, 100)
+    const scope = args.channel ? [readable(caller, channelNamed(args.channel as string))] : [...channels.keys()].filter(id => !channels.get(id)!.dm || id === caller)
+    const hits = scope.length > 0 ? await relay.query([{ kinds: MESSAGES, search: args.query as string, '#h': scope, limit }]) : []
+    return rows(hits, event => {
+      const channel = channels.get(tag(event, 'h')!)
+      const root = rootOf(event)
+      return `, in ${channel?.dm ? 'this direct message' : `#${channel?.name}`}${root ? `, thread ${root}` : ''}`
+    })
+  }
+
+  function listChannels(): string {
+    const lines = [...channels].map(([id, channel]) => channel.dm ? `${channel.name}  (id: ${id}, direct message)` : `#${channel.name}  (id: ${id})`)
+    return lines.join('\n') || '(none)'
   }
 
   function react(id: string, emoji: string) {
@@ -333,6 +421,9 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
       hub.open(thread, name, args.prompt as string)
       return `started thread "${name}": ${link}`
     }
+    if (tool === 'fetch_messages') return history(caller, args)
+    if (tool === 'search_messages') return search(caller, args)
+    if (tool === 'list_channels') return listChannels()
     const thread = args.thread ? hub.find(args.thread as string) : caller
     switch (tool) {
       case 'reply': {
@@ -365,24 +456,6 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
         }
 
         return sentIds.length === 1 ? `sent (id: ${sentIds[0]})` : `sent ${sentIds.length} parts (ids: ${sentIds.join(', ')})`
-      }
-      case 'fetch_messages': {
-        const limit = Math.min((args.limit as number) ?? 20, 100)
-        const channel = await channelOf(thread)
-        const events = await relay.query(isChannel(thread)
-          ? [{ kinds: [9], '#h': [channel], limit }]
-          : [{ kinds: [9], ids: [thread], '#h': [channel] }, { kinds: [9], '#h': [channel], '#e': [thread], limit }])
-        const arr = events.sort((a, b) => a.created_at - b.created_at).slice(-limit)
-        if (arr.length === 0) return '(no messages)'
-        const lines = await Promise.all(arr.map(async m => {
-          const who = m.pubkey === me ? 'me' : await nameOf(m.pubkey)
-          const files = filesOf(m).length
-          const atts = files > 0 ? ` +${files}att` : ''
-          // The result is newline-joined, so multi-line content would forge adjacent rows.
-          const text = m.content.replace(/[\r\n]+/g, ' ⏎ ')
-          return `[${new Date(m.created_at * 1000).toISOString()}] ${who}: ${text}  (id: ${m.id}${atts})`
-        }))
-        return lines.join('\n')
       }
       case 'react': {
         await message(thread, args.message_id as string)
@@ -469,6 +542,7 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
     const thread = threadOf(event, tagged)
     if (!thread) return
     const channel = tag(event, 'h')!
+    const where = channels.get(channel)
     if (!isChannel(thread)) homes.set(thread, channel)
     const text = await unmention(event.content)
 
@@ -492,7 +566,8 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
         message_id: event.id,
         user: await nameOf(event.pubkey),
         user_id: event.pubkey,
-        ts: new Date(event.created_at * 1000).toISOString(),
+        ts: iso(event.created_at),
+        ...(where && !where.dm ? { channel: where.name } : {}),
         ...(thread === event.id ? { new_thread: 'true' } : {}),
         ...(atts.length > 0 ? { attachment_count: String(atts.length), attachments: atts.join('; ') } : {}),
       },

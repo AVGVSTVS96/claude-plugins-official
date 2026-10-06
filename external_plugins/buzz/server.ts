@@ -20,7 +20,7 @@ const mcp = new Server(
       '',
       'new_thread opens another thread with its own fresh session and hands it your prompt. Use it for work the user will want to follow or talk to on its own. handoff moves this whole conversation to another app, such as telegram, when the user asks: you stop here and continue there with your memory.',
       '',
-      'fetch_messages pulls real Buzz history from this thread. If the user asks you to find an old message, fetch more history or ask them roughly when it was.',
+      "fetch_messages pulls real Buzz history, from this thread by default. The tag's channel attribute names the channel this thread is in: fetch_messages(channel) reads that channel's top-level messages, a message with a thread shows its reply count, and fetch_messages(thread: that message's id) reads the thread. When the user refers to earlier work or talk in the channel, read it rather than saying you can't see it. search_messages finds older messages by their words.",
     ].join('\n'),
   },
 )
@@ -85,13 +85,34 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'fetch_messages',
-      description: 'Fetch recent messages from this thread. Returns oldest-first with message IDs.',
+      description: 'Fetch recent messages from this thread, or from a channel or another thread. Returns oldest-first with message IDs. In a channel, a message that has a thread shows its reply count and last reply; pass its id as thread to read the thread.',
       inputSchema: {
         type: 'object',
         properties: {
+          channel: { type: 'string', description: 'Channel to read instead of this thread, by name ("open-source") or id.' },
+          thread: { type: 'string', description: 'Thread to read instead of this thread: the id of the message it hangs off, or its name.' },
+          before: { type: 'string', description: 'Message ID: only messages older than it. Pass the oldest ID you have to page back.' },
           limit: { type: 'number', description: 'Max messages (default 20, max 100).' },
         },
       },
+    },
+    {
+      name: 'search_messages',
+      description: 'Search the Buzz channels you are in for messages containing words, best matches first. Each row names its channel, and the thread a reply belongs to, for fetch_messages.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string' },
+          channel: { type: 'string', description: 'Only search this channel, by name or id.' },
+          limit: { type: 'number', description: 'Max messages (default 20, max 100).' },
+        },
+        required: ['query'],
+      },
+    },
+    {
+      name: 'list_channels',
+      description: 'List the Buzz channels you are in, with their IDs. Direct messages are marked.',
+      inputSchema: { type: 'object', properties: {} },
     },
     {
       name: 'rename_thread',

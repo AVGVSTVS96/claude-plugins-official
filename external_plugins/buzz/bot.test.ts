@@ -6,22 +6,55 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, chmodSync, existsS
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { generateSecretKey, getPublicKey, finalizeEvent, verifyEvent, type Event } from 'nostr-tools/pure'
-import { matchFilters, type Filter } from 'nostr-tools/filter'
+import { matchFilter, matchFilters, type Filter } from 'nostr-tools/filter'
 import { bytesToHex } from 'nostr-tools/utils'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { connectRelay } from './relay.ts'
 
 type Peer = { challenge: string; pubkey?: string; subs: Map<string, Filter[]> }
 
-// A NIP-01/42 relay small enough to read: AUTH first, then REQ/EOSE/CLOSE and EVENT fan-out.
+// A NIP-01/42 relay small enough to read: AUTH first, then REQ/EOSE/CLOSE and EVENT fan-out,
+// NIP-50 search as a substring match, and Buzz's NIP-98 /query channel window (NIP-CW).
 function fakeRelay() {
   const events: Event[] = []
   const frames: unknown[][] = []
   const peers = new Set<ServerWebSocket<Peer>>()
   const downloads: string[] = []
+  const relayKey = generateSecretKey()
+  const isReply = (event: Event) => event.tags.some(t => t[0] === 'e' && t[3] === 'reply')
+
+  function stored(filters: Filter[]) {
+    return filters.flatMap(filter => events
+      .filter(event => matchFilter(filter, event) && (!filter.search || event.content.toLowerCase().includes(filter.search.toLowerCase())))
+      .sort((a, b) => b.created_at - a.created_at)
+      .slice(0, filter.limit))
+  }
+
+  async function query(request: Request) {
+    const body = await request.text()
+    const auth: Event = JSON.parse(Buffer.from(request.headers.get('authorization')!.replace(/^Nostr /, ''), 'base64').toString())
+    const tag = (name: string) => auth.tags.find(t => t[0] === name)?.[1]
+    const signedFor = tag('u') === request.url && tag('method') === 'POST' && tag('payload') === createHash('sha256').update(body).digest('hex')
+    if (!verifyEvent(auth) || auth.kind !== 27235 || !signedFor || JSON.parse(request.headers.get('x-auth-tag') ?? '[]')[1] !== owner) return new Response('bad auth', { status: 401 })
+    const [filter] = JSON.parse(body)
+    const channel = filter['#h'][0]
+    const rows = events
+      .filter(event => matchFilter({ kinds: filter.kinds, '#h': [channel] }, event) && !isReply(event))
+      .sort((a, b) => b.created_at - a.created_at || a.id.localeCompare(b.id))
+      .filter(event => !filter.before_id || event.created_at < filter.until || (event.created_at === filter.until && event.id > filter.before_id))
+      .slice(0, filter.limit)
+    const summaries = rows.flatMap(row => {
+      const replies = events.filter(event => event.tags.some(t => t[0] === 'e' && t[1] === row.id))
+      const summary = { reply_count: replies.length, descendant_count: replies.length, last_reply_at: Math.max(...replies.map(reply => reply.created_at)) }
+      return replies.length > 0 ? [signed(relayKey, 39005, JSON.stringify(summary), [['e', row.id], ['d', row.id], ['h', channel]])] : []
+    })
+    return Response.json([...rows, ...summaries, signed(relayKey, 39006, '{"has_more":false,"next_cursor":null}', [['d', `${channel}:head`], ['h', channel]])])
+  }
+
   const server = Bun.serve<Peer, {}>({
     port: 0,
     fetch(request, server) {
+      if (new URL(request.url).pathname === '/query') return query(request)
       if (new URL(request.url).pathname.startsWith('/media/')) {
         downloads.push(request.headers.get('authorization') ?? '')
         return new Response('pixels')
@@ -52,7 +85,7 @@ function fakeRelay() {
         if (type === 'REQ') {
           const [id, ...filters] = rest
           ws.data.subs.set(id, filters)
-          for (const event of events.filter(event => matchFilters(filters, event))) reply('EVENT', id, event)
+          for (const event of stored(filters)) reply('EVENT', id, event)
           return reply('EOSE', id)
         }
         if (type === 'CLOSE') return void ws.data.subs.delete(rest[0])
@@ -96,9 +129,11 @@ async function until<T>(check: () => T | undefined, timeout = 3000): Promise<T> 
   throw new Error('timed out')
 }
 
-function signed(key: Uint8Array, kind: number, content: string, tags: string[][] = []) {
-  return finalizeEvent({ kind, content, tags, created_at: Math.floor(Date.now() / 1000) }, key)
+function signed(key: Uint8Array, kind: number, content: string, tags: string[][] = [], at = Math.floor(Date.now() / 1000)) {
+  return finalizeEvent({ kind, content, tags, created_at: at }, key)
 }
+
+const iso = (seconds: number) => new Date(seconds * 1000).toISOString()
 
 test('the relay connection authenticates with the auth tag before it asks for anything', async () => {
   const key = generateSecretKey()
@@ -173,12 +208,17 @@ exit 0
   writeFileSync(join(state, 'access.json'), JSON.stringify({ panels: false }))
 
   const channel = crypto.randomUUID()
+  const openSource = crypto.randomUUID()
+  const secret = crypto.randomUUID()
   const dm = crypto.randomUUID()
   const host = generateSecretKey()
   relay.inject(signed(key, 0, JSON.stringify({ name: 'Hex' })))
   relay.inject(signed(ownerKey, 0, JSON.stringify({ display_name: 'Bassim' })))
-  for (const id of [channel, dm]) relay.inject(signed(host, 39002, '', [['d', id], ['p', owner], ['p', me]]))
+  for (const id of [channel, openSource, dm]) relay.inject(signed(host, 39002, '', [['d', id], ['p', owner], ['p', me]]))
+  relay.inject(signed(host, 39002, '', [['d', secret], ['p', owner]]))
   relay.inject(signed(host, 39000, '', [['d', channel], ['name', 'general'], ['t', 'stream']]))
+  relay.inject(signed(host, 39000, '', [['d', openSource], ['name', 'open-source'], ['t', 'stream']]))
+  relay.inject(signed(host, 39000, '', [['d', secret], ['name', 'secret'], ['t', 'stream']]))
   relay.inject(signed(host, 39000, '', [['d', dm], ['name', 'dm'], ['hidden'], ['t', 'dm']]))
 
   const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^(BUZZ_|HEX_|TELEGRAM_|DISCORD_)/.test(name)))
@@ -226,14 +266,16 @@ exit 0
     key,
     auth,
     channel,
+    openSource,
+    secret,
     dm,
     relay,
     published,
     calls,
     launches: () => calls().filter(args => args[0] === '--bg'),
     session,
-    say: (content: string, tags: string[][] = [], from = ownerKey, where = channel) => {
-      const event = signed(from, 9, content, [['h', where], ...tags])
+    say: (content: string, tags: string[][] = [], from = ownerKey, where = channel, at?: number) => {
+      const event = signed(from, 9, content, [['h', where], ...tags], at)
       relay.inject(event)
       return event
     },
@@ -256,7 +298,7 @@ test('Hex goes online, and a tag in a channel starts a thread on that message, n
   expect(args.slice(0, 5)).toEqual(['--bg', '--channels', 'plugin:buzz@hex', '--name', 'desk anchors'])
   const [inbound] = await (await bot.session(root.id)).inbound(1)
   expect(inbound.content).toBe('desk anchors are loose')
-  expect(inbound.meta).toMatchObject({ chat_id: root.id, message_id: root.id, user: 'Bassim', user_id: owner, new_thread: 'true' })
+  expect(inbound.meta).toMatchObject({ chat_id: root.id, message_id: root.id, user: 'Bassim', user_id: owner, channel: 'general', new_thread: 'true' })
   const ack = await until(() => bot.published(7).find(event => event.content === '👀'))
   expect(ack.tags).toEqual([['e', root.id], bot.auth])
 })
@@ -364,4 +406,85 @@ test('download_attachment saves a message\'s files to the inbox, fetched with Bl
   const path = result.text.match(/^ {2}(\S+) {2}\(desk\.png, image\/png, 0KB\)$/m)?.[1]
   expect(readFileSync(path!, 'utf8')).toBe('pixels')
   expect(bot.relay.downloads).toEqual([expect.stringMatching(/^Nostr /)])
+})
+
+// A channel with two threads' worth of PR work, posted by the owner a second apart.
+function seedOpenSource(bot: Awaited<ReturnType<typeof startBot>>) {
+  const t = Math.floor(Date.now() / 1000) - 100
+  const at = (offset: number, content: string, tags: string[][] = []) => bot.say(content, tags, ownerKey, bot.openSource, t + offset)
+  const ci = at(0, 'flaky CI on the relay PR')
+  const docs = at(1, 'merged the docs fix')
+  const rebased = at(2, 'rebased it', [['e', ci.id, '', 'reply']])
+  const pushed = at(3, 'rebased again\nand pushed', [['e', ci.id, '', 'reply']])
+  const release = at(4, 'release tomorrow')
+  return { t, ci, docs, rebased, pushed, release }
+}
+
+test('fetch_messages reads a channel\'s top-level messages oldest-first, with each thread\'s replies, and pages back', async () => {
+  const bot = await startBot()
+  const { session } = await threadStarted(bot)
+  const { t, ci, docs, release } = seedOpenSource(bot)
+  const page = await session.call('fetch_messages', { channel: '#open-source', limit: 2 })
+  expect(page.text).toBe([
+    `[${iso(t + 1)}] Bassim: merged the docs fix  (id: ${docs.id})`,
+    `[${iso(t + 4)}] Bassim: release tomorrow  (id: ${release.id})`,
+  ].join('\n'))
+  const older = await session.call('fetch_messages', { channel: bot.openSource, before: docs.id })
+  expect(older.text).toBe(`[${iso(t)}] Bassim: flaky CI on the relay PR  (id: ${ci.id}, 2 replies, last reply ${iso(t + 3)})`)
+})
+
+test('fetch_messages drills into any thread in a channel by its message id, and pages back through it', async () => {
+  const bot = await startBot()
+  const { session } = await threadStarted(bot)
+  const { t, ci, rebased, pushed } = seedOpenSource(bot)
+  const thread = await session.call('fetch_messages', { thread: ci.id })
+  expect(thread.text).toBe([
+    `[${iso(t)}] Bassim: flaky CI on the relay PR  (id: ${ci.id})`,
+    `[${iso(t + 2)}] Bassim: rebased it  (id: ${rebased.id})`,
+    `[${iso(t + 3)}] Bassim: rebased again ⏎ and pushed  (id: ${pushed.id})`,
+  ].join('\n'))
+  const back = await session.call('fetch_messages', { thread: ci.id, before: pushed.id, limit: 1 })
+  expect(back.text).toBe(`[${iso(t + 2)}] Bassim: rebased it  (id: ${rebased.id})`)
+})
+
+test('sessions read only channels Hex is in, and no direct message but their own', async () => {
+  const bot = await startBot()
+  const { session } = await threadStarted(bot)
+  const hidden = bot.say('secret plans', [], ownerKey, bot.secret)
+  bot.say('just between us', [], ownerKey, bot.dm)
+  expect((await session.call('fetch_messages', { channel: 'secret' })).error).toBe('Hex is in no channel named #secret')
+  expect((await session.call('fetch_messages', { channel: bot.secret })).error).toBe('Hex is in no channel named #' + bot.secret)
+  expect((await session.call('fetch_messages', { thread: hidden.id })).error).toBe('Hex isn\'t in that channel; list_channels shows the ones it is in')
+  expect((await session.call('fetch_messages', { channel: bot.dm })).error).toBe('that is a direct message with someone else')
+  expect((await session.call('search_messages', { query: 'secret', channel: 'secret' })).error).toBe('Hex is in no channel named #secret')
+  const own = await bot.session(bot.dm)
+  expect((await own.call('fetch_messages', { channel: bot.dm })).text).toContain('Bassim: just between us')
+})
+
+test('search_messages finds words in Hex\'s channels, naming each hit\'s channel and thread, and nothing it can\'t read', async () => {
+  const bot = await startBot()
+  const { root, session } = await threadStarted(bot)
+  const { ci } = seedOpenSource(bot)
+  const reply = bot.say('the flaky test is back', [['e', root.id, '', 'reply']])
+  bot.say('flaky secrets', [], ownerKey, bot.secret)
+  bot.say('flaky in private', [], ownerKey, bot.dm)
+  const hits = (await session.call('search_messages', { query: 'FLAKY' })).text.split('\n')
+  expect(hits).toEqual([
+    expect.stringMatching(new RegExp(`Bassim: the flaky test is back  \\(id: ${reply.id}, in #general, thread ${root.id}\\)$`)),
+    expect.stringMatching(new RegExp(`Bassim: flaky CI on the relay PR  \\(id: ${ci.id}, in #open-source\\)$`)),
+  ])
+  const scoped = await session.call('search_messages', { query: 'flaky', channel: 'open-source' })
+  expect(scoped.text).toContain(ci.id)
+  expect(scoped.text).not.toContain(reply.id)
+})
+
+test('list_channels names the channels Hex is in, and marks direct messages', async () => {
+  const bot = await startBot()
+  const { session } = await threadStarted(bot)
+  const lines = (await session.call('list_channels', {})).text.split('\n').sort()
+  expect(lines).toEqual([
+    `#general  (id: ${bot.channel})`,
+    `#open-source  (id: ${bot.openSource})`,
+    `dm  (id: ${bot.dm}, direct message)`,
+  ].sort())
 })

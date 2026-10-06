@@ -4,7 +4,7 @@ id: buzz-threads
 summary: Add a Buzz channel where every Buzz thread is its own Claude Code session through the thread hub, with Buzz's activity, memory and files panels.
 baseline: d4226d062928f8d9505dbdeadd10217d23361052
 patch_file: buzz-threads.patch
-patch_sha256: d796c69aef13d66a065890f67410c24b303f0f9bd91fd100d5601ed27f63483d
+patch_sha256: c4e353dcb1746f5c70947db422a7c443bd416bd98986951020131ee613018f31
 ---
 
 ## Intent
@@ -20,8 +20,9 @@ halves as `discord-threads`:
   own session by its root event id.
 - `server.ts` is the channel every session loads, the same as Discord's, with
   the same tools: `reply` (files go up through Blossom as `imeta`), `react`,
-  `edit_message`, `fetch_messages`, `download_attachment`, `rename_thread`,
-  `close_thread`, `new_thread` and `handoff` to Telegram or Discord.
+  `edit_message`, `fetch_messages`, `list_channels`, `download_attachment`,
+  `rename_thread`, `close_thread`, `new_thread` and `handoff` to Telegram or
+  Discord, plus `search_messages`, which Discord can't offer.
 
 Buzz works like Discord:
 
@@ -35,6 +36,14 @@ Buzz works like Discord:
 - The owner's `!shutdown` (Buzz Desktop's Shutdown button) takes Hex off Buzz
   until the service restarts; `!cancel` in a thread, or Desktop's Stop
   button (a `cancel_turn` control frame), stops that thread's session.
+- A session reads the whole channel, not just its own thread: its inbound
+  messages name their `channel`, `fetch_messages({channel})` returns the
+  channel's top-level messages through the relay's NIP-98 `/query` channel
+  window (NIP-CW), each with its thread's reply count and last reply, and
+  `fetch_messages({thread})` reads any thread by its root id. `before` pages
+  back. `search_messages` is the relay's NIP-50 search. Sessions read only
+  channels Hex is a member of (the relay would also serve open channels it
+  isn't in), and no direct message but their own.
 - `place()` opens a thread for a handoff in `access.json`'s `channel`, else
   `general`, and links to it as `buzz://message?channel=…&id=…`.
 
@@ -63,7 +72,8 @@ the agent's key and auth tag, and it writes them over SSH to
 
 1. One relay connection, owned by the service. Sessions never connect to Buzz.
 2. Tools act on the caller's own thread unless they name another one, so
-   they take no `chat_id`.
+   they take no `chat_id`. Reading may name any channel Hex is in; posting
+   stays in the caller's thread or a thread it names.
 3. Hex posts as its own agent key, and every event it publishes carries its
    auth tag.
 4. Without `BUZZ_RELAY_URL`, `BUZZ_PRIVATE_KEY` and `BUZZ_AUTH_TAG`, Buzz stays
@@ -76,7 +86,8 @@ the agent's key and auth tag, and it writes them over SSH to
 ## Verification
 
 `bun test external_plugins/buzz` runs the bot against an in-process relay,
-the activity and memory panels against a fake relay (including NIP-AE's and
+including channel windows with paging, thread drill-in, search, and refusal
+of channels Hex isn't in and of other direct messages; the activity and memory panels against a fake relay (including NIP-AE's and
 NIP-AF's test vectors), and the provider against a fake ssh. `scripts/verify` builds the
 bot, the channel and the provider.
 

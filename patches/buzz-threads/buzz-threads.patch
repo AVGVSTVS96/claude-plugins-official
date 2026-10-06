@@ -733,10 +733,10 @@ index 0000000000000000000000000000000000000000..4c204e84e4f7d43f2bb8e66a25354588
 +}
 diff --git a/external_plugins/buzz/bot.test.ts b/external_plugins/buzz/bot.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..d911052a4255649c47b8f0213e2ff66d37dbf9da
+index 0000000000000000000000000000000000000000..6116a5e244ed801205eeabd20735f383db299e9f
 --- /dev/null
 +++ b/external_plugins/buzz/bot.test.ts
-@@ -0,0 +1,367 @@
+@@ -0,0 +1,490 @@
 +import { afterAll, afterEach, expect, test } from 'bun:test'
 +import type { ServerWebSocket, Subprocess } from 'bun'
 +import { connect, type Socket } from 'net'
@@ -745,22 +745,55 @@ index 0000000000000000000000000000000000000000..d911052a4255649c47b8f0213e2ff66d
 +import { tmpdir } from 'os'
 +import { join } from 'path'
 +import { generateSecretKey, getPublicKey, finalizeEvent, verifyEvent, type Event } from 'nostr-tools/pure'
-+import { matchFilters, type Filter } from 'nostr-tools/filter'
++import { matchFilter, matchFilters, type Filter } from 'nostr-tools/filter'
 +import { bytesToHex } from 'nostr-tools/utils'
 +import { schnorr } from '@noble/curves/secp256k1.js'
 +import { connectRelay } from './relay.ts'
 +
 +type Peer = { challenge: string; pubkey?: string; subs: Map<string, Filter[]> }
 +
-+// A NIP-01/42 relay small enough to read: AUTH first, then REQ/EOSE/CLOSE and EVENT fan-out.
++// A NIP-01/42 relay small enough to read: AUTH first, then REQ/EOSE/CLOSE and EVENT fan-out,
++// NIP-50 search as a substring match, and Buzz's NIP-98 /query channel window (NIP-CW).
 +function fakeRelay() {
 +  const events: Event[] = []
 +  const frames: unknown[][] = []
 +  const peers = new Set<ServerWebSocket<Peer>>()
 +  const downloads: string[] = []
++  const relayKey = generateSecretKey()
++  const isReply = (event: Event) => event.tags.some(t => t[0] === 'e' && t[3] === 'reply')
++
++  function stored(filters: Filter[]) {
++    return filters.flatMap(filter => events
++      .filter(event => matchFilter(filter, event) && (!filter.search || event.content.toLowerCase().includes(filter.search.toLowerCase())))
++      .sort((a, b) => b.created_at - a.created_at)
++      .slice(0, filter.limit))
++  }
++
++  async function query(request: Request) {
++    const body = await request.text()
++    const auth: Event = JSON.parse(Buffer.from(request.headers.get('authorization')!.replace(/^Nostr /, ''), 'base64').toString())
++    const tag = (name: string) => auth.tags.find(t => t[0] === name)?.[1]
++    const signedFor = tag('u') === request.url && tag('method') === 'POST' && tag('payload') === createHash('sha256').update(body).digest('hex')
++    if (!verifyEvent(auth) || auth.kind !== 27235 || !signedFor || JSON.parse(request.headers.get('x-auth-tag') ?? '[]')[1] !== owner) return new Response('bad auth', { status: 401 })
++    const [filter] = JSON.parse(body)
++    const channel = filter['#h'][0]
++    const rows = events
++      .filter(event => matchFilter({ kinds: filter.kinds, '#h': [channel] }, event) && !isReply(event))
++      .sort((a, b) => b.created_at - a.created_at || a.id.localeCompare(b.id))
++      .filter(event => !filter.before_id || event.created_at < filter.until || (event.created_at === filter.until && event.id > filter.before_id))
++      .slice(0, filter.limit)
++    const summaries = rows.flatMap(row => {
++      const replies = events.filter(event => event.tags.some(t => t[0] === 'e' && t[1] === row.id))
++      const summary = { reply_count: replies.length, descendant_count: replies.length, last_reply_at: Math.max(...replies.map(reply => reply.created_at)) }
++      return replies.length > 0 ? [signed(relayKey, 39005, JSON.stringify(summary), [['e', row.id], ['d', row.id], ['h', channel]])] : []
++    })
++    return Response.json([...rows, ...summaries, signed(relayKey, 39006, '{"has_more":false,"next_cursor":null}', [['d', `${channel}:head`], ['h', channel]])])
++  }
++
 +  const server = Bun.serve<Peer, {}>({
 +    port: 0,
 +    fetch(request, server) {
++      if (new URL(request.url).pathname === '/query') return query(request)
 +      if (new URL(request.url).pathname.startsWith('/media/')) {
 +        downloads.push(request.headers.get('authorization') ?? '')
 +        return new Response('pixels')
@@ -791,7 +824,7 @@ index 0000000000000000000000000000000000000000..d911052a4255649c47b8f0213e2ff66d
 +        if (type === 'REQ') {
 +          const [id, ...filters] = rest
 +          ws.data.subs.set(id, filters)
-+          for (const event of events.filter(event => matchFilters(filters, event))) reply('EVENT', id, event)
++          for (const event of stored(filters)) reply('EVENT', id, event)
 +          return reply('EOSE', id)
 +        }
 +        if (type === 'CLOSE') return void ws.data.subs.delete(rest[0])
@@ -835,9 +868,11 @@ index 0000000000000000000000000000000000000000..d911052a4255649c47b8f0213e2ff66d
 +  throw new Error('timed out')
 +}
 +
-+function signed(key: Uint8Array, kind: number, content: string, tags: string[][] = []) {
-+  return finalizeEvent({ kind, content, tags, created_at: Math.floor(Date.now() / 1000) }, key)
++function signed(key: Uint8Array, kind: number, content: string, tags: string[][] = [], at = Math.floor(Date.now() / 1000)) {
++  return finalizeEvent({ kind, content, tags, created_at: at }, key)
 +}
++
++const iso = (seconds: number) => new Date(seconds * 1000).toISOString()
 +
 +test('the relay connection authenticates with the auth tag before it asks for anything', async () => {
 +  const key = generateSecretKey()
@@ -912,12 +947,17 @@ index 0000000000000000000000000000000000000000..d911052a4255649c47b8f0213e2ff66d
 +  writeFileSync(join(state, 'access.json'), JSON.stringify({ panels: false }))
 +
 +  const channel = crypto.randomUUID()
++  const openSource = crypto.randomUUID()
++  const secret = crypto.randomUUID()
 +  const dm = crypto.randomUUID()
 +  const host = generateSecretKey()
 +  relay.inject(signed(key, 0, JSON.stringify({ name: 'Hex' })))
 +  relay.inject(signed(ownerKey, 0, JSON.stringify({ display_name: 'Bassim' })))
-+  for (const id of [channel, dm]) relay.inject(signed(host, 39002, '', [['d', id], ['p', owner], ['p', me]]))
++  for (const id of [channel, openSource, dm]) relay.inject(signed(host, 39002, '', [['d', id], ['p', owner], ['p', me]]))
++  relay.inject(signed(host, 39002, '', [['d', secret], ['p', owner]]))
 +  relay.inject(signed(host, 39000, '', [['d', channel], ['name', 'general'], ['t', 'stream']]))
++  relay.inject(signed(host, 39000, '', [['d', openSource], ['name', 'open-source'], ['t', 'stream']]))
++  relay.inject(signed(host, 39000, '', [['d', secret], ['name', 'secret'], ['t', 'stream']]))
 +  relay.inject(signed(host, 39000, '', [['d', dm], ['name', 'dm'], ['hidden'], ['t', 'dm']]))
 +
 +  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^(BUZZ_|HEX_|TELEGRAM_|DISCORD_)/.test(name)))
@@ -965,14 +1005,16 @@ index 0000000000000000000000000000000000000000..d911052a4255649c47b8f0213e2ff66d
 +    key,
 +    auth,
 +    channel,
++    openSource,
++    secret,
 +    dm,
 +    relay,
 +    published,
 +    calls,
 +    launches: () => calls().filter(args => args[0] === '--bg'),
 +    session,
-+    say: (content: string, tags: string[][] = [], from = ownerKey, where = channel) => {
-+      const event = signed(from, 9, content, [['h', where], ...tags])
++    say: (content: string, tags: string[][] = [], from = ownerKey, where = channel, at?: number) => {
++      const event = signed(from, 9, content, [['h', where], ...tags], at)
 +      relay.inject(event)
 +      return event
 +    },
@@ -995,7 +1037,7 @@ index 0000000000000000000000000000000000000000..d911052a4255649c47b8f0213e2ff66d
 +  expect(args.slice(0, 5)).toEqual(['--bg', '--channels', 'plugin:buzz@hex', '--name', 'desk anchors'])
 +  const [inbound] = await (await bot.session(root.id)).inbound(1)
 +  expect(inbound.content).toBe('desk anchors are loose')
-+  expect(inbound.meta).toMatchObject({ chat_id: root.id, message_id: root.id, user: 'Bassim', user_id: owner, new_thread: 'true' })
++  expect(inbound.meta).toMatchObject({ chat_id: root.id, message_id: root.id, user: 'Bassim', user_id: owner, channel: 'general', new_thread: 'true' })
 +  const ack = await until(() => bot.published(7).find(event => event.content === '👀'))
 +  expect(ack.tags).toEqual([['e', root.id], bot.auth])
 +})
@@ -1104,12 +1146,93 @@ index 0000000000000000000000000000000000000000..d911052a4255649c47b8f0213e2ff66d
 +  expect(readFileSync(path!, 'utf8')).toBe('pixels')
 +  expect(bot.relay.downloads).toEqual([expect.stringMatching(/^Nostr /)])
 +})
++
++// A channel with two threads' worth of PR work, posted by the owner a second apart.
++function seedOpenSource(bot: Awaited<ReturnType<typeof startBot>>) {
++  const t = Math.floor(Date.now() / 1000) - 100
++  const at = (offset: number, content: string, tags: string[][] = []) => bot.say(content, tags, ownerKey, bot.openSource, t + offset)
++  const ci = at(0, 'flaky CI on the relay PR')
++  const docs = at(1, 'merged the docs fix')
++  const rebased = at(2, 'rebased it', [['e', ci.id, '', 'reply']])
++  const pushed = at(3, 'rebased again\nand pushed', [['e', ci.id, '', 'reply']])
++  const release = at(4, 'release tomorrow')
++  return { t, ci, docs, rebased, pushed, release }
++}
++
++test('fetch_messages reads a channel\'s top-level messages oldest-first, with each thread\'s replies, and pages back', async () => {
++  const bot = await startBot()
++  const { session } = await threadStarted(bot)
++  const { t, ci, docs, release } = seedOpenSource(bot)
++  const page = await session.call('fetch_messages', { channel: '#open-source', limit: 2 })
++  expect(page.text).toBe([
++    `[${iso(t + 1)}] Bassim: merged the docs fix  (id: ${docs.id})`,
++    `[${iso(t + 4)}] Bassim: release tomorrow  (id: ${release.id})`,
++  ].join('\n'))
++  const older = await session.call('fetch_messages', { channel: bot.openSource, before: docs.id })
++  expect(older.text).toBe(`[${iso(t)}] Bassim: flaky CI on the relay PR  (id: ${ci.id}, 2 replies, last reply ${iso(t + 3)})`)
++})
++
++test('fetch_messages drills into any thread in a channel by its message id, and pages back through it', async () => {
++  const bot = await startBot()
++  const { session } = await threadStarted(bot)
++  const { t, ci, rebased, pushed } = seedOpenSource(bot)
++  const thread = await session.call('fetch_messages', { thread: ci.id })
++  expect(thread.text).toBe([
++    `[${iso(t)}] Bassim: flaky CI on the relay PR  (id: ${ci.id})`,
++    `[${iso(t + 2)}] Bassim: rebased it  (id: ${rebased.id})`,
++    `[${iso(t + 3)}] Bassim: rebased again ⏎ and pushed  (id: ${pushed.id})`,
++  ].join('\n'))
++  const back = await session.call('fetch_messages', { thread: ci.id, before: pushed.id, limit: 1 })
++  expect(back.text).toBe(`[${iso(t + 2)}] Bassim: rebased it  (id: ${rebased.id})`)
++})
++
++test('sessions read only channels Hex is in, and no direct message but their own', async () => {
++  const bot = await startBot()
++  const { session } = await threadStarted(bot)
++  const hidden = bot.say('secret plans', [], ownerKey, bot.secret)
++  bot.say('just between us', [], ownerKey, bot.dm)
++  expect((await session.call('fetch_messages', { channel: 'secret' })).error).toBe('Hex is in no channel named #secret')
++  expect((await session.call('fetch_messages', { channel: bot.secret })).error).toBe('Hex is in no channel named #' + bot.secret)
++  expect((await session.call('fetch_messages', { thread: hidden.id })).error).toBe('Hex isn\'t in that channel; list_channels shows the ones it is in')
++  expect((await session.call('fetch_messages', { channel: bot.dm })).error).toBe('that is a direct message with someone else')
++  expect((await session.call('search_messages', { query: 'secret', channel: 'secret' })).error).toBe('Hex is in no channel named #secret')
++  const own = await bot.session(bot.dm)
++  expect((await own.call('fetch_messages', { channel: bot.dm })).text).toContain('Bassim: just between us')
++})
++
++test('search_messages finds words in Hex\'s channels, naming each hit\'s channel and thread, and nothing it can\'t read', async () => {
++  const bot = await startBot()
++  const { root, session } = await threadStarted(bot)
++  const { ci } = seedOpenSource(bot)
++  const reply = bot.say('the flaky test is back', [['e', root.id, '', 'reply']])
++  bot.say('flaky secrets', [], ownerKey, bot.secret)
++  bot.say('flaky in private', [], ownerKey, bot.dm)
++  const hits = (await session.call('search_messages', { query: 'FLAKY' })).text.split('\n')
++  expect(hits).toEqual([
++    expect.stringMatching(new RegExp(`Bassim: the flaky test is back  \\(id: ${reply.id}, in #general, thread ${root.id}\\)$`)),
++    expect.stringMatching(new RegExp(`Bassim: flaky CI on the relay PR  \\(id: ${ci.id}, in #open-source\\)$`)),
++  ])
++  const scoped = await session.call('search_messages', { query: 'flaky', channel: 'open-source' })
++  expect(scoped.text).toContain(ci.id)
++  expect(scoped.text).not.toContain(reply.id)
++})
++
++test('list_channels names the channels Hex is in, and marks direct messages', async () => {
++  const bot = await startBot()
++  const { session } = await threadStarted(bot)
++  const lines = (await session.call('list_channels', {})).text.split('\n').sort()
++  expect(lines).toEqual([
++    `#general  (id: ${bot.channel})`,
++    `#open-source  (id: ${bot.openSource})`,
++    `dm  (id: ${bot.dm}, direct message)`,
++  ].sort())
++})
 diff --git a/external_plugins/buzz/bot.ts b/external_plugins/buzz/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..028782f36a2587e3c7950d00a590ed4e629427bb
+index 0000000000000000000000000000000000000000..c7ace1d514e64c065f4d16042b8794c68e2c1abd
 --- /dev/null
 +++ b/external_plugins/buzz/bot.ts
-@@ -0,0 +1,559 @@
+@@ -0,0 +1,634 @@
 +#!/usr/bin/env bun
 +import { readFileSync, writeFileSync, mkdirSync, statSync, realpathSync, chmodSync } from 'fs'
 +import { createHash } from 'crypto'
@@ -1180,6 +1303,8 @@ index 0000000000000000000000000000000000000000..028782f36a2587e3c7950d00a590ed4e
 +// Buzz clients cap a message at 64 KiB, and a character takes at most 4 bytes.
 +const MAX_CHUNK_LIMIT = 16 * 1024
 +const MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024
++// Chat messages, Buzz's older message kind, and diffs: what a channel's history is made of.
++const MESSAGES = [9, 40002, 40008]
 +
 +// reply's files param takes any path, but channel state and .env files (keys)
 +// are the things Claude has no reason to ever send.
@@ -1237,6 +1362,14 @@ index 0000000000000000000000000000000000000000..028782f36a2587e3c7950d00a590ed4e
 +
 +function now() {
 +  return Math.floor(Date.now() / 1000)
++}
++
++function iso(seconds: number) {
++  return new Date(seconds * 1000).toISOString()
++}
++
++function byTime(a: Event, b: Event) {
++  return a.created_at - b.created_at || a.id.localeCompare(b.id)
 +}
 +
 +function tag(event: Event, name: string) {
@@ -1303,7 +1436,7 @@ index 0000000000000000000000000000000000000000..028782f36a2587e3c7950d00a590ed4e
 +  async function channelOf(thread: string): Promise<string> {
 +    if (isChannel(thread)) return thread
 +    if (!homes.has(thread)) {
-+      const [root] = await relay.query([{ kinds: [9], ids: [thread] }])
++      const [root] = await relay.query([{ kinds: MESSAGES, ids: [thread] }])
 +      const channel = root && tag(root, 'h')
 +      if (!channel) throw new Error(`can't find the channel of thread ${thread}`)
 +      homes.set(thread, channel)
@@ -1320,6 +1453,13 @@ index 0000000000000000000000000000000000000000..028782f36a2587e3c7950d00a590ed4e
 +      : open.find(([, channel]) => channel.name.toLowerCase() === 'general') ?? open[0]
 +    if (!found) throw new Error(wanted ? `Hex is in no channel named #${wanted}` : 'Hex is in no Buzz channel')
 +    return found[0]
++  }
++
++  // The relay also serves open channels Hex isn't in; sessions read only Hex's own.
++  function readable(caller: string, channel: string): string {
++    if (!channels.has(channel)) throw new Error('Hex isn\'t in that channel; list_channels shows the ones it is in')
++    if (channels.get(channel)!.dm && channel !== caller) throw new Error('that is a direct message with someone else')
++    return channel
 +  }
 +
 +  const link = (channel: string, id: string) => `buzz://message?channel=${channel}&id=${id}`
@@ -1382,9 +1522,80 @@ index 0000000000000000000000000000000000000000..028782f36a2587e3c7950d00a590ed4e
 +  }
 +
 +  async function message(thread: string, id: string): Promise<Event> {
-+    const [found] = await relay.query([{ kinds: [9], ids: [id], '#h': [await channelOf(thread)] }])
++    const [found] = await relay.query([{ kinds: MESSAGES, ids: [id], '#h': [await channelOf(thread)] }])
 +    if (!found) throw new Error(`no message ${id} in this thread`)
 +    return found
++  }
++
++  // The relay's NIP-98 signed HTTP query, which serves the channel windows
++  // Desktop reads (NIP-CW): top-level messages with their thread summaries.
++  async function bridge(filters: object[]): Promise<Event[]> {
++    const url = `${http}/query`
++    const body = JSON.stringify(filters)
++    const auth = finalizeEvent({
++      kind: 27235,
++      content: '',
++      created_at: now(),
++      tags: [['u', url], ['method', 'POST'], ['payload', createHash('sha256').update(body).digest('hex')], ['nonce', crypto.randomUUID()]],
++    }, secretKey)
++    const headers = { Authorization: `Nostr ${Buffer.from(JSON.stringify(auth)).toString('base64')}`, 'x-auth-tag': JSON.stringify(authTag), 'Content-Type': 'application/json' }
++    const res = await fetch(url, { method: 'POST', body, headers })
++    if (!res.ok) throw new Error(`the relay refused the read: ${res.status} ${await res.text()}`)
++    return await res.json() as Event[]
++  }
++
++  async function rows(events: Event[], note: (event: Event) => string = () => ''): Promise<string> {
++    if (events.length === 0) return '(no messages)'
++    const lines = await Promise.all(events.map(async m => {
++      const who = m.pubkey === me ? 'me' : await nameOf(m.pubkey)
++      const files = filesOf(m).length
++      const atts = files > 0 ? ` +${files}att` : ''
++      // The result is newline-joined, so multi-line content would forge adjacent rows.
++      const text = m.content.replace(/[\r\n]+/g, ' ⏎ ')
++      return `[${iso(m.created_at)}] ${who}: ${text}  (id: ${m.id}${atts}${note(m)})`
++    }))
++    return lines.join('\n')
++  }
++
++  async function channelWindow(channel: string, limit: number, before?: Event): Promise<string> {
++    const page = await bridge([{ kinds: MESSAGES, '#h': [channel], limit, top_level: true, include_summaries: true, ...(before ? { until: before.created_at, before_id: before.id } : {}) }])
++    if (!page.some(event => event.kind === 39006)) throw new Error('the relay won\'t show Hex that channel')
++    const threads = new Map(page.filter(event => event.kind === 39005).map(event => [tag(event, 'd'), JSON.parse(event.content)]))
++    return rows(page.filter(event => MESSAGES.includes(event.kind)).reverse(), event => {
++      const thread = threads.get(event.id)
++      return thread ? `, ${thread.descendant_count} replies${thread.last_reply_at ? `, last reply ${iso(thread.last_reply_at)}` : ''}` : ''
++    })
++  }
++
++  async function history(caller: string, args: Record<string, unknown>): Promise<string> {
++    const limit = Math.min((args.limit as number) ?? 20, 100)
++    const named = args.thread as string | undefined
++    const thread = named ? (/^[0-9a-f]{64}$/.test(named) ? named : hub.find(named)) : args.channel ? channelNamed(args.channel as string) : caller
++    const channel = await channelOf(thread)
++    if (thread !== caller) readable(caller, channel)
++    const before = args.before ? await message(channel, args.before as string) : undefined
++    if (isChannel(thread) && !channels.get(thread)?.dm) return channelWindow(thread, limit, before)
++    const page = before ? { until: before.created_at, limit: limit + 1 } : { limit }
++    const events = await relay.query(isChannel(thread)
++      ? [{ kinds: MESSAGES, '#h': [channel], ...page }]
++      : [{ kinds: MESSAGES, ids: [thread], '#h': [channel] }, { kinds: MESSAGES, '#h': [channel], '#e': [thread], ...page }])
++    return rows(events.filter(event => !before || byTime(event, before) < 0).sort(byTime).slice(-limit))
++  }
++
++  async function search(caller: string, args: Record<string, unknown>): Promise<string> {
++    const limit = Math.min((args.limit as number) ?? 20, 100)
++    const scope = args.channel ? [readable(caller, channelNamed(args.channel as string))] : [...channels.keys()].filter(id => !channels.get(id)!.dm || id === caller)
++    const hits = scope.length > 0 ? await relay.query([{ kinds: MESSAGES, search: args.query as string, '#h': scope, limit }]) : []
++    return rows(hits, event => {
++      const channel = channels.get(tag(event, 'h')!)
++      const root = rootOf(event)
++      return `, in ${channel?.dm ? 'this direct message' : `#${channel?.name}`}${root ? `, thread ${root}` : ''}`
++    })
++  }
++
++  function listChannels(): string {
++    const lines = [...channels].map(([id, channel]) => channel.dm ? `${channel.name}  (id: ${id}, direct message)` : `#${channel.name}  (id: ${id})`)
++    return lines.join('\n') || '(none)'
 +  }
 +
 +  function react(id: string, emoji: string) {
@@ -1445,6 +1656,9 @@ index 0000000000000000000000000000000000000000..028782f36a2587e3c7950d00a590ed4e
 +      hub.open(thread, name, args.prompt as string)
 +      return `started thread "${name}": ${link}`
 +    }
++    if (tool === 'fetch_messages') return history(caller, args)
++    if (tool === 'search_messages') return search(caller, args)
++    if (tool === 'list_channels') return listChannels()
 +    const thread = args.thread ? hub.find(args.thread as string) : caller
 +    switch (tool) {
 +      case 'reply': {
@@ -1477,24 +1691,6 @@ index 0000000000000000000000000000000000000000..028782f36a2587e3c7950d00a590ed4e
 +        }
 +
 +        return sentIds.length === 1 ? `sent (id: ${sentIds[0]})` : `sent ${sentIds.length} parts (ids: ${sentIds.join(', ')})`
-+      }
-+      case 'fetch_messages': {
-+        const limit = Math.min((args.limit as number) ?? 20, 100)
-+        const channel = await channelOf(thread)
-+        const events = await relay.query(isChannel(thread)
-+          ? [{ kinds: [9], '#h': [channel], limit }]
-+          : [{ kinds: [9], ids: [thread], '#h': [channel] }, { kinds: [9], '#h': [channel], '#e': [thread], limit }])
-+        const arr = events.sort((a, b) => a.created_at - b.created_at).slice(-limit)
-+        if (arr.length === 0) return '(no messages)'
-+        const lines = await Promise.all(arr.map(async m => {
-+          const who = m.pubkey === me ? 'me' : await nameOf(m.pubkey)
-+          const files = filesOf(m).length
-+          const atts = files > 0 ? ` +${files}att` : ''
-+          // The result is newline-joined, so multi-line content would forge adjacent rows.
-+          const text = m.content.replace(/[\r\n]+/g, ' ⏎ ')
-+          return `[${new Date(m.created_at * 1000).toISOString()}] ${who}: ${text}  (id: ${m.id}${atts})`
-+        }))
-+        return lines.join('\n')
 +      }
 +      case 'react': {
 +        await message(thread, args.message_id as string)
@@ -1581,6 +1777,7 @@ index 0000000000000000000000000000000000000000..028782f36a2587e3c7950d00a590ed4e
 +    const thread = threadOf(event, tagged)
 +    if (!thread) return
 +    const channel = tag(event, 'h')!
++    const where = channels.get(channel)
 +    if (!isChannel(thread)) homes.set(thread, channel)
 +    const text = await unmention(event.content)
 +
@@ -1604,7 +1801,8 @@ index 0000000000000000000000000000000000000000..028782f36a2587e3c7950d00a590ed4e
 +        message_id: event.id,
 +        user: await nameOf(event.pubkey),
 +        user_id: event.pubkey,
-+        ts: new Date(event.created_at * 1000).toISOString(),
++        ts: iso(event.created_at),
++        ...(where && !where.dm ? { channel: where.name } : {}),
 +        ...(thread === event.id ? { new_thread: 'true' } : {}),
 +        ...(atts.length > 0 ? { attachment_count: String(atts.length), attachments: atts.join('; ') } : {}),
 +      },
@@ -3146,10 +3344,10 @@ index 0000000000000000000000000000000000000000..58bc8998c2afe2bc9d1ddd28df08cbfb
 +}
 diff --git a/external_plugins/buzz/server.ts b/external_plugins/buzz/server.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..9cfb539a161989f876fdb78b2b37e2f34a6dce31
+index 0000000000000000000000000000000000000000..488cea8088e38d27096237e29e6fa55c0fd5ef18
 --- /dev/null
 +++ b/external_plugins/buzz/server.ts
-@@ -0,0 +1,216 @@
+@@ -0,0 +1,237 @@
 +#!/usr/bin/env bun
 +import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 +import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
@@ -3172,7 +3370,7 @@ index 0000000000000000000000000000000000000000..9cfb539a161989f876fdb78b2b37e2f3
 +      '',
 +      'new_thread opens another thread with its own fresh session and hands it your prompt. Use it for work the user will want to follow or talk to on its own. handoff moves this whole conversation to another app, such as telegram, when the user asks: you stop here and continue there with your memory.',
 +      '',
-+      'fetch_messages pulls real Buzz history from this thread. If the user asks you to find an old message, fetch more history or ask them roughly when it was.',
++      "fetch_messages pulls real Buzz history, from this thread by default. The tag's channel attribute names the channel this thread is in: fetch_messages(channel) reads that channel's top-level messages, a message with a thread shows its reply count, and fetch_messages(thread: that message's id) reads the thread. When the user refers to earlier work or talk in the channel, read it rather than saying you can't see it. search_messages finds older messages by their words.",
 +    ].join('\n'),
 +  },
 +)
@@ -3237,13 +3435,34 @@ index 0000000000000000000000000000000000000000..9cfb539a161989f876fdb78b2b37e2f3
 +    },
 +    {
 +      name: 'fetch_messages',
-+      description: 'Fetch recent messages from this thread. Returns oldest-first with message IDs.',
++      description: 'Fetch recent messages from this thread, or from a channel or another thread. Returns oldest-first with message IDs. In a channel, a message that has a thread shows its reply count and last reply; pass its id as thread to read the thread.',
 +      inputSchema: {
 +        type: 'object',
 +        properties: {
++          channel: { type: 'string', description: 'Channel to read instead of this thread, by name ("open-source") or id.' },
++          thread: { type: 'string', description: 'Thread to read instead of this thread: the id of the message it hangs off, or its name.' },
++          before: { type: 'string', description: 'Message ID: only messages older than it. Pass the oldest ID you have to page back.' },
 +          limit: { type: 'number', description: 'Max messages (default 20, max 100).' },
 +        },
 +      },
++    },
++    {
++      name: 'search_messages',
++      description: 'Search the Buzz channels you are in for messages containing words, best matches first. Each row names its channel, and the thread a reply belongs to, for fetch_messages.',
++      inputSchema: {
++        type: 'object',
++        properties: {
++          query: { type: 'string' },
++          channel: { type: 'string', description: 'Only search this channel, by name or id.' },
++          limit: { type: 'number', description: 'Max messages (default 20, max 100).' },
++        },
++        required: ['query'],
++      },
++    },
++    {
++      name: 'list_channels',
++      description: 'List the Buzz channels you are in, with their IDs. Direct messages are marked.',
++      inputSchema: { type: 'object', properties: {} },
 +    },
 +    {
 +      name: 'rename_thread',
