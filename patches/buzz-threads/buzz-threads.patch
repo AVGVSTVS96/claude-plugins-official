@@ -1869,7 +1869,7 @@ index 0000000000000000000000000000000000000000..c7ace1d514e64c065f4d16042b8794c6
 +}
 diff --git a/external_plugins/buzz/bun.lock b/external_plugins/buzz/bun.lock
 new file mode 100644
-index 0000000000000000000000000000000000000000..be2cde15f76a7dbc46ea70a40e4c74e2f6c4c37f
+index 0000000000000000000000000000000000000000..0c5350499a45013a3b370dc5b6b332370c3cb797
 --- /dev/null
 +++ b/external_plugins/buzz/bun.lock
 @@ -0,0 +1,257 @@
@@ -1909,9 +1909,9 @@ index 0000000000000000000000000000000000000000..be2cde15f76a7dbc46ea70a40e4c74e2
 +
 +    "@anthropic-ai/claude-agent-sdk-win32-x64": ["@anthropic-ai/claude-agent-sdk-win32-x64@0.3.287", "", { "os": "win32", "cpu": "x64" }, "sha512-fczDcWG2Hu+nYQgxeQEsGn5l+3M06RpJXysIsu/BmHTPl7UceTfTpSYr6O/9GU/sNhU0CADJaIIZNwQTfK0DWw=="],
 +
-+    "@anthropic-ai/sdk": ["@anthropic-ai/sdk@0.131.0", "", { "dependencies": { "json-schema-to-ts": "^3.1.1", "standardwebhooks": "^1.0.0" }, "peerDependencies": { "zod": "^3.25.0 || ^4.0.0" }, "optionalPeers": ["zod"], "bin": { "anthropic-ai-sdk": "bin/cli" } }, "sha512-9+PepoU7qVMmM70jSahdnfcMHAvAnzhMOLv2W9WjRLO+OG/MAiBETkwKZqv7KIJ1Cj5h8eZ019bHzZaq+Mbepw=="],
++    "@anthropic-ai/sdk": ["@anthropic-ai/sdk@0.132.0", "", { "dependencies": { "json-schema-to-ts": "^3.1.1", "standardwebhooks": "^1.0.0" }, "peerDependencies": { "zod": "^3.25.0 || ^4.0.0" }, "optionalPeers": ["zod"], "bin": { "anthropic-ai-sdk": "bin/cli" } }, "sha512-hsKXmb+GjIgGpaJRF7rf2yKFa1SPyVJPQhZLNPDYA4J5YRrcVh4jn/aozLRKHWXGCGM9MPw16S+ry+zKIKCr7Q=="],
 +
-+    "@babel/runtime": ["@babel/runtime@7.29.7", "", {}, "sha512-Nq8OhGWiZIZGV6hLHoyAKLLcJihP/xFeBMGJoUrxTX2psI8dCifzLhZISFb+VWS3wFMRDmCGw5R+dOySCqPLhw=="],
++    "@babel/runtime": ["@babel/runtime@7.29.10", "", {}, "sha512-NpugTzbKgGrNe45Ui32cN8vCFFMxVtP/9rtfwv0nP5FRDAjvYBxJcLVpYA9mr1jxP6cnIT7x9LUzuDTbWYYNRA=="],
 +
 +    "@hono/node-server": ["@hono/node-server@2.1.3", "", { "peerDependencies": { "hono": "^4" } }, "sha512-TA//nWMqPhbfdfneACk6t5a9eqbS9lABEPyKn0/xZTah3H3U2XaVg85rJFl0/Fyit0I552YDHgXGVSf3GwqbUw=="],
 +
