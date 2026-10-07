@@ -211,6 +211,41 @@ def _sweep_stale_indexes(dirpath, uid):
             pass
 
 
+def _sweep_stale_stash_indexes(real_index):
+    """Delete `<index>.stash.<pid>` files a killed `git stash create` left
+    next to the real index. Releases before 2.0.10 ran it there, so a clone
+    can hold hundreds, each the size of the index, and nothing else removes
+    them. Only our own regular files past the age limit go: git keeps one for
+    seconds. `index.lock` is never touched; a live git may hold it."""
+    import stat
+    import time
+    uid = os.getuid() if hasattr(os, "getuid") else None
+    cutoff = time.time() - _TEMP_INDEX_STALE_S
+    deadline = time.monotonic() + _SWEEP_BUDGET_S
+    dirpath = os.path.dirname(real_index)
+    stale = re.compile(re.escape(os.path.basename(real_index)) + r"\.stash\.\d+$")
+    try:
+        names = os.listdir(dirpath)
+    except OSError:
+        return
+    for name in names:
+        if not stale.match(name):
+            continue
+        p = os.path.join(dirpath, name)
+        try:
+            st = os.lstat(p)
+            if not stat.S_ISREG(st.st_mode):
+                continue
+            if uid is not None and st.st_uid != uid:
+                continue
+            if max(st.st_mtime, st.st_ctime) < cutoff:
+                os.unlink(p)
+                if time.monotonic() > deadline:
+                    return
+        except OSError:
+            pass
+
+
 # Index copies this process has made and not yet removed.
 _live_copies = set()
 
@@ -360,6 +395,7 @@ def _temp_index(cwd, untracked_paths=None):
         yield None
         return
 
+    _sweep_stale_stash_indexes(real_index)
     tmpdir = _hook_tmpdir()
     try:
         index_bytes = os.path.getsize(real_index)

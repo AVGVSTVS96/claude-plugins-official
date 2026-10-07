@@ -410,3 +410,58 @@ class TestCopySlots:
             assert diffstate.capture_git_baseline(str(repo)) == head
         assert diffstate.capture_git_baseline(str(repo)) != head
         assert _leftovers(tmproot) == []
+
+
+class TestStashIndexesLeftInGitDir:
+    """What releases before 2.0.10 left next to the real index."""
+
+    def test_old_ones_go_and_nothing_else_does(self, tmp_path, tmproot, monkeypatch):
+        repo = make_repo(tmp_path / "repo", {"app.py": "x = 1\n"})
+        git_dir = repo / ".git"
+        index = (git_dir / "index").read_bytes()
+        old = [_write(str(git_dir / n)) for n in ("index.stash.123", "index.stash.99999")]
+        not_ours = [_write(str(git_dir / n)) for n in (
+            "index.lock", "index.stash.12.bak", "index.stash.abc", "index.stash.", "myindex.stash.5")]
+        _advance_clock(monkeypatch, gitutil._TEMP_INDEX_STALE_S + 60)
+        fresh = _write(str(git_dir / "index.stash.456"))
+        now = time.time()  # the moved clock
+        os.utime(fresh, (now, now))
+
+        with gitutil._temp_index(str(repo), untracked_paths=[]):
+            pass
+
+        assert [p for p in old if os.path.exists(p)] == []
+        assert [p for p in not_ours if not os.path.exists(p)] == []
+        assert os.path.exists(fresh)
+        assert (git_dir / "index").read_bytes() == index
+
+    def test_a_directory_or_link_by_that_name_stays(self, tmp_path, tmproot, monkeypatch):
+        repo = make_repo(tmp_path / "repo", {"app.py": "x = 1\n"})
+        git_dir = repo / ".git"
+        target = _write(str(tmp_path / "elsewhere"))
+        os.mkdir(git_dir / "index.stash.1")
+        os.symlink(target, git_dir / "index.stash.2")
+        _advance_clock(monkeypatch, gitutil._TEMP_INDEX_STALE_S + 60)
+
+        with gitutil._temp_index(str(repo), untracked_paths=[]):
+            pass
+
+        assert os.path.isdir(git_dir / "index.stash.1")
+        assert os.path.islink(git_dir / "index.stash.2")
+        assert os.path.exists(target)
+
+    def test_linked_worktree_has_its_own(self, tmp_path, tmproot, monkeypatch):
+        from conftest import git
+        repo = make_repo(tmp_path / "repo", {"app.py": "x = 1\n"})
+        wt = tmp_path / "wt"
+        git(repo, "worktree", "add", "-q", str(wt), "-b", "side")
+        wt_git_dir = repo / ".git" / "worktrees" / "wt"
+        mine = _write(str(wt_git_dir / "index.stash.7"))
+        main = _write(str(repo / ".git" / "index.stash.7"))
+        _advance_clock(monkeypatch, gitutil._TEMP_INDEX_STALE_S + 60)
+
+        with gitutil._temp_index(str(wt), untracked_paths=[]):
+            pass
+
+        assert not os.path.exists(mine)
+        assert os.path.exists(main)
