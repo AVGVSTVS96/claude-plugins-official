@@ -286,10 +286,10 @@ index d72dbc1a759e601dd0188cc7a8c3b58edc04373c..3ecbd0bfb8cc26bae0b85f8a1a1c44e8
 +The bot token lives in `~/.claude/channels/hex/telegram/.env` as `TELEGRAM_BOT_TOKEN=…`, and `access.json` there holds `allowFrom`, the Telegram user ids allowed to talk to it.
 diff --git a/external_plugins/telegram/bot.ts b/external_plugins/telegram/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..278b42475f80b386f8b23084a788d1eb83533422
+index 0000000000000000000000000000000000000000..380adf03690c21f0d0361118e46fe08e4292182c
 --- /dev/null
 +++ b/external_plugins/telegram/bot.ts
-@@ -0,0 +1,506 @@
+@@ -0,0 +1,531 @@
 +#!/usr/bin/env bun
 +import { Bot, GrammyError, InputFile, type Context } from 'grammy'
 +import type { ReactionTypeEmoji } from 'grammy/types'
@@ -721,6 +721,30 @@ index 0000000000000000000000000000000000000000..278b42475f80b386f8b23084a788d1eb
 +  return { thread: MAIN, msgId: forwarded.message_id }
 +}
 +
++const REPLY_FILE_KINDS = ['animation', 'document', 'video', 'audio', 'voice', 'video_note', 'sticker'] as const
++
++// Inside a topic, every message that isn't a reply points at the topic's
++// first message, the one that says the topic was created.
++async function replyMeta(msg: Context['message']): Promise<Record<string, string>> {
++  const replied = msg?.reply_to_message
++  if (!replied || replied.forum_topic_created) return {}
++  const text = replied.text ?? replied.caption
++  const photo = replied.photo?.at(-1)
++  const imagePath = photo && await download(photo.file_id, photo.file_unique_id).catch(err => {
++    process.stderr.write(`telegram hub: replied-to photo download failed: ${err}\n`)
++    return undefined
++  })
++  const kind = REPLY_FILE_KINDS.find(k => replied[k])
++  return {
++    reply_to_message_id: String(replied.message_id),
++    ...(replied.from ? { reply_to_user: replied.from.username ?? String(replied.from.id) } : {}),
++    ...(text ? { reply_to_text: text } : {}),
++    ...(msg.quote ? { reply_to_quote: msg.quote.text } : {}),
++    ...(imagePath ? { reply_to_image_path: imagePath } : {}),
++    ...(kind ? { reply_to_attachment_kind: kind, reply_to_attachment_file_id: replied[kind]!.file_id } : {}),
++  }
++}
++
 +async function handleInbound(
 +  ctx: Context,
 +  text: string,
@@ -766,6 +790,7 @@ index 0000000000000000000000000000000000000000..278b42475f80b386f8b23084a788d1eb
 +        ...(attachment.mime ? { attachment_mime: attachment.mime } : {}),
 +        ...(attachment.name ? { attachment_name: attachment.name } : {}),
 +      } : {}),
++      ...(await replyMeta(ctx.message)),
 +    },
 +  }
 +  hub.deliver(thread, nameOf(ctx, thread), message)
@@ -816,7 +841,7 @@ index b80fcea0f4f395012586cf5fac3682270e7fb14f..a8d061bfa3c603151ab2491dc06af4fa
    "dependencies": {
      "@modelcontextprotocol/sdk": "^1.0.0",
 diff --git a/external_plugins/telegram/server.ts b/external_plugins/telegram/server.ts
-index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..f27cec50a2c3298a510b5718e02e9b7ca0c4b43d 100644
+index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..27df7f8a32b67fc437206556baeeecf41a19a5de 100644
 --- a/external_plugins/telegram/server.ts
 +++ b/external_plugins/telegram/server.ts
 @@ -1,467 +1,49 @@
@@ -1235,7 +1260,7 @@ index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..f27cec50a2c3298a510b5718e02e9b7c
 +      'The sender reads Telegram, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat. Nobody watches this terminal either, so once your reply is sent, end the turn instead of summarizing it here.',
        '',
 -      'Messages from Telegram arrive as <channel source="telegram" chat_id="..." message_id="..." user="..." ts="...">. If the tag has an image_path attribute, Read that file — it is a photo the sender attached. If the tag has attachment_file_id, call download_attachment with that file_id to fetch the file, then Read the returned path. Reply with the reply tool — pass chat_id back. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply, omit reply_to for normal responses.',
-+      'This session is one Telegram thread: a forum topic, a group\'s General, or a direct chat. Its messages arrive as <channel source="telegram" chat_id="..." message_id="..." user="..." ts="...">, and everything you send with these tools lands back in that same thread. If the tag has an image_path attribute, Read that file — it is a photo the sender attached. If the tag has attachment_file_id, call download_attachment with that file_id to fetch the file, then Read the returned path. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply.',
++      'This session is one Telegram thread: a forum topic, a group\'s General, or a direct chat. Its messages arrive as <channel source="telegram" chat_id="..." message_id="..." user="..." ts="...">, and everything you send with these tools lands back in that same thread. If the tag has an image_path attribute, Read that file — it is a photo the sender attached. If the tag has attachment_file_id, call download_attachment with that file_id to fetch the file, then Read the returned path. If the tag has reply_to_message_id, the sender replied to that earlier message: reply_to_text is its text or caption, reply_to_quote the part they highlighted, reply_to_image_path a photo it carried (Read it), and reply_to_attachment_file_id a file it carried (download_attachment). Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply.',
        '',
        'reply accepts file paths (files: ["/abs/path.png"]) for attachments. Use react to add emoji reactions, and edit_message for interim progress updates. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',
        '',

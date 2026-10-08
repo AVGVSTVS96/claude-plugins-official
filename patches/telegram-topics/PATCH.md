@@ -4,7 +4,7 @@ id: telegram-topics
 summary: Rework the Telegram channel so every forum topic in a group is its own Claude Code session, through the thread hub.
 baseline: b78ac49cdc6b3d7b61c4439470e311f4291265b1
 patch_file: telegram-topics.patch
-patch_sha256: 06e6885f18c02e47d0964a43b86f4d045b194d17a1a1b930980683e9baf76322
+patch_sha256: 1492af45710c2c7f21be299c75b84e7902d26907b0fd97da9e2cbe4f2d582d23
 ---
 
 ## Intent
@@ -36,6 +36,9 @@ On top of upstream:
 - A session that fails to start says why, in its topic.
 - `reply` refuses to attach channel state or any `.env` file.
 - General is the hub's main thread, named after `HEX_NAME`.
+- A message that replies to an earlier one says which, in `reply_to_*`
+  meta: its id, author, text or caption, the part highlighted, and the photo
+  (downloaded) or file it carried. Upstream drops this (issue #2788).
 
 ## Invariants
 
@@ -50,7 +53,9 @@ On top of upstream:
 5. Deliberately dropped from upstream, never ported back: pairing and
    `/telegram:access` (single user; `access.json` holds `allowFrom`), bot
    commands, permission relay, and the `bot.pid` takeover.
-6. Keep upstream's wording and structure wherever code is shared, so heals
+6. Inside a topic, Telegram makes every message a reply to the topic's
+   creation message; those carry no `reply_to_*` meta.
+7. Keep upstream's wording and structure wherever code is shared, so heals
    stay small.
 
 ## Verification

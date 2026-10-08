@@ -429,6 +429,30 @@ async function placeOf(ctx: Context): Promise<{ thread: string; msgId?: number }
   return { thread: MAIN, msgId: forwarded.message_id }
 }
 
+const REPLY_FILE_KINDS = ['animation', 'document', 'video', 'audio', 'voice', 'video_note', 'sticker'] as const
+
+// Inside a topic, every message that isn't a reply points at the topic's
+// first message, the one that says the topic was created.
+async function replyMeta(msg: Context['message']): Promise<Record<string, string>> {
+  const replied = msg?.reply_to_message
+  if (!replied || replied.forum_topic_created) return {}
+  const text = replied.text ?? replied.caption
+  const photo = replied.photo?.at(-1)
+  const imagePath = photo && await download(photo.file_id, photo.file_unique_id).catch(err => {
+    process.stderr.write(`telegram hub: replied-to photo download failed: ${err}\n`)
+    return undefined
+  })
+  const kind = REPLY_FILE_KINDS.find(k => replied[k])
+  return {
+    reply_to_message_id: String(replied.message_id),
+    ...(replied.from ? { reply_to_user: replied.from.username ?? String(replied.from.id) } : {}),
+    ...(text ? { reply_to_text: text } : {}),
+    ...(msg.quote ? { reply_to_quote: msg.quote.text } : {}),
+    ...(imagePath ? { reply_to_image_path: imagePath } : {}),
+    ...(kind ? { reply_to_attachment_kind: kind, reply_to_attachment_file_id: replied[kind]!.file_id } : {}),
+  }
+}
+
 async function handleInbound(
   ctx: Context,
   text: string,
@@ -474,6 +498,7 @@ async function handleInbound(
         ...(attachment.mime ? { attachment_mime: attachment.mime } : {}),
         ...(attachment.name ? { attachment_name: attachment.name } : {}),
       } : {}),
+      ...(await replyMeta(ctx.message)),
     },
   }
   hub.deliver(thread, nameOf(ctx, thread), message)
