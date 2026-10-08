@@ -922,14 +922,15 @@ for (const [name, agg] of Object.entries(byRepo)) {
       for (const c of raw) byShaForRepo.set(c.sha, c.date);
     }
   }
-  // Only fall back to "couldn't tell" when NO clone produced usable data —
-  // one stale or broken clone must not hide the answer another clone already
-  // gave for the same project.
-  const gitFailed = sawFailedClone && !sawUsableClone;
+  // A clone that errored may hold exactly the commits the others lack, so a
+  // zero alongside a failure is "couldn't tell", not "none". Commits found in
+  // a clone that answered still count: a broken sibling must not hide them.
+  const gitFailed = sawFailedClone && byShaForRepo.size === 0;
   if (gitFailed) anyGitError = true;
-  const commits = sawUsableClone
-    ? [...byShaForRepo].map(([sha, date]) => ({ sha, date }))
-    : null;
+  const commits =
+    sawUsableClone && !gitFailed
+      ? [...byShaForRepo].map(([sha, date]) => ({ sha, date }))
+      : null;
 
   let gitActiveDayOverlap = null;
   if (commits) {
