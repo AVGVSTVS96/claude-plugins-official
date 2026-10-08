@@ -2142,10 +2142,10 @@ index 0000000000000000000000000000000000000000..7112054b720266b866c74bc3b48350f6
 +optional = false
 diff --git a/external_plugins/buzz/memory.test.ts b/external_plugins/buzz/memory.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..091f6f792f834d884e0ab21d4deffa218868b556
+index 0000000000000000000000000000000000000000..4f09a0dcd4f8e3ea554ece8a4733419424b16afc
 --- /dev/null
 +++ b/external_plugins/buzz/memory.test.ts
-@@ -0,0 +1,432 @@
+@@ -0,0 +1,448 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { execFileSync } from 'child_process'
 +import { createHash, createHmac } from 'crypto'
@@ -2340,6 +2340,22 @@ index 0000000000000000000000000000000000000000..091f6f792f834d884e0ab21d4deffa21
 +  start(relay, [])
 +  await Bun.sleep(300)
 +  expect(relay.events.length).toBe(4)
++})
++
++test("OptMem's notes become one memory per day, and a new note updates only its day", async () => {
++  const note = (n: number, day: string, text: string) => `#${n} ${day} ${text}`.padEnd(80) + '\n'
++  write('memory/LOG.txt', note(0, '2026-10-07', 'set up the server') + note(1, '2026-10-08', 'joined Buzz'))
++  const relay = fakeRelay()
++  start(relay, [])
++  await until(() => relay.events.length === 2)
++  expect(opened(relay, 30174).map(({ body }) => body)).toEqual([
++    { slug: 'mem/notes/2026-10-07', value: '- set up the server' },
++    { slug: 'mem/notes/2026-10-08', value: '- joined Buzz' },
++  ])
++
++  write('memory/LOG.txt', note(0, '2026-10-07', 'set up the server') + note(1, '2026-10-08', 'joined Buzz') + note(2, '2026-10-08', 'read the whole channel'))
++  await until(() => relay.events.length === 3)
++  expect(opened(relay, 30174)[2]!.body).toEqual({ slug: 'mem/notes/2026-10-08', value: '- joined Buzz\n- read the whole channel' })
 +})
 +
 +test('shared files are published with their content, listed when it cannot be inlined, and removed when gone', async () => {
@@ -2580,10 +2596,10 @@ index 0000000000000000000000000000000000000000..091f6f792f834d884e0ab21d4deffa21
 +})
 diff --git a/external_plugins/buzz/memory.ts b/external_plugins/buzz/memory.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..5e7d18bea061e6a80ec87f8f28cdf5975d065ef5
+index 0000000000000000000000000000000000000000..a6c5eed7f5047133511a54bc1525d496eb2a3a67
 --- /dev/null
 +++ b/external_plugins/buzz/memory.ts
-@@ -0,0 +1,277 @@
+@@ -0,0 +1,288 @@
 +import { createHash, createHmac } from 'crypto'
 +import { execFile } from 'child_process'
 +import { lstatSync, readFileSync, readdirSync, renameSync, statSync, watch, writeFileSync, type FSWatcher } from 'fs'
@@ -2599,6 +2615,7 @@ index 0000000000000000000000000000000000000000..5e7d18bea061e6a80ec87f8f28cdf597
 +const RESULT = 4181
 +const LIMIT = 65535
 +const SHARE = ['AGENTS.md', 'SOUL.md', 'MEMORY.md', 'schedules.json']
++const NOTES = 'memory/LOG.txt'
 +const SETTLE = 500
 +const RESYNC = 10 * 60_000
 +const HEX64 = /^[0-9a-f]{64}$/
@@ -2611,8 +2628,9 @@ index 0000000000000000000000000000000000000000..5e7d18bea061e6a80ec87f8f28cdf597
 +// Readers check content against sha256, and a default TextDecoder drops a leading BOM.
 +const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
 +
-+// The memory panel (NIP-AE) shows SOUL.md as the core record and each `## ` section
-+// of MEMORY.md as a memory. Agent Files shows the shared files and takes the owner's edits.
++// The memory panel (NIP-AE) shows SOUL.md as the core record, each `## ` section of
++// MEMORY.md as a memory, and each day of OptMem's notes as one more. Agent Files
++// shows the shared files and takes the owner's edits.
 +export function startMemory({ relay, secretKey, owner, hexDir, share = SHARE }: {
 +  relay: Relay
 +  secretKey: Uint8Array
@@ -2706,6 +2724,11 @@ index 0000000000000000000000000000000000000000..5e7d18bea061e6a80ec87f8f28cdf597
 +      let slug = base
 +      for (let n = 2; wanted.has(slug); n++) slug = `${base}-${n}`
 +      if (value) wanted.set(slug, { slug, value })
++    }
++    const notes = (read(NOTES) ?? '').matchAll(/^#\d+ (\d{4}-\d\d-\d\d) (.+?)\s*$/gm)
++    for (const [day, lines] of Map.groupBy(notes, note => note[1]!)) {
++      const slug = `mem/notes/${day}`
++      wanted.set(slug, { slug, value: lines.map(note => `- ${note[2]}`).join('\n') })
 +    }
 +    return wanted
 +  }
@@ -2807,13 +2830,17 @@ index 0000000000000000000000000000000000000000..5e7d18bea061e6a80ec87f8f28cdf597
 +    for (const watcher of watchers.splice(0)) watcher.close()
 +    if (closed) return
 +    const top = new Set(['SOUL.md', 'MEMORY.md', ...shared.map(entry => entry.split('/')[0])])
-+    for (const dir of ['', ...shared]) {
-+      const full = join(hexDir, dir)
-+      try {
-+        if (dir && !statSync(full).isDirectory()) continue
-+        watchers.push(watch(full, { recursive: !!dir }, (_, name) => (dir || top.has(String(name))) && later()).on('error', () => {}))
-+      } catch {}
-+    }
++    follow('', false, name => top.has(name))
++    follow(posix.dirname(NOTES), false, name => name === posix.basename(NOTES))
++    for (const dir of shared) follow(dir, true, () => true)
++  }
++
++  function follow(dir: string, recursive: boolean, wanted: (name: string) => boolean) {
++    const full = join(hexDir, dir)
++    try {
++      if (dir && !statSync(full).isDirectory()) return
++      watchers.push(watch(full, { recursive }, (_, name) => wanted(String(name)) && later()).on('error', () => {}))
++    } catch {}
 +  }
 +
 +  sync()

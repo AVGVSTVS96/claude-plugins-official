@@ -4,7 +4,7 @@ id: buzz-threads
 summary: Add a Buzz channel where every Buzz thread is its own Claude Code session through the thread hub, with Buzz's activity, memory and files panels.
 baseline: b78ac49cdc6b3d7b61c4439470e311f4291265b1
 patch_file: buzz-threads.patch
-patch_sha256: 5ce126020862dada735d24b8295b818a8c0b4e2da0616781aa1d47e60479f40e
+patch_sha256: 6a3c74c3ed4226903bffe2a57e417910d0ce1e115e4c35988be5ef4f3059f966
 ---
 
 ## Intent
@@ -55,8 +55,9 @@ agent panels:
   telemetry (kind 24200, NIP-44 to the owner, at most one event a second),
   with turn start, liveness and completion, a `session/new` carrying what the
   session loaded, and remote logs on `log_follow`.
-- `memory.ts`: NIP-AE engrams (kind 30174), `SOUL.md` as the core record and
-  each `## ` section of `MEMORY.md` as a memory; and NIP-AF Agent Files
+- `memory.ts`: NIP-AE engrams (kind 30174), `SOUL.md` as the core record,
+  each `## ` section of `MEMORY.md` as a memory, and each day of OptMem's
+  `memory/LOG.txt` notes as `mem/notes/<date>`; and NIP-AF Agent Files
   (kinds 30180 / 4180 / 4181) for the files in `access.json`'s `share` list:
   a record per file (content inlined only when it's UTF-8 and fits), a
   tombstone for each file deleted or unshared, even while Hex was down, and

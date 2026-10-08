@@ -194,6 +194,22 @@ test('only changed sections are published again, empty ones never, and a restart
   expect(relay.events.length).toBe(4)
 })
 
+test("OptMem's notes become one memory per day, and a new note updates only its day", async () => {
+  const note = (n: number, day: string, text: string) => `#${n} ${day} ${text}`.padEnd(80) + '\n'
+  write('memory/LOG.txt', note(0, '2026-10-07', 'set up the server') + note(1, '2026-10-08', 'joined Buzz'))
+  const relay = fakeRelay()
+  start(relay, [])
+  await until(() => relay.events.length === 2)
+  expect(opened(relay, 30174).map(({ body }) => body)).toEqual([
+    { slug: 'mem/notes/2026-10-07', value: '- set up the server' },
+    { slug: 'mem/notes/2026-10-08', value: '- joined Buzz' },
+  ])
+
+  write('memory/LOG.txt', note(0, '2026-10-07', 'set up the server') + note(1, '2026-10-08', 'joined Buzz') + note(2, '2026-10-08', 'read the whole channel'))
+  await until(() => relay.events.length === 3)
+  expect(opened(relay, 30174)[2]!.body).toEqual({ slug: 'mem/notes/2026-10-08', value: '- joined Buzz\n- read the whole channel' })
+})
+
 test('shared files are published with their content, listed when it cannot be inlined, and removed when gone', async () => {
   write('AGENTS.md', '@SOUL.md\n')
   write('SOUL.md', '# Who you are\n')

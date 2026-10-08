@@ -13,6 +13,7 @@ const EDIT = 4180
 const RESULT = 4181
 const LIMIT = 65535
 const SHARE = ['AGENTS.md', 'SOUL.md', 'MEMORY.md', 'schedules.json']
+const NOTES = 'memory/LOG.txt'
 const SETTLE = 500
 const RESYNC = 10 * 60_000
 const HEX64 = /^[0-9a-f]{64}$/
@@ -25,8 +26,9 @@ const log = (line: string) => process.stderr.write(`buzz hub: ${line}\n`)
 // Readers check content against sha256, and a default TextDecoder drops a leading BOM.
 const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
 
-// The memory panel (NIP-AE) shows SOUL.md as the core record and each `## ` section
-// of MEMORY.md as a memory. Agent Files shows the shared files and takes the owner's edits.
+// The memory panel (NIP-AE) shows SOUL.md as the core record, each `## ` section of
+// MEMORY.md as a memory, and each day of OptMem's notes as one more. Agent Files
+// shows the shared files and takes the owner's edits.
 export function startMemory({ relay, secretKey, owner, hexDir, share = SHARE }: {
   relay: Relay
   secretKey: Uint8Array
@@ -120,6 +122,11 @@ export function startMemory({ relay, secretKey, owner, hexDir, share = SHARE }: 
       let slug = base
       for (let n = 2; wanted.has(slug); n++) slug = `${base}-${n}`
       if (value) wanted.set(slug, { slug, value })
+    }
+    const notes = (read(NOTES) ?? '').matchAll(/^#\d+ (\d{4}-\d\d-\d\d) (.+?)\s*$/gm)
+    for (const [day, lines] of Map.groupBy(notes, note => note[1]!)) {
+      const slug = `mem/notes/${day}`
+      wanted.set(slug, { slug, value: lines.map(note => `- ${note[2]}`).join('\n') })
     }
     return wanted
   }
@@ -221,13 +228,17 @@ export function startMemory({ relay, secretKey, owner, hexDir, share = SHARE }: 
     for (const watcher of watchers.splice(0)) watcher.close()
     if (closed) return
     const top = new Set(['SOUL.md', 'MEMORY.md', ...shared.map(entry => entry.split('/')[0])])
-    for (const dir of ['', ...shared]) {
-      const full = join(hexDir, dir)
-      try {
-        if (dir && !statSync(full).isDirectory()) continue
-        watchers.push(watch(full, { recursive: !!dir }, (_, name) => (dir || top.has(String(name))) && later()).on('error', () => {}))
-      } catch {}
-    }
+    follow('', false, name => top.has(name))
+    follow(posix.dirname(NOTES), false, name => name === posix.basename(NOTES))
+    for (const dir of shared) follow(dir, true, () => true)
+  }
+
+  function follow(dir: string, recursive: boolean, wanted: (name: string) => boolean) {
+    const full = join(hexDir, dir)
+    try {
+      if (dir && !statSync(full).isDirectory()) return
+      watchers.push(watch(full, { recursive }, (_, name) => wanted(String(name)) && later()).on('error', () => {}))
+    } catch {}
   }
 
   sync()
