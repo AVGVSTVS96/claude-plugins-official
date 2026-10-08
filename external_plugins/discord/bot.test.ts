@@ -5,7 +5,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import * as discord from 'discord.js'
 
-const { ChannelType, Collection, SnowflakeUtil } = discord
+const { ChannelType, Collection, MessageType, SnowflakeUtil } = discord
 const BOT = '1000'
 const OWNER = '2000'
 const GUILD = '3000'
@@ -44,7 +44,7 @@ function channel(id: string, fields: Channel): Channel {
 
 function say(where: Channel, minute: number, content: string, thread?: Channel) {
   const id = snowflake(minute)
-  const message = { id, content, createdAt: at(minute), author: { id: OWNER, username: 'bassim', bot: false }, attachments: new Collection(), thread: thread ?? null }
+  const message = { id, content, createdAt: at(minute), author: { id: OWNER, username: 'bassim', bot: false }, attachments: new Collection(), messageSnapshots: new Collection(), thread: thread ?? null }
   where.posted.push(message)
   return message
 }
@@ -127,6 +127,26 @@ test('a message in a thread names the channel the thread is in', async () => {
   handlers.get('messageCreate')!(message)
   const inbound = await until(() => received.find(line => line.type === 'inbound'))
   expect(inbound.meta).toMatchObject({ chat_id: here.id, message_id: message.id, channel: 'general' })
+})
+
+test('a reply says which message it answers, an edit comes back marked edited, and a forward carries what was forwarded', async () => {
+  const live = { inGuild: () => true, channel: here, mentions: { has: () => false }, react: async () => {} }
+  const inbound = (id: string, edited?: string) => until(() => received.find(line => line.type === 'inbound' && line.meta.message_id === id && line.meta.edited === edited))
+  const asked = say(here, 7, 'which anchors?')
+  const reply = { ...say(here, 8, 'the left ones'), ...live, type: MessageType.Reply, reference: { messageId: asked.id }, fetchReference: async () => asked }
+  handlers.get('messageCreate')!(reply)
+  expect((await inbound(reply.id)).meta).toMatchObject({ reply_to_message_id: asked.id, reply_to_user: 'bassim', reply_to_text: 'which anchors?' })
+
+  handlers.get('messageUpdate')!({ ...reply, partial: false }, { ...reply, content: 'the right ones' })
+  const edit = await inbound(reply.id, 'true')
+  expect(edit.content).toBe('the right ones')
+  expect(edit.meta.new_thread).toBeUndefined()
+
+  const forward = { ...say(here, 9, ''), ...live, messageSnapshots: new Collection([['1', { content: 'ship it friday', attachments: new Collection() }]]) }
+  handlers.get('messageCreate')!(forward)
+  const forwarded = await inbound(forward.id)
+  expect(forwarded.content).toBe('ship it friday')
+  expect(forwarded.meta.forwarded).toBe('true')
 })
 
 test('fetch_messages reads a channel\'s top-level messages oldest-first, with each thread\'s replies, and pages back', async () => {

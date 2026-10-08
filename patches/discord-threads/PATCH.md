@@ -4,7 +4,7 @@ id: discord-threads
 summary: Rework the Discord channel so every thread in a server is its own Claude Code session, Claude-tag style, through the thread hub.
 baseline: b78ac49cdc6b3d7b61c4439470e311f4291265b1
 patch_file: discord-threads.patch
-patch_sha256: 7b6000190848b75eba4deb89402054962cf5add703a56303c0eb7125657a41be
+patch_sha256: 31f119b77a18698ed230ca528bb853eecebcc6c88528565f50ef30f2c6bf0f6f
 ---
 
 ## Intent
@@ -47,6 +47,10 @@ Discord is the place for deeper work, Claude-tag style:
 - `reply` refuses to attach channel state or any `.env` file.
 - User, nickname and role mentions are stripped from a message and from the
   thread name it starts.
+- A reply says which message it answers, in `reply_to_*` meta: its id,
+  author, text and attachments.
+- An edit reaches the session again, marked `edited`. A forward carries the
+  forwarded message's text and attachments, marked `forwarded`.
 
 ## Invariants
 

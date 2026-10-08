@@ -4,7 +4,7 @@ id: telegram-topics
 summary: Rework the Telegram channel so every forum topic in a group is its own Claude Code session, through the thread hub.
 baseline: b78ac49cdc6b3d7b61c4439470e311f4291265b1
 patch_file: telegram-topics.patch
-patch_sha256: 1492af45710c2c7f21be299c75b84e7902d26907b0fd97da9e2cbe4f2d582d23
+patch_sha256: e17c74e5d5f956ee52be50f9b14a1a60106d0beb9cbae0eee939a5d9ec4e652e
 ---
 
 ## Intent
@@ -39,6 +39,11 @@ On top of upstream:
 - A message that replies to an earlier one says which, in `reply_to_*`
   meta: its id, author, text or caption, the part highlighted, and the photo
   (downloaded) or file it carried. Upstream drops this (issue #2788).
+- An edited message reaches the session again, marked `edited`, and a
+  forwarded one names its sender in `forwarded_from`.
+- A link's address is kept: Telegram puts it in the message's entities, so
+  `[text](url)` goes back into the text.
+- Locations, venues and contacts arrive as text instead of being dropped.
 
 ## Invariants
 

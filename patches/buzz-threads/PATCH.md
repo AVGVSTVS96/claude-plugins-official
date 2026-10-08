@@ -4,7 +4,7 @@ id: buzz-threads
 summary: Add a Buzz channel where every Buzz thread is its own Claude Code session through the thread hub, with Buzz's activity, memory and files panels.
 baseline: b78ac49cdc6b3d7b61c4439470e311f4291265b1
 patch_file: buzz-threads.patch
-patch_sha256: 6a3c74c3ed4226903bffe2a57e417910d0ce1e115e4c35988be5ef4f3059f966
+patch_sha256: 8416583037809f40c837f1ee50c2884aa0ab4e8cdabdcd078a53834079bf560a
 ---
 
 ## Intent
@@ -44,6 +44,11 @@ Buzz works like Discord:
   back. `search_messages` is the relay's NIP-50 search. Sessions read only
   channels Hex is a member of (the relay would also serve open channels it
   isn't in), and no direct message but their own.
+- A reply to one message in particular (a NIP-10 reply marker other than
+  the thread's head) says which, in `reply_to_*` meta: its id, author, text
+  and attachments.
+- An edit (kind 40003) of the sender's own message reaches the session as
+  that message's new text, marked `edited`.
 - `place()` opens a thread for a handoff in `access.json`'s `channel`, else
   `general`, and links to it as `buzz://message?channel=…&id=…`.
 

@@ -329,6 +329,28 @@ test('a direct message reaches the DM\'s own thread without a tag', async () => 
   expect(inbound.meta.new_thread).toBeUndefined()
 })
 
+test('a reply to one message in a thread says which, with its text; one to the thread head says nothing', async () => {
+  const bot = await startBot()
+  const { root, session } = await threadStarted(bot)
+  const shelf = bot.say('the shelf too', [['e', root.id, '', 'reply']])
+  bot.say('both of them', [['e', root.id, '', 'root'], ['e', shelf.id, '', 'reply']])
+  const inbound = await session.inbound(3)
+  expect(inbound[1].meta.reply_to_message_id).toBeUndefined()
+  expect(inbound[2].meta).toMatchObject({ reply_to_message_id: shelf.id, reply_to_user: 'Bassim', reply_to_text: 'the shelf too' })
+})
+
+test('an edit reaches the thread as the edited message\'s new text', async () => {
+  const bot = await startBot()
+  const { root, session } = await threadStarted(bot)
+  const typo = bot.say('the lfet one', [['e', root.id, '', 'reply']])
+  await session.inbound(2)
+  bot.relay.inject(signed(ownerKey, 40003, 'the left one', [['h', bot.channel], ['e', typo.id]]))
+  const inbound = await session.inbound(3)
+  expect(inbound[2].content).toBe('the left one')
+  expect(inbound[2].meta).toMatchObject({ message_id: typo.id, edited: 'true' })
+  expect(inbound[2].meta.new_thread).toBeUndefined()
+})
+
 test('reply posts into the thread with NIP-10 markers, a p tag for the owner and the auth tag', async () => {
   const bot = await startBot()
   const { root, session } = await threadStarted(bot)

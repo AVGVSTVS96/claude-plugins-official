@@ -733,10 +733,10 @@ index 0000000000000000000000000000000000000000..4c204e84e4f7d43f2bb8e66a25354588
 +}
 diff --git a/external_plugins/buzz/bot.test.ts b/external_plugins/buzz/bot.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..6116a5e244ed801205eeabd20735f383db299e9f
+index 0000000000000000000000000000000000000000..a5b99f427d6fdc762d7c69db59cf3a03eb4371b4
 --- /dev/null
 +++ b/external_plugins/buzz/bot.test.ts
-@@ -0,0 +1,490 @@
+@@ -0,0 +1,512 @@
 +import { afterAll, afterEach, expect, test } from 'bun:test'
 +import type { ServerWebSocket, Subprocess } from 'bun'
 +import { connect, type Socket } from 'net'
@@ -1068,6 +1068,28 @@ index 0000000000000000000000000000000000000000..6116a5e244ed801205eeabd20735f383
 +  expect(inbound.meta.new_thread).toBeUndefined()
 +})
 +
++test('a reply to one message in a thread says which, with its text; one to the thread head says nothing', async () => {
++  const bot = await startBot()
++  const { root, session } = await threadStarted(bot)
++  const shelf = bot.say('the shelf too', [['e', root.id, '', 'reply']])
++  bot.say('both of them', [['e', root.id, '', 'root'], ['e', shelf.id, '', 'reply']])
++  const inbound = await session.inbound(3)
++  expect(inbound[1].meta.reply_to_message_id).toBeUndefined()
++  expect(inbound[2].meta).toMatchObject({ reply_to_message_id: shelf.id, reply_to_user: 'Bassim', reply_to_text: 'the shelf too' })
++})
++
++test('an edit reaches the thread as the edited message\'s new text', async () => {
++  const bot = await startBot()
++  const { root, session } = await threadStarted(bot)
++  const typo = bot.say('the lfet one', [['e', root.id, '', 'reply']])
++  await session.inbound(2)
++  bot.relay.inject(signed(ownerKey, 40003, 'the left one', [['h', bot.channel], ['e', typo.id]]))
++  const inbound = await session.inbound(3)
++  expect(inbound[2].content).toBe('the left one')
++  expect(inbound[2].meta).toMatchObject({ message_id: typo.id, edited: 'true' })
++  expect(inbound[2].meta.new_thread).toBeUndefined()
++})
++
 +test('reply posts into the thread with NIP-10 markers, a p tag for the owner and the auth tag', async () => {
 +  const bot = await startBot()
 +  const { root, session } = await threadStarted(bot)
@@ -1229,10 +1251,10 @@ index 0000000000000000000000000000000000000000..6116a5e244ed801205eeabd20735f383
 +})
 diff --git a/external_plugins/buzz/bot.ts b/external_plugins/buzz/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..c7ace1d514e64c065f4d16042b8794c68e2c1abd
+index 0000000000000000000000000000000000000000..499512b033b208ea065bc5f47002bcf64ce5b81b
 --- /dev/null
 +++ b/external_plugins/buzz/bot.ts
-@@ -0,0 +1,634 @@
+@@ -0,0 +1,669 @@
 +#!/usr/bin/env bun
 +import { readFileSync, writeFileSync, mkdirSync, statSync, realpathSync, chmodSync } from 'fs'
 +import { createHash } from 'crypto'
@@ -1378,10 +1400,13 @@ index 0000000000000000000000000000000000000000..c7ace1d514e64c065f4d16042b8794c6
 +
 +// NIP-10 as Buzz reads it: a reply marker makes a message a thread reply,
 +// and its root is the root marker, or the reply marker when there is none.
++function marked(event: Event, marker: string): string | undefined {
++  return event.tags.find(t => t[0] === 'e' && /^[0-9a-f]{64}$/.test(t[1] ?? '') && t[3] === marker)?.[1]
++}
++
 +function rootOf(event: Event): string | undefined {
-+  const marked = (marker: string) => event.tags.find(t => t[0] === 'e' && /^[0-9a-f]{64}$/.test(t[1] ?? '') && t[3] === marker)?.[1]
-+  const reply = marked('reply')
-+  return reply && (marked('root') ?? reply)
++  const reply = marked(event, 'reply')
++  return reply && (marked(event, 'root') ?? reply)
 +}
 +
 +// imeta fields are "key value" strings.
@@ -1391,6 +1416,10 @@ index 0000000000000000000000000000000000000000..c7ace1d514e64c065f4d16042b8794c6
 +    const name = (fields.filename ?? fields.url?.split('/').pop() ?? 'file').replace(/[<>\[\]\r\n;]/g, '_')
 +    return { url: fields.url as string, type: fields.m ?? 'unknown', size: Number(fields.size ?? 0), name }
 +  })
++}
++
++function listed(event: Event): string[] {
++  return filesOf(event).map(file => `${file.name} (${file.type}, ${(file.size / 1024).toFixed(0)}KB)`)
 +}
 +
 +function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
@@ -1771,26 +1800,52 @@ index 0000000000000000000000000000000000000000..c7ace1d514e64c065f4d16042b8794c6
 +    if (tagged) return root ?? event.id
 +  }
 +
++  // A reply's reply marker is the thread head, unless it answers one message in particular.
++  async function replyMeta(event: Event, thread: string): Promise<Record<string, string>> {
++    const parent = marked(event, 'reply')
++    if (!parent || parent === thread) return {}
++    const [replied] = await relay.query([{ kinds: MESSAGES, ids: [parent] }])
++    if (!replied) return { reply_to_message_id: parent }
++    const atts = listed(replied)
++    return {
++      reply_to_message_id: replied.id,
++      reply_to_user: replied.pubkey === me ? 'me' : await nameOf(replied.pubkey),
++      ...(replied.content ? { reply_to_text: replied.content } : {}),
++      ...(atts.length > 0 ? { reply_to_attachments: atts.join('; ') } : {}),
++    }
++  }
++
++  // An edit (kind 40003) names the message it replaces, which holds the thread and mention tags.
++  async function originalOf(event: Event): Promise<Event | undefined> {
++    if (event.kind !== 40003) return event
++    const id = tag(event, 'e')
++    const [original] = id ? await relay.query([{ kinds: MESSAGES, ids: [id] }]) : []
++    return original?.pubkey === event.pubkey ? original : undefined
++  }
++
 +  async function handleInbound(event: Event): Promise<void> {
 +    if (event.pubkey === me || !allowed(event.pubkey)) return
-+    const tagged = event.tags.some(t => t[0] === 'p' && t[1] === me)
-+    const thread = threadOf(event, tagged)
++    const original = await originalOf(event)
++    if (!original) return
++    const edited = original !== event
++    const tagged = [original, event].some(e => e.tags.some(t => t[0] === 'p' && t[1] === me))
++    const thread = threadOf(original, tagged)
 +    if (!thread) return
-+    const channel = tag(event, 'h')!
++    const channel = tag(original, 'h')!
 +    const where = channels.get(channel)
 +    if (!isChannel(thread)) homes.set(thread, channel)
 +    const text = await unmention(event.content)
 +
-+    if (event.pubkey === owner && tagged && text === '!shutdown') return shutdown()
-+    if (event.pubkey === owner && tagged && text === '!cancel') return hub.stop(thread)
++    if (!edited && event.pubkey === owner && tagged && text === '!shutdown') return shutdown()
++    if (!edited && event.pubkey === owner && tagged && text === '!cancel') return hub.stop(thread)
 +
-+    triggers.set(thread, [...(triggers.get(thread) ?? []), event.id])
-+    void ack(thread, event.id, '👀').catch(() => {})
++    triggers.set(thread, [...(triggers.get(thread) ?? []), original.id])
++    void ack(thread, original.id, '👀').catch(() => {})
 +
 +    // Attachments are listed (name/type/size) but not downloaded: the model
 +    // calls download_attachment when it wants them. The listing goes in meta
 +    // only, since an in-content annotation is forgeable by the sender.
-+    const atts = filesOf(event).map(file => `${file.name} (${file.type}, ${(file.size / 1024).toFixed(0)}KB)`)
++    const atts = listed(event)
 +    const words = text.split(/\s+/).filter(word => word && !word.startsWith('@'))
 +    const name = isChannel(thread) ? await nameOf(event.pubkey) : words.slice(0, 2).join(' ') || 'New thread'
 +
@@ -1798,13 +1853,15 @@ index 0000000000000000000000000000000000000000..c7ace1d514e64c065f4d16042b8794c6
 +      content: text || (atts.length > 0 ? '(attachment)' : ''),
 +      meta: {
 +        chat_id: thread,
-+        message_id: event.id,
++        message_id: original.id,
 +        user: await nameOf(event.pubkey),
 +        user_id: event.pubkey,
 +        ts: iso(event.created_at),
 +        ...(where && !where.dm ? { channel: where.name } : {}),
-+        ...(thread === event.id ? { new_thread: 'true' } : {}),
++        ...(!edited && thread === event.id ? { new_thread: 'true' } : {}),
 +        ...(atts.length > 0 ? { attachment_count: String(atts.length), attachments: atts.join('; ') } : {}),
++        ...(await replyMeta(original, thread)),
++        ...(edited ? { edited: 'true' } : {}),
 +      },
 +    }
 +    hub.deliver(thread, name, message)
@@ -1815,7 +1872,7 @@ index 0000000000000000000000000000000000000000..c7ace1d514e64c065f4d16042b8794c6
 +  let unlisten = () => {}
 +  function listen() {
 +    const previous = unlisten
-+    unlisten = channels.size === 0 ? () => {} : relay.subscribe([{ kinds: [9], '#h': [...channels.keys()], since: start }], event => {
++    unlisten = channels.size === 0 ? () => {} : relay.subscribe([{ kinds: [9, 40003], '#h': [...channels.keys()], since: start }], event => {
 +      handleInbound(event).catch(e => log(`handleInbound failed: ${e}`))
 +    })
 +    previous()
@@ -3371,7 +3428,7 @@ index 0000000000000000000000000000000000000000..58bc8998c2afe2bc9d1ddd28df08cbfb
 +}
 diff --git a/external_plugins/buzz/server.ts b/external_plugins/buzz/server.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..488cea8088e38d27096237e29e6fa55c0fd5ef18
+index 0000000000000000000000000000000000000000..63a0cd209b4d51684b7bc6a5b576bd1f00127518
 --- /dev/null
 +++ b/external_plugins/buzz/server.ts
 @@ -0,0 +1,237 @@
@@ -3391,7 +3448,7 @@ index 0000000000000000000000000000000000000000..488cea8088e38d27096237e29e6fa55c
 +    instructions: [
 +      'The sender reads Buzz, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat. Nobody watches this terminal either, so once your reply is sent, end the turn instead of summarizing it here.',
 +      '',
-+      'This session is one Buzz thread or direct message, the place for deeper work. Buzz renders Markdown, so answers can be longer and structured: headings, lists, and code blocks with a language. Its messages arrive as <channel source="buzz" chat_id="..." message_id="..." user="..." ts="...">, and everything you send with these tools lands back in that same thread. Buzz threads have no title, so if the tag has new_thread="true", name this thread for your own list and for handoffs: 1–2 words with rename_thread. If you were tagged into a thread that was already going, fetch_messages shows what came before. If the tag has attachment_count, the attachments attribute lists name/type/size — call download_attachment(message_id) to fetch them. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply.',
++      'This session is one Buzz thread or direct message, the place for deeper work. Buzz renders Markdown, so answers can be longer and structured: headings, lists, and code blocks with a language. Its messages arrive as <channel source="buzz" chat_id="..." message_id="..." user="..." ts="...">, and everything you send with these tools lands back in that same thread. Buzz threads have no title, so if the tag has new_thread="true", name this thread for your own list and for handoffs: 1–2 words with rename_thread. If you were tagged into a thread that was already going, fetch_messages shows what came before. If the tag has attachment_count, the attachments attribute lists name/type/size — call download_attachment(message_id) to fetch them. If the tag has reply_to_message_id, the sender replied to that earlier message: reply_to_text is its text and reply_to_attachments lists its files (download_attachment with that id). edited="true" means the sender edited the message with that message_id and this is its new text. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply.',
 +      '',
 +      'reply accepts file paths (files: ["/abs/path.png"]) for attachments. Use react to add emoji reactions, and edit_message for interim progress updates. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',
 +      '',

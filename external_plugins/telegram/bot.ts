@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { Bot, GrammyError, InputFile, type Context } from 'grammy'
-import type { ReactionTypeEmoji } from 'grammy/types'
+import type { MessageEntity, MessageOrigin, ReactionTypeEmoji } from 'grammy/types'
 import { readFileSync, writeFileSync, mkdirSync, statSync, realpathSync, chmodSync } from 'fs'
 import { homedir } from 'os'
 import { basename, join, extname, sep } from 'path'
@@ -99,7 +99,7 @@ const PHOTO_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp'])
 
 function threadOf(ctx: Context): string {
   const chat = String(ctx.chat!.id)
-  return ctx.message?.is_topic_message ? `${chat}:${ctx.message.message_thread_id}` : chat
+  return ctx.msg?.is_topic_message ? `${chat}:${ctx.msg.message_thread_id}` : chat
 }
 
 function target(thread: string) {
@@ -110,7 +110,7 @@ function target(thread: string) {
 const topicNames = new Map<string, string>()
 
 function nameOf(ctx: Context, thread: string): string {
-  const created = ctx.message?.reply_to_message?.forum_topic_created
+  const created = ctx.msg?.reply_to_message?.forum_topic_created
   if (created) topicNames.set(thread, created.name)
   return topicNames.get(thread) ?? (thread.includes(':') ? `topic ${thread.split(':')[1]}` : 'main')
 }
@@ -322,6 +322,22 @@ bot.on('message:text', async ctx => {
   await handleInbound(ctx, ctx.message.text, undefined)
 })
 
+bot.on('edited_message', async ctx => {
+  const text = ctx.editedMessage.text ?? ctx.editedMessage.caption
+  if (text) await handleInbound(ctx, text, undefined)
+})
+
+bot.on('message:location', async ctx => {
+  const { location, venue } = ctx.message
+  const at = `${location.latitude}, ${location.longitude}`
+  await handleInbound(ctx, venue ? `(venue: ${venue.title}, ${venue.address}, at ${at})` : `(location: ${at})`, undefined)
+})
+
+bot.on('message:contact', async ctx => {
+  const { first_name, last_name, phone_number } = ctx.message.contact
+  await handleInbound(ctx, `(contact: ${[first_name, last_name].filter(Boolean).join(' ')}, ${phone_number})`, undefined)
+})
+
 bot.on('message:photo', async ctx => {
   const caption = ctx.message.caption ?? '(photo)'
   // Defer download until after the gate approves — any user can send photos,
@@ -422,18 +438,33 @@ function safeName(s: string | undefined): string | undefined {
 }
 
 async function placeOf(ctx: Context): Promise<{ thread: string; msgId?: number }> {
-  const msgId = ctx.message?.message_id
+  const msgId = ctx.msg?.message_id
   if (ctx.chat?.type !== 'private' || !MAIN || msgId == null) return { thread: threadOf(ctx), msgId }
   const { chat_id, extra } = target(MAIN)
   const forwarded = await bot.api.forwardMessage(chat_id, ctx.chat.id, msgId, extra)
   return { thread: MAIN, msgId: forwarded.message_id }
 }
 
+// A link's address lives in the message's entities, not in its text.
+function linked(text: string, entities: MessageEntity[] = []): string {
+  return entities.reduceRight((out, entity) => entity.type !== 'text_link' ? out
+    : `${out.slice(0, entity.offset)}[${out.slice(entity.offset, entity.offset + entity.length)}](${entity.url})${out.slice(entity.offset + entity.length)}`, text)
+}
+
+function senderOf(origin: MessageOrigin): string {
+  switch (origin.type) {
+    case 'user': return origin.sender_user.username ?? [origin.sender_user.first_name, origin.sender_user.last_name].filter(Boolean).join(' ')
+    case 'hidden_user': return origin.sender_user_name
+    case 'chat': return origin.sender_chat.title ?? String(origin.sender_chat.id)
+    case 'channel': return origin.chat.title
+  }
+}
+
 const REPLY_FILE_KINDS = ['animation', 'document', 'video', 'audio', 'voice', 'video_note', 'sticker'] as const
 
 // Inside a topic, every message that isn't a reply points at the topic's
 // first message, the one that says the topic was created.
-async function replyMeta(msg: Context['message']): Promise<Record<string, string>> {
+async function replyMeta(msg: Context['msg']): Promise<Record<string, string>> {
   const replied = msg?.reply_to_message
   if (!replied || replied.forum_topic_created) return {}
   const text = replied.text ?? replied.caption
@@ -446,7 +477,7 @@ async function replyMeta(msg: Context['message']): Promise<Record<string, string
   return {
     reply_to_message_id: String(replied.message_id),
     ...(replied.from ? { reply_to_user: replied.from.username ?? String(replied.from.id) } : {}),
-    ...(text ? { reply_to_text: text } : {}),
+    ...(text ? { reply_to_text: linked(text, replied.entities ?? replied.caption_entities) } : {}),
     ...(msg.quote ? { reply_to_quote: msg.quote.text } : {}),
     ...(imagePath ? { reply_to_image_path: imagePath } : {}),
     ...(kind ? { reply_to_attachment_kind: kind, reply_to_attachment_file_id: replied[kind]!.file_id } : {}),
@@ -483,13 +514,13 @@ async function handleInbound(
   // image_path goes in meta only — an in-content "[image attached — read: PATH]"
   // annotation is forgeable by any allowlisted sender typing that string.
   const message: Message = {
-    content: text,
+    content: linked(text, ctx.msg?.entities ?? ctx.msg?.caption_entities),
     meta: {
       chat_id,
       ...(msgId != null ? { message_id: String(msgId) } : {}),
       user: from.username ?? String(from.id),
       user_id: String(from.id),
-      ts: new Date((ctx.message?.date ?? 0) * 1000).toISOString(),
+      ts: new Date((ctx.msg?.date ?? 0) * 1000).toISOString(),
       ...(imagePath ? { image_path: imagePath } : {}),
       ...(attachment ? {
         attachment_kind: attachment.kind,
@@ -498,7 +529,9 @@ async function handleInbound(
         ...(attachment.mime ? { attachment_mime: attachment.mime } : {}),
         ...(attachment.name ? { attachment_name: attachment.name } : {}),
       } : {}),
-      ...(await replyMeta(ctx.message)),
+      ...(await replyMeta(ctx.msg)),
+      ...(ctx.editedMessage ? { edited: 'true' } : {}),
+      ...(ctx.msg?.forward_origin ? { forwarded_from: senderOf(ctx.msg.forward_origin) } : {}),
     },
   }
   hub.deliver(thread, nameOf(ctx, thread), message)
@@ -515,7 +548,7 @@ bot.catch(err => {
 for (let attempt = 1; ; attempt++) {
   try {
     await bot.start({
-      allowed_updates: ['message'],
+      allowed_updates: ['message', 'edited_message'],
       onStart: info => {
         attempt = 0
         process.stderr.write(`telegram hub: polling as @${info.username}\n`)

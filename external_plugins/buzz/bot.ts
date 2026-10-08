@@ -143,10 +143,13 @@ function tag(event: Event, name: string) {
 
 // NIP-10 as Buzz reads it: a reply marker makes a message a thread reply,
 // and its root is the root marker, or the reply marker when there is none.
+function marked(event: Event, marker: string): string | undefined {
+  return event.tags.find(t => t[0] === 'e' && /^[0-9a-f]{64}$/.test(t[1] ?? '') && t[3] === marker)?.[1]
+}
+
 function rootOf(event: Event): string | undefined {
-  const marked = (marker: string) => event.tags.find(t => t[0] === 'e' && /^[0-9a-f]{64}$/.test(t[1] ?? '') && t[3] === marker)?.[1]
-  const reply = marked('reply')
-  return reply && (marked('root') ?? reply)
+  const reply = marked(event, 'reply')
+  return reply && (marked(event, 'root') ?? reply)
 }
 
 // imeta fields are "key value" strings.
@@ -156,6 +159,10 @@ function filesOf(event: Event) {
     const name = (fields.filename ?? fields.url?.split('/').pop() ?? 'file').replace(/[<>\[\]\r\n;]/g, '_')
     return { url: fields.url as string, type: fields.m ?? 'unknown', size: Number(fields.size ?? 0), name }
   })
+}
+
+function listed(event: Event): string[] {
+  return filesOf(event).map(file => `${file.name} (${file.type}, ${(file.size / 1024).toFixed(0)}KB)`)
 }
 
 function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
@@ -536,26 +543,52 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
     if (tagged) return root ?? event.id
   }
 
+  // A reply's reply marker is the thread head, unless it answers one message in particular.
+  async function replyMeta(event: Event, thread: string): Promise<Record<string, string>> {
+    const parent = marked(event, 'reply')
+    if (!parent || parent === thread) return {}
+    const [replied] = await relay.query([{ kinds: MESSAGES, ids: [parent] }])
+    if (!replied) return { reply_to_message_id: parent }
+    const atts = listed(replied)
+    return {
+      reply_to_message_id: replied.id,
+      reply_to_user: replied.pubkey === me ? 'me' : await nameOf(replied.pubkey),
+      ...(replied.content ? { reply_to_text: replied.content } : {}),
+      ...(atts.length > 0 ? { reply_to_attachments: atts.join('; ') } : {}),
+    }
+  }
+
+  // An edit (kind 40003) names the message it replaces, which holds the thread and mention tags.
+  async function originalOf(event: Event): Promise<Event | undefined> {
+    if (event.kind !== 40003) return event
+    const id = tag(event, 'e')
+    const [original] = id ? await relay.query([{ kinds: MESSAGES, ids: [id] }]) : []
+    return original?.pubkey === event.pubkey ? original : undefined
+  }
+
   async function handleInbound(event: Event): Promise<void> {
     if (event.pubkey === me || !allowed(event.pubkey)) return
-    const tagged = event.tags.some(t => t[0] === 'p' && t[1] === me)
-    const thread = threadOf(event, tagged)
+    const original = await originalOf(event)
+    if (!original) return
+    const edited = original !== event
+    const tagged = [original, event].some(e => e.tags.some(t => t[0] === 'p' && t[1] === me))
+    const thread = threadOf(original, tagged)
     if (!thread) return
-    const channel = tag(event, 'h')!
+    const channel = tag(original, 'h')!
     const where = channels.get(channel)
     if (!isChannel(thread)) homes.set(thread, channel)
     const text = await unmention(event.content)
 
-    if (event.pubkey === owner && tagged && text === '!shutdown') return shutdown()
-    if (event.pubkey === owner && tagged && text === '!cancel') return hub.stop(thread)
+    if (!edited && event.pubkey === owner && tagged && text === '!shutdown') return shutdown()
+    if (!edited && event.pubkey === owner && tagged && text === '!cancel') return hub.stop(thread)
 
-    triggers.set(thread, [...(triggers.get(thread) ?? []), event.id])
-    void ack(thread, event.id, '👀').catch(() => {})
+    triggers.set(thread, [...(triggers.get(thread) ?? []), original.id])
+    void ack(thread, original.id, '👀').catch(() => {})
 
     // Attachments are listed (name/type/size) but not downloaded: the model
     // calls download_attachment when it wants them. The listing goes in meta
     // only, since an in-content annotation is forgeable by the sender.
-    const atts = filesOf(event).map(file => `${file.name} (${file.type}, ${(file.size / 1024).toFixed(0)}KB)`)
+    const atts = listed(event)
     const words = text.split(/\s+/).filter(word => word && !word.startsWith('@'))
     const name = isChannel(thread) ? await nameOf(event.pubkey) : words.slice(0, 2).join(' ') || 'New thread'
 
@@ -563,13 +596,15 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
       content: text || (atts.length > 0 ? '(attachment)' : ''),
       meta: {
         chat_id: thread,
-        message_id: event.id,
+        message_id: original.id,
         user: await nameOf(event.pubkey),
         user_id: event.pubkey,
         ts: iso(event.created_at),
         ...(where && !where.dm ? { channel: where.name } : {}),
-        ...(thread === event.id ? { new_thread: 'true' } : {}),
+        ...(!edited && thread === event.id ? { new_thread: 'true' } : {}),
         ...(atts.length > 0 ? { attachment_count: String(atts.length), attachments: atts.join('; ') } : {}),
+        ...(await replyMeta(original, thread)),
+        ...(edited ? { edited: 'true' } : {}),
       },
     }
     hub.deliver(thread, name, message)
@@ -580,7 +615,7 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
   let unlisten = () => {}
   function listen() {
     const previous = unlisten
-    unlisten = channels.size === 0 ? () => {} : relay.subscribe([{ kinds: [9], '#h': [...channels.keys()], since: start }], event => {
+    unlisten = channels.size === 0 ? () => {} : relay.subscribe([{ kinds: [9, 40003], '#h': [...channels.keys()], since: start }], event => {
       handleInbound(event).catch(e => log(`handleInbound failed: ${e}`))
     })
     previous()

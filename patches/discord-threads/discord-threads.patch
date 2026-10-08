@@ -290,10 +290,10 @@ index ad04f6fa437bfa013f72f71de2b460f3eedeeeee..ba2d961c0f87a99cc5f532545276a240
 +The bot token lives in `~/.claude/channels/hex/discord/.env` as `DISCORD_BOT_TOKEN=…`, and `access.json` there holds `allowFrom`, the Discord user ids allowed to talk to it. The bot needs the Message Content intent, and in its server: View Channels, Send Messages, Send Messages in Threads, Create Public Threads, Manage Threads, Read Message History, Attach Files and Add Reactions.
 diff --git a/external_plugins/discord/bot.test.ts b/external_plugins/discord/bot.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..66d44aaf52e89f43598bed1d46d7719eaabd6c95
+index 0000000000000000000000000000000000000000..ca7fcd1b94957733e859bb6e3731ac76e735d8c3
 --- /dev/null
 +++ b/external_plugins/discord/bot.test.ts
-@@ -0,0 +1,161 @@
+@@ -0,0 +1,181 @@
 +import { beforeAll, expect, mock, test } from 'bun:test'
 +import { connect } from 'net'
 +import { mkdtempSync, writeFileSync } from 'fs'
@@ -301,7 +301,7 @@ index 0000000000000000000000000000000000000000..66d44aaf52e89f43598bed1d46d7719e
 +import { join } from 'path'
 +import * as discord from 'discord.js'
 +
-+const { ChannelType, Collection, SnowflakeUtil } = discord
++const { ChannelType, Collection, MessageType, SnowflakeUtil } = discord
 +const BOT = '1000'
 +const OWNER = '2000'
 +const GUILD = '3000'
@@ -340,7 +340,7 @@ index 0000000000000000000000000000000000000000..66d44aaf52e89f43598bed1d46d7719e
 +
 +function say(where: Channel, minute: number, content: string, thread?: Channel) {
 +  const id = snowflake(minute)
-+  const message = { id, content, createdAt: at(minute), author: { id: OWNER, username: 'bassim', bot: false }, attachments: new Collection(), thread: thread ?? null }
++  const message = { id, content, createdAt: at(minute), author: { id: OWNER, username: 'bassim', bot: false }, attachments: new Collection(), messageSnapshots: new Collection(), thread: thread ?? null }
 +  where.posted.push(message)
 +  return message
 +}
@@ -425,6 +425,26 @@ index 0000000000000000000000000000000000000000..66d44aaf52e89f43598bed1d46d7719e
 +  expect(inbound.meta).toMatchObject({ chat_id: here.id, message_id: message.id, channel: 'general' })
 +})
 +
++test('a reply says which message it answers, an edit comes back marked edited, and a forward carries what was forwarded', async () => {
++  const live = { inGuild: () => true, channel: here, mentions: { has: () => false }, react: async () => {} }
++  const inbound = (id: string, edited?: string) => until(() => received.find(line => line.type === 'inbound' && line.meta.message_id === id && line.meta.edited === edited))
++  const asked = say(here, 7, 'which anchors?')
++  const reply = { ...say(here, 8, 'the left ones'), ...live, type: MessageType.Reply, reference: { messageId: asked.id }, fetchReference: async () => asked }
++  handlers.get('messageCreate')!(reply)
++  expect((await inbound(reply.id)).meta).toMatchObject({ reply_to_message_id: asked.id, reply_to_user: 'bassim', reply_to_text: 'which anchors?' })
++
++  handlers.get('messageUpdate')!({ ...reply, partial: false }, { ...reply, content: 'the right ones' })
++  const edit = await inbound(reply.id, 'true')
++  expect(edit.content).toBe('the right ones')
++  expect(edit.meta.new_thread).toBeUndefined()
++
++  const forward = { ...say(here, 9, ''), ...live, messageSnapshots: new Collection([['1', { content: 'ship it friday', attachments: new Collection() }]]) }
++  handlers.get('messageCreate')!(forward)
++  const forwarded = await inbound(forward.id)
++  expect(forwarded.content).toBe('ship it friday')
++  expect(forwarded.meta.forwarded).toBe('true')
++})
++
 +test('fetch_messages reads a channel\'s top-level messages oldest-first, with each thread\'s replies, and pages back', async () => {
 +  const page = await call('fetch_messages', { channel: '#open-source', limit: 2 })
 +  expect(page.text).toBe([
@@ -457,19 +477,21 @@ index 0000000000000000000000000000000000000000..66d44aaf52e89f43598bed1d46d7719e
 +})
 diff --git a/external_plugins/discord/bot.ts b/external_plugins/discord/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..b1c8e906c0d3f646763c291dfca953bfe3b54a00
+index 0000000000000000000000000000000000000000..06efa0cc7cf0722af9c51002fd103e919cad0c75
 --- /dev/null
 +++ b/external_plugins/discord/bot.ts
-@@ -0,0 +1,415 @@
+@@ -0,0 +1,441 @@
 +#!/usr/bin/env bun
 +import {
 +  Client,
 +  GatewayIntentBits,
 +  ChannelType,
++  MessageType,
 +  PermissionFlagsBits,
 +  SnowflakeUtil,
 +  type Message as DiscordMessage,
 +  type Attachment,
++  type Collection,
 +  type TextChannel,
 +  type ThreadChannel,
 +} from 'discord.js'
@@ -585,6 +607,10 @@ index 0000000000000000000000000000000000000000..b1c8e906c0d3f646763c291dfca953bf
 +// where delimiter chars would let the uploader break out of the tag.
 +function safeAttName(att: Attachment): string {
 +  return (att.name ?? att.id).replace(/[<>\[\]\r\n;]/g, '_')
++}
++
++function listed(attachments: Collection<string, Attachment>): string[] {
++  return attachments.map(att => `${safeAttName(att)} (${att.contentType ?? 'unknown'}, ${(att.size / 1024).toFixed(0)}KB)`)
 +}
 +
 +async function downloadAttachment(att: Attachment): Promise<string> {
@@ -757,9 +783,10 @@ index 0000000000000000000000000000000000000000..b1c8e906c0d3f646763c291dfca953bf
 +      }
 +      case 'download_attachment': {
 +        const msg = await ch.messages.fetch(args.message_id as string)
-+        if (msg.attachments.size === 0) return 'message has no attachments'
++        const attachments = msg.messageSnapshots.first()?.attachments ?? msg.attachments
++        if (attachments.size === 0) return 'message has no attachments'
 +        const lines: string[] = []
-+        for (const att of msg.attachments.values()) {
++        for (const att of attachments.values()) {
 +          const path = await downloadAttachment(att)
 +          const kb = (att.size / 1024).toFixed(0)
 +          lines.push(`  ${path}  (${safeAttName(att)}, ${att.contentType ?? 'unknown'}, ${kb}KB)`)
@@ -809,17 +836,31 @@ index 0000000000000000000000000000000000000000..b1c8e906c0d3f646763c291dfca953bf
 +  async function threadOf(msg: DiscordMessage): Promise<ThreadChannel | undefined> {
 +    if (msg.channel.isThread()) return msg.channel
 +    if (msg.channel.type !== ChannelType.GuildText || !client.user || !msg.mentions.has(client.user)) return
++    if (msg.thread) return msg.thread
 +    const words = msg.content.replace(/<@[!&]?\d+>/g, '').trim().split(/\s+/).filter(Boolean)
 +    return msg.startThread({ name: words.slice(0, 2).join(' ') || 'New thread' })
 +  }
 +
-+  async function handleInbound(msg: DiscordMessage): Promise<void> {
++  async function replyMeta(msg: DiscordMessage): Promise<Record<string, string>> {
++    if (msg.type !== MessageType.Reply || !msg.reference?.messageId) return {}
++    const replied = await msg.fetchReference().catch(() => undefined)
++    if (!replied) return { reply_to_message_id: msg.reference.messageId }
++    const atts = listed(replied.attachments)
++    return {
++      reply_to_message_id: replied.id,
++      reply_to_user: replied.author.username,
++      ...(replied.content ? { reply_to_text: replied.content } : {}),
++      ...(atts.length > 0 ? { reply_to_attachments: atts.join('; ') } : {}),
++    }
++  }
++
++  async function handleInbound(msg: DiscordMessage, edited = false): Promise<void> {
 +    const access = loadAccess()
 +    if (!access.allowFrom.includes(msg.author.id)) return
 +
 +    const ch = await threadOf(msg)
 +    if (!ch) return
-+    const fresh = ch.id === msg.id
++    const fresh = !edited && ch.id === msg.id
 +    if (ch.archived) await ch.setArchived(false).catch(() => {})
 +
 +    void ch.sendTyping().catch(() => {})
@@ -828,14 +869,11 @@ index 0000000000000000000000000000000000000000..b1c8e906c0d3f646763c291dfca953bf
 +    // Attachments are listed (name/type/size) but not downloaded: the model
 +    // calls download_attachment when it wants them. The listing goes in meta
 +    // only, since an in-content annotation is forgeable by the sender.
-+    const atts: string[] = []
-+    for (const att of msg.attachments.values()) {
-+      const kb = (att.size / 1024).toFixed(0)
-+      atts.push(`${safeAttName(att)} (${att.contentType ?? 'unknown'}, ${kb}KB)`)
-+    }
++    const forwarded = msg.messageSnapshots.first()
++    const atts = listed((forwarded ?? msg).attachments)
 +
 +    const message: Message = {
-+      content: msg.content.replace(/<@[!&]?\d+>/g, '').trim() || (atts.length > 0 ? '(attachment)' : ''),
++      content: (forwarded?.content ?? msg.content).replace(/<@[!&]?\d+>/g, '').trim() || (atts.length > 0 ? '(attachment)' : ''),
 +      meta: {
 +        chat_id: ch.id,
 +        message_id: msg.id,
@@ -845,6 +883,9 @@ index 0000000000000000000000000000000000000000..b1c8e906c0d3f646763c291dfca953bf
 +        ...(ch.parent ? { channel: ch.parent.name } : {}),
 +        ...(fresh ? { new_thread: 'true' } : {}),
 +        ...(atts.length > 0 ? { attachment_count: String(atts.length), attachments: atts.join('; ') } : {}),
++        ...(await replyMeta(msg)),
++        ...(edited ? { edited: 'true' } : {}),
++        ...(forwarded ? { forwarded: 'true' } : {}),
 +      },
 +    }
 +    hub.deliver(ch.id, ch.name, message)
@@ -853,6 +894,11 @@ index 0000000000000000000000000000000000000000..b1c8e906c0d3f646763c291dfca953bf
 +  client.on('messageCreate', msg => {
 +    if (msg.author.bot || !msg.inGuild()) return
 +    handleInbound(msg).catch(e => process.stderr.write(`discord hub: handleInbound failed: ${e}\n`))
++  })
++
++  client.on('messageUpdate', (before, after) => {
++    if (before.partial || before.content === after.content || after.author.bot || !after.inGuild()) return
++    handleInbound(after, true).catch(e => process.stderr.write(`discord hub: handleInbound failed: ${e}\n`))
 +  })
 +
 +  client.on('threadUpdate', (before, after) => {
@@ -896,7 +942,7 @@ index eac89c3befd8ebb90758a9acdf7f400de8c9f298..87aff60aefe5d5610abfa8d4e6e2b719
    "dependencies": {
      "@modelcontextprotocol/sdk": "^1.0.0",
 diff --git a/external_plugins/discord/server.ts b/external_plugins/discord/server.ts
-index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..d572ac78fa45eade2ae9b768ef76d712c26ff7cb 100644
+index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..194cc2a94047a37b5a471a777d8cb3fb2f7c90ba 100644
 --- a/external_plugins/discord/server.ts
 +++ b/external_plugins/discord/server.ts
 @@ -1,533 +1,40 @@
@@ -1364,7 +1410,7 @@ index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..d572ac78fa45eade2ae9b768ef76d712
 +      'The sender reads Discord, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat. Nobody watches this terminal either, so once your reply is sent, end the turn instead of summarizing it here.',
        '',
 -      'Messages from Discord arrive as <channel source="discord" chat_id="..." message_id="..." user="..." ts="...">. If the tag has attachment_count, the attachments attribute lists name/type/size — call download_attachment(chat_id, message_id) to fetch them. Reply with the reply tool — pass chat_id back. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply, omit reply_to for normal responses.',
-+      'This session is one Discord thread, the place for deeper work. Discord renders Markdown, so answers can be longer and structured: headings, lists, and code blocks with a language. Its messages arrive as <channel source="discord" chat_id="..." message_id="..." user="..." ts="...">, and everything you send with these tools lands back in that same thread. If the tag has new_thread="true", this thread was just opened from that message and named after its first words: give it a fitting 1–2 word name with rename_thread first. If the tag has attachment_count, the attachments attribute lists name/type/size — call download_attachment(message_id) to fetch them. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply.',
++      'This session is one Discord thread, the place for deeper work. Discord renders Markdown, so answers can be longer and structured: headings, lists, and code blocks with a language. Its messages arrive as <channel source="discord" chat_id="..." message_id="..." user="..." ts="...">, and everything you send with these tools lands back in that same thread. If the tag has new_thread="true", this thread was just opened from that message and named after its first words: give it a fitting 1–2 word name with rename_thread first. If the tag has attachment_count, the attachments attribute lists name/type/size — call download_attachment(message_id) to fetch them. If the tag has reply_to_message_id, the sender replied to that earlier message: reply_to_text is its text and reply_to_attachments lists its files (download_attachment with that id). edited="true" means the sender edited the message with that message_id and this is its new text; forwarded="true" means it is a message they forwarded. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply.',
        '',
        'reply accepts file paths (files: ["/abs/path.png"]) for attachments. Use react to add emoji reactions, and edit_message for interim progress updates. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',
        '',

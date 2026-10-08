@@ -3,10 +3,12 @@ import {
   Client,
   GatewayIntentBits,
   ChannelType,
+  MessageType,
   PermissionFlagsBits,
   SnowflakeUtil,
   type Message as DiscordMessage,
   type Attachment,
+  type Collection,
   type TextChannel,
   type ThreadChannel,
 } from 'discord.js'
@@ -122,6 +124,10 @@ function fenced(text: string, limit: number, mode: 'length' | 'newline'): string
 // where delimiter chars would let the uploader break out of the tag.
 function safeAttName(att: Attachment): string {
   return (att.name ?? att.id).replace(/[<>\[\]\r\n;]/g, '_')
+}
+
+function listed(attachments: Collection<string, Attachment>): string[] {
+  return attachments.map(att => `${safeAttName(att)} (${att.contentType ?? 'unknown'}, ${(att.size / 1024).toFixed(0)}KB)`)
 }
 
 async function downloadAttachment(att: Attachment): Promise<string> {
@@ -294,9 +300,10 @@ function serve(token: string) {
       }
       case 'download_attachment': {
         const msg = await ch.messages.fetch(args.message_id as string)
-        if (msg.attachments.size === 0) return 'message has no attachments'
+        const attachments = msg.messageSnapshots.first()?.attachments ?? msg.attachments
+        if (attachments.size === 0) return 'message has no attachments'
         const lines: string[] = []
-        for (const att of msg.attachments.values()) {
+        for (const att of attachments.values()) {
           const path = await downloadAttachment(att)
           const kb = (att.size / 1024).toFixed(0)
           lines.push(`  ${path}  (${safeAttName(att)}, ${att.contentType ?? 'unknown'}, ${kb}KB)`)
@@ -346,17 +353,31 @@ function serve(token: string) {
   async function threadOf(msg: DiscordMessage): Promise<ThreadChannel | undefined> {
     if (msg.channel.isThread()) return msg.channel
     if (msg.channel.type !== ChannelType.GuildText || !client.user || !msg.mentions.has(client.user)) return
+    if (msg.thread) return msg.thread
     const words = msg.content.replace(/<@[!&]?\d+>/g, '').trim().split(/\s+/).filter(Boolean)
     return msg.startThread({ name: words.slice(0, 2).join(' ') || 'New thread' })
   }
 
-  async function handleInbound(msg: DiscordMessage): Promise<void> {
+  async function replyMeta(msg: DiscordMessage): Promise<Record<string, string>> {
+    if (msg.type !== MessageType.Reply || !msg.reference?.messageId) return {}
+    const replied = await msg.fetchReference().catch(() => undefined)
+    if (!replied) return { reply_to_message_id: msg.reference.messageId }
+    const atts = listed(replied.attachments)
+    return {
+      reply_to_message_id: replied.id,
+      reply_to_user: replied.author.username,
+      ...(replied.content ? { reply_to_text: replied.content } : {}),
+      ...(atts.length > 0 ? { reply_to_attachments: atts.join('; ') } : {}),
+    }
+  }
+
+  async function handleInbound(msg: DiscordMessage, edited = false): Promise<void> {
     const access = loadAccess()
     if (!access.allowFrom.includes(msg.author.id)) return
 
     const ch = await threadOf(msg)
     if (!ch) return
-    const fresh = ch.id === msg.id
+    const fresh = !edited && ch.id === msg.id
     if (ch.archived) await ch.setArchived(false).catch(() => {})
 
     void ch.sendTyping().catch(() => {})
@@ -365,14 +386,11 @@ function serve(token: string) {
     // Attachments are listed (name/type/size) but not downloaded: the model
     // calls download_attachment when it wants them. The listing goes in meta
     // only, since an in-content annotation is forgeable by the sender.
-    const atts: string[] = []
-    for (const att of msg.attachments.values()) {
-      const kb = (att.size / 1024).toFixed(0)
-      atts.push(`${safeAttName(att)} (${att.contentType ?? 'unknown'}, ${kb}KB)`)
-    }
+    const forwarded = msg.messageSnapshots.first()
+    const atts = listed((forwarded ?? msg).attachments)
 
     const message: Message = {
-      content: msg.content.replace(/<@[!&]?\d+>/g, '').trim() || (atts.length > 0 ? '(attachment)' : ''),
+      content: (forwarded?.content ?? msg.content).replace(/<@[!&]?\d+>/g, '').trim() || (atts.length > 0 ? '(attachment)' : ''),
       meta: {
         chat_id: ch.id,
         message_id: msg.id,
@@ -382,6 +400,9 @@ function serve(token: string) {
         ...(ch.parent ? { channel: ch.parent.name } : {}),
         ...(fresh ? { new_thread: 'true' } : {}),
         ...(atts.length > 0 ? { attachment_count: String(atts.length), attachments: atts.join('; ') } : {}),
+        ...(await replyMeta(msg)),
+        ...(edited ? { edited: 'true' } : {}),
+        ...(forwarded ? { forwarded: 'true' } : {}),
       },
     }
     hub.deliver(ch.id, ch.name, message)
@@ -390,6 +411,11 @@ function serve(token: string) {
   client.on('messageCreate', msg => {
     if (msg.author.bot || !msg.inGuild()) return
     handleInbound(msg).catch(e => process.stderr.write(`discord hub: handleInbound failed: ${e}\n`))
+  })
+
+  client.on('messageUpdate', (before, after) => {
+    if (before.partial || before.content === after.content || after.author.bot || !after.inGuild()) return
+    handleInbound(after, true).catch(e => process.stderr.write(`discord hub: handleInbound failed: ${e}\n`))
   })
 
   client.on('threadUpdate', (before, after) => {

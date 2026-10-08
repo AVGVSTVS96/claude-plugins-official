@@ -286,13 +286,13 @@ index d72dbc1a759e601dd0188cc7a8c3b58edc04373c..3ecbd0bfb8cc26bae0b85f8a1a1c44e8
 +The bot token lives in `~/.claude/channels/hex/telegram/.env` as `TELEGRAM_BOT_TOKEN=…`, and `access.json` there holds `allowFrom`, the Telegram user ids allowed to talk to it.
 diff --git a/external_plugins/telegram/bot.ts b/external_plugins/telegram/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..380adf03690c21f0d0361118e46fe08e4292182c
+index 0000000000000000000000000000000000000000..c1b7c6937d0406840f6c2a54d02c5b3fc477d972
 --- /dev/null
 +++ b/external_plugins/telegram/bot.ts
-@@ -0,0 +1,531 @@
+@@ -0,0 +1,564 @@
 +#!/usr/bin/env bun
 +import { Bot, GrammyError, InputFile, type Context } from 'grammy'
-+import type { ReactionTypeEmoji } from 'grammy/types'
++import type { MessageEntity, MessageOrigin, ReactionTypeEmoji } from 'grammy/types'
 +import { readFileSync, writeFileSync, mkdirSync, statSync, realpathSync, chmodSync } from 'fs'
 +import { homedir } from 'os'
 +import { basename, join, extname, sep } from 'path'
@@ -391,7 +391,7 @@ index 0000000000000000000000000000000000000000..380adf03690c21f0d0361118e46fe08e
 +
 +function threadOf(ctx: Context): string {
 +  const chat = String(ctx.chat!.id)
-+  return ctx.message?.is_topic_message ? `${chat}:${ctx.message.message_thread_id}` : chat
++  return ctx.msg?.is_topic_message ? `${chat}:${ctx.msg.message_thread_id}` : chat
 +}
 +
 +function target(thread: string) {
@@ -402,7 +402,7 @@ index 0000000000000000000000000000000000000000..380adf03690c21f0d0361118e46fe08e
 +const topicNames = new Map<string, string>()
 +
 +function nameOf(ctx: Context, thread: string): string {
-+  const created = ctx.message?.reply_to_message?.forum_topic_created
++  const created = ctx.msg?.reply_to_message?.forum_topic_created
 +  if (created) topicNames.set(thread, created.name)
 +  return topicNames.get(thread) ?? (thread.includes(':') ? `topic ${thread.split(':')[1]}` : 'main')
 +}
@@ -614,6 +614,22 @@ index 0000000000000000000000000000000000000000..380adf03690c21f0d0361118e46fe08e
 +  await handleInbound(ctx, ctx.message.text, undefined)
 +})
 +
++bot.on('edited_message', async ctx => {
++  const text = ctx.editedMessage.text ?? ctx.editedMessage.caption
++  if (text) await handleInbound(ctx, text, undefined)
++})
++
++bot.on('message:location', async ctx => {
++  const { location, venue } = ctx.message
++  const at = `${location.latitude}, ${location.longitude}`
++  await handleInbound(ctx, venue ? `(venue: ${venue.title}, ${venue.address}, at ${at})` : `(location: ${at})`, undefined)
++})
++
++bot.on('message:contact', async ctx => {
++  const { first_name, last_name, phone_number } = ctx.message.contact
++  await handleInbound(ctx, `(contact: ${[first_name, last_name].filter(Boolean).join(' ')}, ${phone_number})`, undefined)
++})
++
 +bot.on('message:photo', async ctx => {
 +  const caption = ctx.message.caption ?? '(photo)'
 +  // Defer download until after the gate approves — any user can send photos,
@@ -714,18 +730,33 @@ index 0000000000000000000000000000000000000000..380adf03690c21f0d0361118e46fe08e
 +}
 +
 +async function placeOf(ctx: Context): Promise<{ thread: string; msgId?: number }> {
-+  const msgId = ctx.message?.message_id
++  const msgId = ctx.msg?.message_id
 +  if (ctx.chat?.type !== 'private' || !MAIN || msgId == null) return { thread: threadOf(ctx), msgId }
 +  const { chat_id, extra } = target(MAIN)
 +  const forwarded = await bot.api.forwardMessage(chat_id, ctx.chat.id, msgId, extra)
 +  return { thread: MAIN, msgId: forwarded.message_id }
 +}
 +
++// A link's address lives in the message's entities, not in its text.
++function linked(text: string, entities: MessageEntity[] = []): string {
++  return entities.reduceRight((out, entity) => entity.type !== 'text_link' ? out
++    : `${out.slice(0, entity.offset)}[${out.slice(entity.offset, entity.offset + entity.length)}](${entity.url})${out.slice(entity.offset + entity.length)}`, text)
++}
++
++function senderOf(origin: MessageOrigin): string {
++  switch (origin.type) {
++    case 'user': return origin.sender_user.username ?? [origin.sender_user.first_name, origin.sender_user.last_name].filter(Boolean).join(' ')
++    case 'hidden_user': return origin.sender_user_name
++    case 'chat': return origin.sender_chat.title ?? String(origin.sender_chat.id)
++    case 'channel': return origin.chat.title
++  }
++}
++
 +const REPLY_FILE_KINDS = ['animation', 'document', 'video', 'audio', 'voice', 'video_note', 'sticker'] as const
 +
 +// Inside a topic, every message that isn't a reply points at the topic's
 +// first message, the one that says the topic was created.
-+async function replyMeta(msg: Context['message']): Promise<Record<string, string>> {
++async function replyMeta(msg: Context['msg']): Promise<Record<string, string>> {
 +  const replied = msg?.reply_to_message
 +  if (!replied || replied.forum_topic_created) return {}
 +  const text = replied.text ?? replied.caption
@@ -738,7 +769,7 @@ index 0000000000000000000000000000000000000000..380adf03690c21f0d0361118e46fe08e
 +  return {
 +    reply_to_message_id: String(replied.message_id),
 +    ...(replied.from ? { reply_to_user: replied.from.username ?? String(replied.from.id) } : {}),
-+    ...(text ? { reply_to_text: text } : {}),
++    ...(text ? { reply_to_text: linked(text, replied.entities ?? replied.caption_entities) } : {}),
 +    ...(msg.quote ? { reply_to_quote: msg.quote.text } : {}),
 +    ...(imagePath ? { reply_to_image_path: imagePath } : {}),
 +    ...(kind ? { reply_to_attachment_kind: kind, reply_to_attachment_file_id: replied[kind]!.file_id } : {}),
@@ -775,13 +806,13 @@ index 0000000000000000000000000000000000000000..380adf03690c21f0d0361118e46fe08e
 +  // image_path goes in meta only — an in-content "[image attached — read: PATH]"
 +  // annotation is forgeable by any allowlisted sender typing that string.
 +  const message: Message = {
-+    content: text,
++    content: linked(text, ctx.msg?.entities ?? ctx.msg?.caption_entities),
 +    meta: {
 +      chat_id,
 +      ...(msgId != null ? { message_id: String(msgId) } : {}),
 +      user: from.username ?? String(from.id),
 +      user_id: String(from.id),
-+      ts: new Date((ctx.message?.date ?? 0) * 1000).toISOString(),
++      ts: new Date((ctx.msg?.date ?? 0) * 1000).toISOString(),
 +      ...(imagePath ? { image_path: imagePath } : {}),
 +      ...(attachment ? {
 +        attachment_kind: attachment.kind,
@@ -790,7 +821,9 @@ index 0000000000000000000000000000000000000000..380adf03690c21f0d0361118e46fe08e
 +        ...(attachment.mime ? { attachment_mime: attachment.mime } : {}),
 +        ...(attachment.name ? { attachment_name: attachment.name } : {}),
 +      } : {}),
-+      ...(await replyMeta(ctx.message)),
++      ...(await replyMeta(ctx.msg)),
++      ...(ctx.editedMessage ? { edited: 'true' } : {}),
++      ...(ctx.msg?.forward_origin ? { forwarded_from: senderOf(ctx.msg.forward_origin) } : {}),
 +    },
 +  }
 +  hub.deliver(thread, nameOf(ctx, thread), message)
@@ -807,7 +840,7 @@ index 0000000000000000000000000000000000000000..380adf03690c21f0d0361118e46fe08e
 +for (let attempt = 1; ; attempt++) {
 +  try {
 +    await bot.start({
-+      allowed_updates: ['message'],
++      allowed_updates: ['message', 'edited_message'],
 +      onStart: info => {
 +        attempt = 0
 +        process.stderr.write(`telegram hub: polling as @${info.username}\n`)
@@ -841,7 +874,7 @@ index b80fcea0f4f395012586cf5fac3682270e7fb14f..a8d061bfa3c603151ab2491dc06af4fa
    "dependencies": {
      "@modelcontextprotocol/sdk": "^1.0.0",
 diff --git a/external_plugins/telegram/server.ts b/external_plugins/telegram/server.ts
-index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..27df7f8a32b67fc437206556baeeecf41a19a5de 100644
+index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..9824cbbdc1298aa03bc597b31b828307300118f9 100644
 --- a/external_plugins/telegram/server.ts
 +++ b/external_plugins/telegram/server.ts
 @@ -1,467 +1,49 @@
@@ -1260,7 +1293,7 @@ index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..27df7f8a32b67fc437206556baeeecf4
 +      'The sender reads Telegram, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat. Nobody watches this terminal either, so once your reply is sent, end the turn instead of summarizing it here.',
        '',
 -      'Messages from Telegram arrive as <channel source="telegram" chat_id="..." message_id="..." user="..." ts="...">. If the tag has an image_path attribute, Read that file — it is a photo the sender attached. If the tag has attachment_file_id, call download_attachment with that file_id to fetch the file, then Read the returned path. Reply with the reply tool — pass chat_id back. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply, omit reply_to for normal responses.',
-+      'This session is one Telegram thread: a forum topic, a group\'s General, or a direct chat. Its messages arrive as <channel source="telegram" chat_id="..." message_id="..." user="..." ts="...">, and everything you send with these tools lands back in that same thread. If the tag has an image_path attribute, Read that file — it is a photo the sender attached. If the tag has attachment_file_id, call download_attachment with that file_id to fetch the file, then Read the returned path. If the tag has reply_to_message_id, the sender replied to that earlier message: reply_to_text is its text or caption, reply_to_quote the part they highlighted, reply_to_image_path a photo it carried (Read it), and reply_to_attachment_file_id a file it carried (download_attachment). Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply.',
++      'This session is one Telegram thread: a forum topic, a group\'s General, or a direct chat. Its messages arrive as <channel source="telegram" chat_id="..." message_id="..." user="..." ts="...">, and everything you send with these tools lands back in that same thread. If the tag has an image_path attribute, Read that file — it is a photo the sender attached. If the tag has attachment_file_id, call download_attachment with that file_id to fetch the file, then Read the returned path. If the tag has reply_to_message_id, the sender replied to that earlier message: reply_to_text is its text or caption, reply_to_quote the part they highlighted, reply_to_image_path a photo it carried (Read it), and reply_to_attachment_file_id a file it carried (download_attachment). edited="true" means the sender edited the message with that message_id and this is its new text; forwarded_from names who a forwarded message came from. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply.',
        '',
        'reply accepts file paths (files: ["/abs/path.png"]) for attachments. Use react to add emoji reactions, and edit_message for interim progress updates. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',
        '',
