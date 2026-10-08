@@ -1,5 +1,5 @@
 diff --git a/.claude-plugin/marketplace.json b/.claude-plugin/marketplace.json
-index f3032948c7c04322c8abb56105e853ee4351ab27..2637a4ef49e3bf024e730724fbfb28a0a0697add 100644
+index f3032948c7c04322c8abb56105e853ee4351ab27..ab99b6c3e5b4076013e25766f7de33f3f6a09269 100644
 --- a/.claude-plugin/marketplace.json
 +++ b/.claude-plugin/marketplace.json
 @@ -1,6 +1,6 @@
@@ -10,7 +10,7 @@ index f3032948c7c04322c8abb56105e853ee4351ab27..2637a4ef49e3bf024e730724fbfb28a0
    "description": "Directory of popular Claude Code extensions including development tools, productivity plugins, and MCP integrations",
    "owner": {
      "name": "Anthropic",
-@@ -663,6 +663,12 @@
+@@ -663,6 +663,18 @@
        },
        "homepage": "https://buildkite.com"
      },
@@ -19,6 +19,12 @@ index f3032948c7c04322c8abb56105e853ee4351ab27..2637a4ef49e3bf024e730724fbfb28a0
 +      "description": "Buzz channel where every thread is its own session, with Buzz's activity and memory panels.",
 +      "category": "productivity",
 +      "source": "./external_plugins/buzz"
++    },
++    {
++      "name": "t3",
++      "description": "T3 Code channel: hex as an ACP agent, where every T3 thread is its own session in that thread's project.",
++      "category": "productivity",
++      "source": "./external_plugins/t3"
 +    },
      {
        "name": "canva",

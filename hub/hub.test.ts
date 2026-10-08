@@ -399,6 +399,39 @@ exec claude "$@"
   expect(readFileSync(join(dir, 'leaked'), 'utf8').trim()).toBe('0')
 })
 
+test('a thread opened in a project starts its session there, and keeps that folder when it resumes', async () => {
+  const project = join(dir, 'project')
+  mkdirSync(project)
+  const launcher = join(dir, 'launch')
+  writeFileSync(launcher, `#!/bin/sh
+pwd >> "${dir}/cwd"
+exec claude "$@"
+`)
+  chmodSync(launcher, 0o755)
+  start({ launcher, agents: [] })
+  hub.open('t3:1', 'project', undefined, project)
+  await launched()
+  const { socket } = await session('t3:1')
+  await until(() => existsSync(join(dir, 'threads.json')) && registry()['t3:1'])
+  expect(registry()['t3:1']).toEqual({ name: 'project', cwd: project, session: SESSION })
+  expect(hub.cwd('t3:1')).toBe(project)
+  socket.destroy()
+  await until(() => states.some(([thread, busy]) => thread === 't3:1' && !busy))
+  hub.deliver('t3:1', 'project', message)
+  await until(() => readFileSync(join(dir, 'cwd'), 'utf8').split('\n').length > 2)
+  expect(readFileSync(join(dir, 'cwd'), 'utf8').trim().split('\n')).toEqual([project, project])
+})
+
+test('a thread in the hex folder keeps no folder of its own', async () => {
+  start()
+  hub.open('chat:7', 'Desk anchors', 'go')
+  await launched()
+  await session('chat:7')
+  await until(() => existsSync(join(dir, 'threads.json')) && registry()['chat:7'])
+  expect(registry()['chat:7']).toEqual({ name: 'Desk anchors', session: SESSION })
+  expect(hub.cwd('chat:7')).toBeUndefined()
+})
+
 test('releasing an idle thread stops its session, then forgets it once the socket closes', async () => {
   start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } } })
   const { socket } = await session('chat:7')
@@ -451,6 +484,13 @@ test('an adopted thread clears the old job record, then resumes its session with
   expect(args[args.indexOf('--resume') + 1]).toBe(SESSION)
   expect(args.at(-1)).toBe('carry on')
   expect(registry()['chat:7']).toEqual({ name: 'Desk anchors', session: SESSION })
+})
+
+test('an adopted thread keeps the folder its session ran in', async () => {
+  start({ agents: [] })
+  hub.adopt('chat:7', 'Desk anchors', SESSION, 'carry on', dir)
+  await launched()
+  expect(registry()['chat:7']).toEqual({ name: 'Desk anchors', session: SESSION, cwd: dir })
 })
 
 test('a fork resumes a copy of the session without checking agents or clearing its job record', async () => {

@@ -1,9 +1,9 @@
 diff --git a/hub/hub.test.ts b/hub/hub.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..4a048e4e2e1235ab8586343bd47b76c5476a8b13
+index 0000000000000000000000000000000000000000..b7e4be14e1891191ba79fccc936941d69637b5a7
 --- /dev/null
 +++ b/hub/hub.test.ts
-@@ -0,0 +1,465 @@
+@@ -0,0 +1,505 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { connect, type Socket } from 'net'
 +import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, chmodSync, existsSync } from 'fs'
@@ -405,6 +405,39 @@ index 0000000000000000000000000000000000000000..4a048e4e2e1235ab8586343bd47b76c5
 +  expect(readFileSync(join(dir, 'leaked'), 'utf8').trim()).toBe('0')
 +})
 +
++test('a thread opened in a project starts its session there, and keeps that folder when it resumes', async () => {
++  const project = join(dir, 'project')
++  mkdirSync(project)
++  const launcher = join(dir, 'launch')
++  writeFileSync(launcher, `#!/bin/sh
++pwd >> "${dir}/cwd"
++exec claude "$@"
++`)
++  chmodSync(launcher, 0o755)
++  start({ launcher, agents: [] })
++  hub.open('t3:1', 'project', undefined, project)
++  await launched()
++  const { socket } = await session('t3:1')
++  await until(() => existsSync(join(dir, 'threads.json')) && registry()['t3:1'])
++  expect(registry()['t3:1']).toEqual({ name: 'project', cwd: project, session: SESSION })
++  expect(hub.cwd('t3:1')).toBe(project)
++  socket.destroy()
++  await until(() => states.some(([thread, busy]) => thread === 't3:1' && !busy))
++  hub.deliver('t3:1', 'project', message)
++  await until(() => readFileSync(join(dir, 'cwd'), 'utf8').split('\n').length > 2)
++  expect(readFileSync(join(dir, 'cwd'), 'utf8').trim().split('\n')).toEqual([project, project])
++})
++
++test('a thread in the hex folder keeps no folder of its own', async () => {
++  start()
++  hub.open('chat:7', 'Desk anchors', 'go')
++  await launched()
++  await session('chat:7')
++  await until(() => existsSync(join(dir, 'threads.json')) && registry()['chat:7'])
++  expect(registry()['chat:7']).toEqual({ name: 'Desk anchors', session: SESSION })
++  expect(hub.cwd('chat:7')).toBeUndefined()
++})
++
 +test('releasing an idle thread stops its session, then forgets it once the socket closes', async () => {
 +  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } } })
 +  const { socket } = await session('chat:7')
@@ -459,6 +492,13 @@ index 0000000000000000000000000000000000000000..4a048e4e2e1235ab8586343bd47b76c5
 +  expect(registry()['chat:7']).toEqual({ name: 'Desk anchors', session: SESSION })
 +})
 +
++test('an adopted thread keeps the folder its session ran in', async () => {
++  start({ agents: [] })
++  hub.adopt('chat:7', 'Desk anchors', SESSION, 'carry on', dir)
++  await launched()
++  expect(registry()['chat:7']).toEqual({ name: 'Desk anchors', session: SESSION, cwd: dir })
++})
++
 +test('a fork resumes a copy of the session without checking agents or clearing its job record', async () => {
 +  start()
 +  hub.fork('chat:7', 'Desk anchors', SESSION, 'carry on')
@@ -471,10 +511,10 @@ index 0000000000000000000000000000000000000000..4a048e4e2e1235ab8586343bd47b76c5
 +})
 diff --git a/hub/hub.ts b/hub/hub.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..fda6eb075764292a15b93499e77797ea30a678ab
+index 0000000000000000000000000000000000000000..cb54071eb14d9c06ed86dd23b5e48ec476ffbbb9
 --- /dev/null
 +++ b/hub/hub.ts
-@@ -0,0 +1,337 @@
+@@ -0,0 +1,339 @@
 +import { createServer, type Socket } from 'net'
 +import { execFile, spawn } from 'child_process'
 +import { readFileSync, writeFileSync, renameSync, rmSync, watch, type FSWatcher } from 'fs'
@@ -485,7 +525,7 @@ index 0000000000000000000000000000000000000000..fda6eb075764292a15b93499e77797ea
 +export type Call = (thread: string, tool: string, args: Record<string, unknown>) => Promise<string>
 +export type State = (thread: string, busy: boolean) => void
 +export type Failed = (thread: string, reason: string) => void
-+type Thread = { name: string; session?: string }
++type Thread = { name: string; session?: string; cwd?: string }
 +type Agent = { sessionId: string; pid?: number; status?: string }
 +export type Hub = ReturnType<typeof startHub>
 +
@@ -606,8 +646,8 @@ index 0000000000000000000000000000000000000000..fda6eb075764292a15b93499e77797ea
 +    leaving.delete(thread)
 +  }
 +
-+  function adopt(thread: string, name: string, session: string, prompt: string) {
-+    threads[thread] = { name, session }
++  function adopt(thread: string, name: string, session: string, prompt: string, cwd?: string) {
++    threads[thread] = { name, session, ...(cwd && { cwd }) }
 +    save()
 +    launch(thread, name, prompt)
 +  }
@@ -631,10 +671,10 @@ index 0000000000000000000000000000000000000000..fda6eb075764292a15b93499e77797ea
 +    socket.write(JSON.stringify(payload) + '\n')
 +  }
 +
-+  function launch(thread: string, name: string, prompt?: string, fork?: string) {
++  function launch(thread: string, name: string, prompt?: string, fork?: string, cwd?: string) {
 +    if (launching.has(thread)) return
 +    retiring.delete(thread)
-+    const known = threads[thread] ?? (threads[thread] = { name })
++    const known = threads[thread] ?? (threads[thread] = { name, ...(cwd && { cwd }) })
 +    if (prompt || queued.has(thread)) setState(thread, true)
 +    launching.set(thread, undefined)
 +    if (fork) return start(known, thread, prompt, fork)
@@ -669,7 +709,7 @@ index 0000000000000000000000000000000000000000..fda6eb075764292a15b93499e77797ea
 +        ...(fork ? ['--resume', fork, '--fork-session'] : known.session ? ['--resume', known.session] : []),
 +        '--settings', JSON.stringify({ enabledPlugins: { [plugin]: true }, env: bound }),
 +        ...(prompt ? [prompt] : []),
-+      ], { cwd: hexDir, env, stdio: ['ignore', 'pipe', 'pipe'] })
++      ], { cwd: known.cwd ?? hexDir, env, stdio: ['ignore', 'pipe', 'pipe'] })
 +    } catch (error) {
 +      return fail(thread, String(error))
 +    }
@@ -709,8 +749,8 @@ index 0000000000000000000000000000000000000000..fda6eb075764292a15b93499e77797ea
 +  function fail(thread: string, reason: string) {
 +    if (!launching.has(thread) || live.has(thread)) return
 +    settle(thread)
-+    setState(thread, false)
 +    failed(thread, reason)
++    setState(thread, false)
 +  }
 +
 +  function deliver(thread: string, name: string, message: Message) {
@@ -781,11 +821,12 @@ index 0000000000000000000000000000000000000000..fda6eb075764292a15b93499e77797ea
 +
 +  return {
 +    deliver,
-+    open: (thread: string, name: string, prompt: string) => launch(thread, name, prompt),
-+    fork: (thread: string, name: string, session: string, prompt: string) => launch(thread, name, prompt, session),
++    open: (thread: string, name: string, prompt?: string, cwd?: string) => launch(thread, name, prompt, undefined, cwd),
++    fork: (thread: string, name: string, session: string, prompt: string, cwd?: string) => launch(thread, name, prompt, session, cwd),
 +    main,
 +    session: (thread: string) => threads[thread]?.session,
 +    name: (thread: string) => threads[thread]?.name,
++    cwd: (thread: string) => threads[thread]?.cwd,
 +    stop,
 +    release,
 +    adopt,
@@ -808,20 +849,22 @@ index 0000000000000000000000000000000000000000..fda6eb075764292a15b93499e77797ea
 +  if (!session) throw new Error('this thread has no session yet')
 +  const { thread: dest, link } = await target.place(name, where)
 +  const prompt = `This conversation just moved to ${to}, into the thread "${name}". Your ${to} tools now post there. Carry on where you left off.`
-+  if (thread === from.main) target.hub.fork(dest, name, session, prompt)
-+  else void from.release(thread).then(session => target.hub.adopt(dest, name, session, prompt))
++  const cwd = from.cwd(thread)
++  if (thread === from.main) target.hub.fork(dest, name, session, prompt, cwd)
++  else void from.release(thread).then(session => target.hub.adopt(dest, name, session, prompt, cwd))
 +  return link
 +}
 diff --git a/hub/serve.ts b/hub/serve.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..d9059b11503bfced6c842a2dbf7ab5bff1e4a425
+index 0000000000000000000000000000000000000000..e548a4b258fd9dd91ce6a14a70abdfd2fb1d7fd0
 --- /dev/null
 +++ b/hub/serve.ts
-@@ -0,0 +1,5 @@
+@@ -0,0 +1,6 @@
 +await Promise.all([
 +  import('../external_plugins/telegram/bot.ts'),
 +  import('../external_plugins/discord/bot.ts'),
 +  import('../external_plugins/buzz/bot.ts'),
++  import('../external_plugins/t3/bot.ts'),
 +])
 diff --git a/hub/state.ts b/hub/state.ts
 new file mode 100644

@@ -1,7 +1,7 @@
 > [!NOTE]
 > **This is an auto-patched fork of [claude-plugins-official](https://github.com/anthropics/claude-plugins-official).**
-> It runs a personal assistant where every Telegram forum topic, Discord thread and Buzz
-> thread is its own Claude Code session. A daily pipeline re-applies the [PATCH.md packages](patches/) onto the latest
+> It runs a personal assistant where every Telegram forum topic, Discord thread, Buzz
+> thread and T3 Code thread is its own Claude Code session. A daily pipeline re-applies the [PATCH.md packages](patches/) onto the latest
 > upstream, heals conflicts with Claude, runs `scripts/verify`, and commits the result
 > to `main`.
 >
@@ -12,6 +12,9 @@
 >   ([discord-threads](patches/discord-threads/PATCH.md)).
 > - [`external_plugins/buzz`](external_plugins/buzz/) is a new channel for
 >   [Buzz](https://github.com/block/buzz) ([buzz-threads](patches/buzz-threads/PATCH.md)).
+> - [`external_plugins/t3`](external_plugins/t3/) serves hex to
+>   [T3 Code](https://github.com/pingdotgg/t3code) as an ACP agent, each T3 thread
+>   a session in its own project ([t3-acp](patches/t3-acp/PATCH.md)).
 > - The marketplace is named `hex`, so plugins install as `telegram@hex`
 >   ([hex-marketplace](patches/hex-marketplace/PATCH.md)).
 >
