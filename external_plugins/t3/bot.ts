@@ -34,7 +34,7 @@ mkdirSync(INBOX_DIR, { recursive: true, mode: 0o700 })
 
 const hub = startHub({
   stateDir: STATE_DIR,
-  channel: 'plugin:t3@hex',
+  channel: process.env.T3_CHANNEL ?? 'plugin:t3@hex',
   call: async (_, tool) => {
     throw new Error(`unknown tool: ${tool}`)
   },
