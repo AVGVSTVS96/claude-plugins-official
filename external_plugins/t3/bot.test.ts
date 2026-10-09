@@ -17,7 +17,8 @@ const sockets: Socket[] = []
 beforeEach(async () => {
   dir = mkdtempSync(join(tmpdir(), 't3-bot-'))
   project = join(dir, 'project')
-  for (const path of [project, join(dir, 'hex'), join(dir, 'state'), join(dir, 'config', 'jobs', 'job12345')]) mkdirSync(path, { recursive: true })
+  for (const path of [project, join(dir, 'hex'), join(dir, 'state'), join(dir, 'config', 'jobs', 'job12345'), join(dir, '.t3', 'scratch', 'chat')]) mkdirSync(path, { recursive: true })
+  writeFileSync(join(dir, '.claude.json'), '{"projects":{}}')
   script('claude', `jq -cn '$ARGS.positional' --args -- "$@" >> "${dir}/claude"
 [ "$1 $2" = "agents --json" ] && echo '[]'
 exit 0`)
@@ -27,6 +28,7 @@ echo "backgrounded · job12345 · test"`)
   bot = Bun.spawn(['bun', join(import.meta.dir, 'bot.ts')], {
     env: {
       ...process.env,
+      HOME: dir,
       PATH: `${dir}:${process.env.PATH}`,
       T3_STATE_DIR: join(dir, 'state'),
       HEX_DIR: join(dir, 'hex'),
@@ -138,6 +140,14 @@ test('cancelling stops the session and answers the prompt as cancelled', async (
   expect(await answer).toEqual({ stopReason: 'cancelled' })
   await until(() => lines('claude').some(line => line.startsWith('["stop"')))
   expect(lines('claude')).toContain(JSON.stringify(['stop', SESSION.slice(0, 8)]))
+})
+
+test('a chat with no project works in hex\'s folder, and a project folder is trusted for good', async () => {
+  const { agent } = await t3()
+  for (const cwd of [dir, join(dir, '.t3', 'scratch', 'chat'), project]) await agent.request('session/new', { cwd, mcpServers: [] })
+  await until(() => lines('cwd').length === 3)
+  expect(lines('cwd')).toEqual([join(dir, 'hex'), join(dir, 'hex'), project])
+  expect(JSON.parse(readFileSync(join(dir, '.claude.json'), 'utf8')).projects).toEqual({ [project]: { hasTrustDialogAccepted: true } })
 })
 
 test('a session that fails to start fails the prompt with its reason', async () => {

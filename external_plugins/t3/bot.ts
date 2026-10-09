@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { createServer, type Socket } from 'net'
 import { Readable, Writable } from 'stream'
-import { mkdirSync, rmSync, writeFileSync } from 'fs'
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
 import { basename, join } from 'path'
 import { fileURLToPath } from 'url'
@@ -15,6 +15,9 @@ const STATE_DIR = process.env.T3_STATE_DIR ?? join(homedir(), '.claude', 'channe
 const INBOX_DIR = join(STATE_DIR, 'inbox')
 const SOCKET = join(STATE_DIR, 'acp.sock')
 const HEX_DIR = process.env.HEX_DIR ?? process.cwd()
+const HOME = homedir()
+const SCRATCH = join(HOME, '.t3', 'scratch')
+const CLAUDE_JSON = join(HOME, '.claude.json')
 
 type Turn = {
   client: AgentContext
@@ -123,6 +126,20 @@ function save(base64: string, mimeType?: string | null) {
   return file
 }
 
+// Claude Code never saves trust for the home folder and asks once per new folder,
+// but a hex session runs headless with nobody to accept. A T3 chat with no project
+// (home or T3's scratch folders) works in hex's own folder; a project folder is
+// trusted for good the first time hex opens there.
+function folderFor(cwd: string): string | undefined {
+  if (cwd === HOME || cwd === HEX_DIR || cwd.startsWith(SCRATCH)) return
+  const config = JSON.parse(readFileSync(CLAUDE_JSON, 'utf8'))
+  if (config.projects?.[cwd]?.hasTrustDialogAccepted) return cwd
+  config.projects = { ...config.projects, [cwd]: { ...config.projects?.[cwd], hasTrustDialogAccepted: true } }
+  writeFileSync(`${CLAUDE_JSON}.hex`, JSON.stringify(config, null, 2))
+  renameSync(`${CLAUDE_JSON}.hex`, CLAUDE_JSON)
+  return cwd
+}
+
 function serve(socket: Socket) {
   agent({ name: 'hex' })
     .onRequest('initialize', () => ({
@@ -136,7 +153,8 @@ function serve(socket: Socket) {
     }))
     .onRequest('session/new', ({ params }) => {
       const thread = randomUUID()
-      hub.open(thread, basename(params.cwd), undefined, params.cwd === HEX_DIR ? undefined : params.cwd)
+      const folder = folderFor(params.cwd)
+      hub.open(thread, basename(folder ?? HEX_DIR), undefined, folder)
       return { sessionId: thread }
     })
     .onRequest('session/resume', ({ params }) => (known(params.sessionId), {}))
