@@ -2,7 +2,7 @@
 format: patch-md/v0.1
 id: hub
 summary: Add a client-agnostic hub that gives every chat thread its own Claude Code session and moves threads between clients.
-baseline: 315c4e48967d9541c29c3c656441dded353ca7aa
+baseline: ac996c0dde7fb2a9f805cd5277ffc95ecd44a321
 patch_file: hub.patch
 patch_sha256: 76deacdde4d904a7f7765979f13006dcfad808347553a28de9c5f95f9c478d98
 ---
