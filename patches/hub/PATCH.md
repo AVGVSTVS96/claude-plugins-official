@@ -4,7 +4,7 @@ id: hub
 summary: Add a client-agnostic hub that gives every chat thread its own Claude Code session and moves threads between clients.
 baseline: ac996c0dde7fb2a9f805cd5277ffc95ecd44a321
 patch_file: hub.patch
-patch_sha256: d7c696571b7f9306d935620bede731030eee4cbb3123b8450d68cf332eb1d928
+patch_sha256: 35bfcf0b6b7e63340b7c4691ecebd58d689a9b3e3d213374384d549fe0e5be89
 ---
 
 ## Intent
@@ -34,10 +34,7 @@ came from the app. Each session's settings enable only its client's plugin.
 
 The main thread is always running: the hub starts it (or resumes it) when it
 starts, never stops it for being idle, and starts it again when its session
-has been gone for 30 seconds. When the main session asks to start fresh
-(`hub/fresh.ts`, from a hook once its context is full), the hub stops it and
-starts a new session right away instead of resuming, with `HEX_PREVIOUS` set
-to the session it takes over from until the new one says hello.
+has been gone for 30 seconds.
 
 `hub/serve.ts` is the service: it runs every client (Telegram, Discord,
 Buzz) in one process. Each client registers in `clients` with a `place` that opens an
@@ -71,7 +68,7 @@ instead (`fork`, `--fork-session`).
 ## Verification
 
 `bun test hub` drives routing, queueing, resume, running sessions, the main
-thread (started with the hub, kept running, revived, started fresh), the launcher and its
+thread (started with the hub, kept running, revived), the launcher and its
 environment, failed starts, busy and idle, idle stops, stopping, closing, naming and
 handoffs (release, adopt, fork) and bad input against a fake `claude`. Run `scripts/verify`.
 

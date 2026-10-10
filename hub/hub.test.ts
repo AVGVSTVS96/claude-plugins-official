@@ -181,33 +181,6 @@ test('a main thread whose session is gone is resumed again, and is never stopped
 })
 
 
-test('a full main session is stopped and replaced at once by a fresh one, told which session it takes over from', async () => {
-  start({ main: 'chat', registry: { chat: { name: 'hex', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42 }] })
-  const { socket, send } = await session('chat')
-  send({ type: 'fresh', thread: 'chat' })
-  await until(() => calls().find(args => args[0] === 'stop'))
-  expect(calls().find(args => args[0] === 'stop')).toEqual(['stop', SESSION.slice(0, 8)])
-  expect(registry().chat).toEqual({ name: 'hex', previous: SESSION })
-  socket.destroy()
-  const args = await launched()
-  expect(args).not.toContain('--resume')
-  expect(settingsOf(args).env.HEX_PREVIOUS).toBe(SESSION)
-  const next = '1b2c3d4e-0000-4000-8000-000000000000'
-  await session('chat', next)
-  await until(() => registry().chat.session === next)
-  expect(registry().chat).toEqual({ name: 'hex', session: next })
-})
-
-test('only the main thread can start fresh', async () => {
-  start({ main: 'chat', registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } } })
-  await launched()
-  const { send } = await session('chat:7')
-  send({ type: 'fresh', thread: 'chat:7' })
-  await Bun.sleep(100)
-  expect(calls().filter(args => args[0] === 'stop')).toEqual([])
-  expect(registry()['chat:7'].session).toBe(SESSION)
-})
-
 test('tool calls act on the calling session\'s own thread', async () => {
   start()
   const { send, received } = await session('chat:9')
