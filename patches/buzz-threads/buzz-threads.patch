@@ -62,10 +62,10 @@ index 0000000000000000000000000000000000000000..2668335b15774c30864c3b1b345c6a7a
 +The agent's credentials live in `~/.claude/channels/hex/buzz/.env` (or `BUZZ_STATE_DIR`) as `BUZZ_RELAY_URL`, `BUZZ_PRIVATE_KEY` and `BUZZ_AUTH_TAG`; the provider writes them. `access.json` there can hold `allowFrom` (pubkeys allowed to talk to it; default: the owner in the auth tag), `channel` (where handoffs open; default `general`), `share` (files shared through Agent Files; default `AGENTS.md`, `SOUL.md`, `MEMORY.md` and `schedules.json`) and `"panels": false` to turn the panels off.
 diff --git a/external_plugins/buzz/activity.test.ts b/external_plugins/buzz/activity.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..3c30d1b75ef25ef05a7a1d551f97221f916b9d6f
+index 0000000000000000000000000000000000000000..1e4e8d85e6f45b644b7fed44c01738edb2cc6f8f
 --- /dev/null
 +++ b/external_plugins/buzz/activity.test.ts
-@@ -0,0 +1,317 @@
+@@ -0,0 +1,352 @@
 +import { afterEach, beforeEach, expect, setSystemTime, test } from 'bun:test'
 +import { appendFileSync, mkdirSync, mkdtempSync, writeFileSync } from 'fs'
 +import { tmpdir } from 'os'
@@ -170,6 +170,11 @@ index 0000000000000000000000000000000000000000..3c30d1b75ef25ef05a7a1d551f97221f
 +  line({ type: 'user', message: { role: 'user', content: [{ tool_use_id: tool, type: 'tool_result', content: output, is_error: false }] }, toolUseResult: { stdout: output, stderr: '', interrupted: false, isImage: false, noOutputExpected: false } })
 +}
 +
++// What Claude Code writes once a turn's Stop hooks have run.
++function stopHooks() {
++  line({ type: 'system', subtype: 'stop_hook_summary', hookCount: 1, hookInfos: [], hookErrors: [], preventedContinuation: false, stopReason: '', hasOutput: false, level: 'suggestion' })
++}
++
 +function plaintexts() {
 +  return published.map(({ event }) => decrypt(event.content, key))
 +}
@@ -210,6 +215,7 @@ index 0000000000000000000000000000000000000000..3c30d1b75ef25ef05a7a1d551f97221f
 +  assistant('msg_01', { type: 'thinking', thinking: 'Check the clock.', signature: 'sig' })
 +  bash('msg_01', 'toolu_01', 'date', 'Tue Oct  6 12:00:00 UTC 2026')
 +  assistant('msg_02', { type: 'text', text: "It's noon." })
++  stopHooks()
 +  await until(() => updates().some(update => update.sessionUpdate === 'agent_message_chunk'))
 +  activity.idle(ROOT)
 +  await until(() => frames().some(frame => frame.kind === 'turn_completed'))
@@ -258,6 +264,34 @@ index 0000000000000000000000000000000000000000..3c30d1b75ef25ef05a7a1d551f97221f
 +  }
 +  const seqs = frames().map(frame => frame.seq)
 +  expect(seqs).toEqual([...new Set(seqs)].sort((a, b) => a - b))
++}, 15000)
++
++test('a turn reported over before its last step is written completes once Claude Code has written it', async () => {
++  activity.busy({ thread: ROOT, channel: CHANNEL, session: SESSION, triggers: [] })
++  assistant('msg_01', { type: 'text', text: 'working on it' })
++  await until(() => updates().length === 1)
++  activity.idle(ROOT)
++  await Bun.sleep(1100)
++  expect(frames().some(frame => frame.kind === 'turn_completed')).toBe(false)
++  assistant('msg_02', { type: 'text', text: 'all done' })
++  stopHooks()
++  await until(() => frames().some(frame => frame.kind === 'turn_completed'))
++  expect(frames().filter(frame => frame.kind === 'acp_read' || frame.kind === 'turn_completed').map(frame => frame.payload.params?.update.content.text ?? frame.kind))
++    .toEqual(['working on it', 'all done', 'turn_completed'])
++}, 15000)
++
++test('a turn whose session was stopped completes with what it wrote, and the next turn starts clean', async () => {
++  activity.busy({ thread: ROOT, channel: CHANNEL, session: SESSION, triggers: [] })
++  assistant('msg_01', { type: 'text', text: 'halfway' })
++  activity.stopped(ROOT)
++  activity.idle(ROOT)
++  await until(() => frames().some(frame => frame.kind === 'turn_completed'))
++  activity.busy({ thread: 'c'.repeat(64), channel: CHANNEL, session: SESSION, triggers: [] })
++  activity.idle('c'.repeat(64))
++  activity.busy({ thread: 'c'.repeat(64), channel: CHANNEL, session: SESSION, triggers: [] })
++  await until(() => frames().filter(frame => frame.kind === 'turn_started').length === 3)
++  expect(frames().map(frame => frame.kind).filter(kind => kind.startsWith('turn_'))).toEqual(['turn_started', 'turn_completed', 'turn_started', 'turn_completed', 'turn_started'])
++  expect(updates().map(update => update.content.text)).toEqual(['halfway'])
 +}, 15000)
 +
 +test('session/new is sent once per session, with AGENTS.md and what it imports', async () => {
@@ -348,6 +382,7 @@ index 0000000000000000000000000000000000000000..3c30d1b75ef25ef05a7a1d551f97221f
 +  await until(() => published.length)
 +  setSystemTime(new Date(Date.now() + 10_500))
 +  await until(() => frames().some(frame => frame.kind === 'turn_liveness'))
++  stopHooks()
 +  activity.idle(ROOT)
 +  setSystemTime(new Date(Date.now() + 10_500))
 +  await until(() => frames().some(frame => frame.kind === 'turn_completed'))
@@ -385,10 +420,10 @@ index 0000000000000000000000000000000000000000..3c30d1b75ef25ef05a7a1d551f97221f
 +}, 15000)
 diff --git a/external_plugins/buzz/activity.ts b/external_plugins/buzz/activity.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..4c204e84e4f7d43f2bb8e66a253545881d6115ce
+index 0000000000000000000000000000000000000000..e7f5fdf660dd123b4dd66c8d9946b64762d88b0c
 --- /dev/null
 +++ b/external_plugins/buzz/activity.ts
-@@ -0,0 +1,342 @@
+@@ -0,0 +1,364 @@
 +import { closeSync, fstatSync, openSync, readFileSync, readSync, statSync } from 'fs'
 +import { homedir } from 'os'
 +import { dirname, join, relative, resolve } from 'path'
@@ -409,8 +444,8 @@ index 0000000000000000000000000000000000000000..4c204e84e4f7d43f2bb8e66a25354588
 +  startedAt?: string
 +  payload: unknown
 +}
-+type Transcript = { path: string; offset: number; rest: Buffer; since: number; tools: Record<string, any>; tasks: Map<any, any> }
-+type Turn = { id: string; thread: string; channel: string; startedAt: string; beat: number; session?: string; transcript?: Transcript }
++type Transcript = { path: string; offset: number; rest: Buffer; since: number; tools: Record<string, any>; tasks: Map<any, any>; stopped: boolean }
++type Turn = { id: string; thread: string; channel: string; startedAt: string; beat: number; session?: string; transcript?: Transcript; ending?: boolean; cut?: boolean }
 +type Target = { channel: string; thread?: string; session?: string }
 +
 +const KIND = 24200
@@ -469,7 +504,8 @@ index 0000000000000000000000000000000000000000..4c204e84e4f7d43f2bb8e66a25354588
 +
 +  function busy({ thread, channel, session, triggers }: { thread: string; channel: string; session?: string; triggers: string[] }) {
 +    const turn = turns.get(thread)
-+    if (turn) {
++    if (turn?.ending) finish(turn)
++    else if (turn) {
 +      if (session && !turn.transcript) follow(turn, session, false)
 +      return
 +    }
@@ -484,7 +520,7 @@ index 0000000000000000000000000000000000000000..4c204e84e4f7d43f2bb8e66a25354588
 +  function follow(turn: Turn, session: string, fresh: boolean) {
 +    turn.session = session
 +    const path = join(projects, `${session}.jsonl`)
-+    turn.transcript = { path, offset: fresh ? sizeOf(path) : 0, rest: Buffer.alloc(0), since: Date.parse(turn.startedAt), tools: {}, tasks: new Map() }
++    turn.transcript = { path, offset: fresh ? sizeOf(path) : 0, rest: Buffer.alloc(0), since: Date.parse(turn.startedAt), tools: {}, tasks: new Map(), stopped: false }
 +    if (announced.has(session)) return
 +    announced.add(session)
 +    push('acp_write', { jsonrpc: '2.0', id: 0, method: 'session/new', params: { cwd: hexDir, mcpServers: [], systemPrompt: instructions() } }, turn)
@@ -523,8 +559,9 @@ index 0000000000000000000000000000000000000000..4c204e84e4f7d43f2bb8e66a25354588
 +    } catch {
 +      return
 +    }
-+    if ((entry.type !== 'assistant' && entry.type !== 'user') || entry.isSidechain) return
 +    if (!(Date.parse(entry.timestamp) >= turn.transcript!.since)) return
++    if (entry.type === 'system' && entry.subtype === 'stop_hook_summary') turn.transcript!.stopped = true
++    if ((entry.type !== 'assistant' && entry.type !== 'user') || entry.isSidechain) return
 +    if (entry.type === 'user' && (entry.isMeta || entry.origin)) return
 +    const content = entry.type === 'user' ? stripLocalCommandMetadata(entry.message?.content) : entry.message?.content
 +    if (content == null) return
@@ -540,11 +577,26 @@ index 0000000000000000000000000000000000000000..4c204e84e4f7d43f2bb8e66a25354588
 +    for (const notification of notifications) push('acp_read', { jsonrpc: '2.0', method: 'session/update', params: notification }, turn)
 +  }
 +
++  // The Stop hook reports a turn over before Claude Code has written its last
++  // steps, and Claude Code writes stop_hook_summary once the hooks are done, so
++  // the turn completes when that line is read. A session stopped from here runs
++  // no Stop hooks, so its turn completes with whatever it wrote.
 +  function idle(thread: string) {
 +    const turn = turns.get(thread)
 +    if (!turn) return
++    turn.ending = true
 +    read(turn)
-+    turns.delete(thread)
++    if (turn.cut || !turn.transcript || turn.transcript.stopped) finish(turn)
++  }
++
++  function stopped(thread: string) {
++    const turn = turns.get(thread)
++    if (turn) turn.cut = true
++  }
++
++  function finish(turn: Turn) {
++    read(turn)
++    turns.delete(turn.thread)
 +    push('turn_completed', {}, turn)
 +  }
 +
@@ -622,6 +674,10 @@ index 0000000000000000000000000000000000000000..4c204e84e4f7d43f2bb8e66a25354588
 +  function tick() {
 +    for (const turn of turns.values()) {
 +      read(turn)
++      if (turn.ending && turn.transcript!.stopped) {
++        finish(turn)
++        continue
++      }
 +      if (Date.now() - turn.beat < LIVENESS) continue
 +      turn.beat = Date.now()
 +      push('turn_liveness', root(turn), turn)
@@ -667,6 +723,7 @@ index 0000000000000000000000000000000000000000..4c204e84e4f7d43f2bb8e66a25354588
 +  return {
 +    busy,
 +    idle,
++    stopped,
 +    log,
 +    close() {
 +      clearInterval(timer)
@@ -733,10 +790,10 @@ index 0000000000000000000000000000000000000000..4c204e84e4f7d43f2bb8e66a25354588
 +}
 diff --git a/external_plugins/buzz/bot.test.ts b/external_plugins/buzz/bot.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..a5b99f427d6fdc762d7c69db59cf3a03eb4371b4
+index 0000000000000000000000000000000000000000..a19ac38790d7ceb4afad9639a194db0d306a7f9f
 --- /dev/null
 +++ b/external_plugins/buzz/bot.test.ts
-@@ -0,0 +1,512 @@
+@@ -0,0 +1,637 @@
 +import { afterAll, afterEach, expect, test } from 'bun:test'
 +import type { ServerWebSocket, Subprocess } from 'bun'
 +import { connect, type Socket } from 'net'
@@ -745,7 +802,7 @@ index 0000000000000000000000000000000000000000..a5b99f427d6fdc762d7c69db59cf3a03
 +import { tmpdir } from 'os'
 +import { join } from 'path'
 +import { generateSecretKey, getPublicKey, finalizeEvent, verifyEvent, type Event } from 'nostr-tools/pure'
-+import { matchFilter, matchFilters, type Filter } from 'nostr-tools/filter'
++import { matchFilter, type Filter } from 'nostr-tools/filter'
 +import { bytesToHex } from 'nostr-tools/utils'
 +import { schnorr } from '@noble/curves/secp256k1.js'
 +import { connectRelay } from './relay.ts'
@@ -753,18 +810,29 @@ index 0000000000000000000000000000000000000000..a5b99f427d6fdc762d7c69db59cf3a03
 +type Peer = { challenge: string; pubkey?: string; subs: Map<string, Filter[]> }
 +
 +// A NIP-01/42 relay small enough to read: AUTH first, then REQ/EOSE/CLOSE and EVENT fan-out,
-+// NIP-50 search as a substring match, and Buzz's NIP-98 /query channel window (NIP-CW).
++// NIP-50 search as a substring match, and Buzz's NIP-98 /query channel window (NIP-CW) and presence.
 +function fakeRelay() {
 +  const events: Event[] = []
 +  const frames: unknown[][] = []
 +  const peers = new Set<ServerWebSocket<Peer>>()
 +  const downloads: string[] = []
++  const online = new Map<string, string>()
 +  const relayKey = generateSecretKey()
 +  const isReply = (event: Event) => event.tags.some(t => t[0] === 'e' && t[3] === 'reply')
 +
++  // Buzz files a reaction or deletion under the channel of the event it names, h tag or not.
++  function channelOf(event: Event | undefined): string | undefined {
++    const target = event && [5, 7].includes(event.kind) ? events.find(stored => stored.id === event.tags.find(t => t[0] === 'e')?.[1]) : undefined
++    return event?.tags.find(t => t[0] === 'h')?.[1] ?? channelOf(target)
++  }
++
++  function matches({ '#h': channels, ...filter }: Filter, event: Event) {
++    return matchFilter(filter, event) && (!channels || channels.includes(channelOf(event)!))
++  }
++
 +  function stored(filters: Filter[]) {
 +    return filters.flatMap(filter => events
-+      .filter(event => matchFilter(filter, event) && (!filter.search || event.content.toLowerCase().includes(filter.search.toLowerCase())))
++      .filter(event => matches(filter, event) && (!filter.search || event.content.toLowerCase().includes(filter.search.toLowerCase())))
 +      .sort((a, b) => b.created_at - a.created_at)
 +      .slice(0, filter.limit))
 +  }
@@ -776,6 +844,7 @@ index 0000000000000000000000000000000000000000..a5b99f427d6fdc762d7c69db59cf3a03
 +    const signedFor = tag('u') === request.url && tag('method') === 'POST' && tag('payload') === createHash('sha256').update(body).digest('hex')
 +    if (!verifyEvent(auth) || auth.kind !== 27235 || !signedFor || JSON.parse(request.headers.get('x-auth-tag') ?? '[]')[1] !== owner) return new Response('bad auth', { status: 401 })
 +    const [filter] = JSON.parse(body)
++    if (filter.kinds[0] === 20001) return Response.json(filter.authors.filter((author: string) => online.has(author)).map((author: string) => signed(relayKey, 20001, online.get(author)!, [['p', author]])))
 +    const channel = filter['#h'][0]
 +    const rows = events
 +      .filter(event => matchFilter({ kinds: filter.kinds, '#h': [channel] }, event) && !isReply(event))
@@ -839,7 +908,7 @@ index 0000000000000000000000000000000000000000..a5b99f427d6fdc762d7c69db59cf3a03
 +  function inject(event: Event) {
 +    events.push(event)
 +    for (const peer of peers) {
-+      for (const [id, filters] of peer.data.subs) if (matchFilters(filters, event)) peer.send(JSON.stringify(['EVENT', id, event]))
++      for (const [id, filters] of peer.data.subs) if (filters.some(filter => matches(filter, event))) peer.send(JSON.stringify(['EVENT', id, event]))
 +    }
 +  }
 +  return {
@@ -847,6 +916,7 @@ index 0000000000000000000000000000000000000000..a5b99f427d6fdc762d7c69db59cf3a03
 +    events,
 +    frames,
 +    downloads,
++    online,
 +    inject,
 +    drop: () => peers.forEach(peer => peer.terminate()),
 +    stop: () => server.stop(true),
@@ -925,7 +995,7 @@ index 0000000000000000000000000000000000000000..a5b99f427d6fdc762d7c69db59cf3a03
 +
 +// Runs bot.ts the way the hub service does, against its own fake relay, with
 +// a fake `claude` that records its calls and a channel and a DM Hex is in.
-+async function startBot() {
++async function startBot(prepare?: (setup: { state: string; relay: ReturnType<typeof fakeRelay>; channel: string; me: string }) => void) {
 +  const dir = mkdtempSync(join(tmpdir(), 'buzz-'))
 +  const state = join(dir, 'state')
 +  mkdirSync(state)
@@ -959,6 +1029,7 @@ index 0000000000000000000000000000000000000000..a5b99f427d6fdc762d7c69db59cf3a03
 +  relay.inject(signed(host, 39000, '', [['d', openSource], ['name', 'open-source'], ['t', 'stream']]))
 +  relay.inject(signed(host, 39000, '', [['d', secret], ['name', 'secret'], ['t', 'stream']]))
 +  relay.inject(signed(host, 39000, '', [['d', dm], ['name', 'dm'], ['hidden'], ['t', 'dm']]))
++  prepare?.({ state, relay, channel, me })
 +
 +  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^(BUZZ_|HEX_|TELEGRAM_|DISCORD_)/.test(name)))
 +  const bot = Bun.spawn(['bun', join(import.meta.dir, 'bot.ts')], {
@@ -1090,6 +1161,67 @@ index 0000000000000000000000000000000000000000..a5b99f427d6fdc762d7c69db59cf3a03
 +  expect(inbound[2].meta.new_thread).toBeUndefined()
 +})
 +
++test('a bare tag on someone\'s message brings Hex into its thread, with that message as what the tag replies to', async () => {
++  const bot = await startBot()
++  const post = bot.say('gpt-live-1 can i use custom voices')
++  bot.say('@Hex', [['e', post.id, '', 'reply'], ['p', bot.me]])
++  const args = await until(() => bot.launches()[0])
++  expect(args[args.indexOf('--name') + 1]).toBe('gpt-live-1 can')
++  const [inbound] = await (await bot.session(post.id)).inbound(1)
++  expect(inbound.content).toBe('(tagged you)')
++  expect(inbound.meta).toMatchObject({ chat_id: post.id, new_thread: 'true', reply_to_message_id: post.id, reply_to_user: 'Bassim', reply_to_text: 'gpt-live-1 can i use custom voices' })
++})
++
++test('a reaction on a message in Hex\'s thread reaches it, and so does taking it back; one elsewhere doesn\'t', async () => {
++  const bot = await startBot()
++  const { session } = await threadStarted(bot)
++  const sent = (await session.call('reply', { text: 'on it' })).text.match(/id: (\w+)/)[1]
++  bot.relay.inject(signed(ownerKey, 7, '👍', [['e', bot.say('lunch anyone?').id]]))
++  const like = signed(ownerKey, 7, '👍', [['e', sent]])
++  bot.relay.inject(like)
++  bot.relay.inject(signed(ownerKey, 5, '', [['e', like.id]]))
++  const [, added, removed] = await session.inbound(3)
++  expect(added.content).toBe('(reaction: 👍)')
++  expect(added.meta).toMatchObject({ reaction: '👍', reaction_to_message_id: sent, reaction_to_user: 'me', reaction_to_text: 'on it', user: 'Bassim', channel: 'general' })
++  expect(removed.content).toBe('(reaction removed: 👍)')
++  expect(removed.meta).toMatchObject({ reaction: '👍', reaction_removed: 'true', reaction_to_message_id: sent, reaction_to_text: 'on it' })
++  await Bun.sleep(300)
++  expect((await session.inbound(3)).length).toBe(3)
++})
++
++test('a deleted message reaches its thread with what it said', async () => {
++  const bot = await startBot()
++  const { root, session } = await threadStarted(bot)
++  const typo = bot.say('the lfet one', [['e', root.id, '', 'reply']])
++  await session.inbound(2)
++  bot.relay.inject(signed(ownerKey, 5, '', [['h', bot.channel], ['e', typo.id]]))
++  const inbound = await session.inbound(3)
++  expect(inbound[2].content).toBe('(deleted a message)')
++  expect(inbound[2].meta).toMatchObject({ deleted: 'true', message_id: typo.id, deleted_text: 'the lfet one', chat_id: root.id })
++})
++
++test('after a restart Hex picks up what was sent while it was down, in order, and nothing twice', async () => {
++  const t = Math.floor(Date.now() / 1000) - 100
++  let root!: Event
++  const bot = await startBot(({ state, relay, channel, me }) => {
++    const at = (offset: number, content: string, tags: string[][]) => {
++      const event = signed(ownerKey, 9, content, [['h', channel], ...tags], t + offset)
++      relay.inject(event)
++      return event
++    }
++    root = at(0, '@Hex desk anchors are loose', [['p', me]])
++    writeFileSync(join(state, 'threads.json'), JSON.stringify({ [root.id]: { name: 'Desk anchors' } }))
++    writeFileSync(join(state, 'cursor.json'), JSON.stringify({ at: t, ids: [root.id] }))
++    at(9, 'three', [['e', root.id, '', 'reply']])
++    at(0, 'one', [['e', root.id, '', 'reply']])
++    at(5, 'two', [['e', root.id, '', 'reply']])
++  })
++  const session = await bot.session(root.id)
++  expect((await session.inbound(3)).map(line => line.content)).toEqual(['one', 'two', 'three'])
++  await Bun.sleep(300)
++  expect((await session.inbound(3)).length).toBe(3)
++})
++
 +test('reply posts into the thread with NIP-10 markers, a p tag for the owner and the auth tag', async () => {
 +  const bot = await startBot()
 +  const { root, session } = await threadStarted(bot)
@@ -1156,6 +1288,56 @@ index 0000000000000000000000000000000000000000..a5b99f427d6fdc762d7c69db59cf3a03
 +  const args = await until(() => bot.launches()[1])
 +  expect(args[args.indexOf('--name') + 1]).toBe('Desk anchors')
 +  expect(args.at(-1)).toBe('find better anchors')
++})
++
++test('rename_thread renames a thread Hex opened in Buzz too, by editing its first message', async () => {
++  const bot = await startBot()
++  const { session } = await threadStarted(bot)
++  await session.call('rename_thread', { title: 'Loose anchors' })
++  expect(bot.published(40003)).toEqual([])
++  await session.call('new_thread', { title: 'Desk anchors', prompt: 'find better anchors' })
++  const root = await until(() => bot.published(9).find(event => event.content === '**Desk anchors**'))
++  const opened = await bot.session(root.id)
++  expect((await opened.call('rename_thread', { title: 'Desk mounts' })).text).toBe('renamed to "Desk mounts", and its first message in Buzz now says so')
++  expect(bot.published(40003).map(event => [event.content, event.tags])).toEqual([['**Desk mounts**', [['h', bot.channel], ['e', root.id], bot.auth]]])
++})
++
++test('delete_message and react with remove take back what Hex posted, and nothing of anyone else\'s', async () => {
++  const bot = await startBot()
++  const { root, session } = await threadStarted(bot)
++  const sent = (await session.call('reply', { text: 'on it' })).text.match(/id: (\w+)/)[1]
++  await session.call('react', { message_id: root.id, emoji: '✅' })
++  const check = bot.published(7).find(event => event.content === '✅')!
++  expect((await session.call('react', { message_id: root.id, emoji: '✅', remove: true })).text).toBe('reaction removed')
++  expect((await session.call('react', { message_id: root.id, emoji: '🎉', remove: true })).error).toBe('the bot hasn\'t reacted 🎉 to that message')
++  expect((await session.call('delete_message', { message_id: sent })).text).toBe('deleted')
++  expect((await session.call('delete_message', { message_id: root.id })).error).toBe('only the bot\'s own messages can be deleted')
++  const deletions = bot.published(5).map(event => event.tags).filter(tags => tags.some(t => t[1] === check.id || t[1] === sent))
++  expect(deletions).toEqual([[['e', check.id], bot.auth], [['h', bot.channel], ['e', sent], bot.auth]])
++})
++
++test('canvas reads the channel\'s canvas and saves new revisions ahead of the one it read', async () => {
++  const bot = await startBot()
++  const { session } = await threadStarted(bot)
++  expect((await session.call('canvas', {})).text).toBe('(this channel has no canvas yet)')
++  const first = (await session.call('canvas', { text: '# Plan' })).text.match(/revision: (\w+)/)[1]
++  expect((await session.call('canvas', {})).text).toBe(`# Plan\n\n(revision: ${first})`)
++  await session.call('canvas', { text: '# Plan\n- anchors', revision: first })
++  const [v1, v2] = bot.published(40100)
++  expect(v1!.tags).toEqual([['h', bot.channel], bot.auth])
++  expect(v2!.tags).toEqual([['h', bot.channel], ['expected-revision', first], bot.auth])
++  expect(v2!.created_at).toBeGreaterThan(v1!.created_at)
++  expect((await session.call('canvas', { channel: 'open-source' })).text).toBe('(this channel has no canvas yet)')
++  expect((await session.call('canvas', { channel: 'secret' })).error).toBe('Hex is in no channel named #secret')
++})
++
++test('presence says whether the owner is online, away or offline', async () => {
++  const bot = await startBot()
++  const { session } = await threadStarted(bot)
++  bot.relay.online.set(owner, 'away')
++  expect((await session.call('presence', {})).text).toBe('Bassim: away')
++  bot.relay.online.delete(owner)
++  expect((await session.call('presence', {})).text).toBe('Bassim: offline')
 +})
 +
 +test('download_attachment saves a message\'s files to the inbox, fetched with Blossom auth', async () => {
@@ -1251,12 +1433,12 @@ index 0000000000000000000000000000000000000000..a5b99f427d6fdc762d7c69db59cf3a03
 +})
 diff --git a/external_plugins/buzz/bot.ts b/external_plugins/buzz/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..499512b033b208ea065bc5f47002bcf64ce5b81b
+index 0000000000000000000000000000000000000000..050ce0fc33cab76c1517c801398f332570d0134a
 --- /dev/null
 +++ b/external_plugins/buzz/bot.ts
-@@ -0,0 +1,669 @@
+@@ -0,0 +1,808 @@
 +#!/usr/bin/env bun
-+import { readFileSync, writeFileSync, mkdirSync, statSync, realpathSync, chmodSync } from 'fs'
++import { readFileSync, writeFileSync, mkdirSync, statSync, realpathSync, chmodSync, renameSync } from 'fs'
 +import { createHash } from 'crypto'
 +import { homedir } from 'os'
 +import { basename, join, sep } from 'path'
@@ -1271,6 +1453,7 @@ index 0000000000000000000000000000000000000000..499512b033b208ea065bc5f47002bcf6
 +const STATE_DIR = process.env.BUZZ_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'hex', 'buzz')
 +const ACCESS_FILE = join(STATE_DIR, 'access.json')
 +const ENV_FILE = join(STATE_DIR, '.env')
++const CURSOR_FILE = join(STATE_DIR, 'cursor.json')
 +const INBOX_DIR = join(STATE_DIR, 'inbox')
 +
 +try {
@@ -1327,6 +1510,9 @@ index 0000000000000000000000000000000000000000..499512b033b208ea065bc5f47002bcf6
 +const MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024
 +// Chat messages, Buzz's older message kind, and diffs: what a channel's history is made of.
 +const MESSAGES = [9, 40002, 40008]
++// Messages, edits, reactions, and deletions (NIP-09, and NIP-29's admin delete): what reaches Hex live.
++const INBOUND = [9, 40003, 7, 5, 9005]
++const CANVAS = 40100
 +
 +// reply's files param takes any path, but channel state and .env files (keys)
 +// are the things Claude has no reason to ever send.
@@ -1434,6 +1620,9 @@ index 0000000000000000000000000000000000000000..499512b033b208ea065bc5f47002bcf6
 +  const triggers = new Map<string, string[]>()
 +  const acks = new Map<string, string[]>()
 +  const typing = new Map<string, ReturnType<typeof setInterval>>()
++  // The relay hides deleted events, so a deletion is explained by what Hex saw before it.
++  const texts = new Map<string, { thread: string; text: string }>()
++  const reactions = new Map<string, { thread: string; emoji: string; meta: Record<string, string> }>()
 +  const access = loadAccess()
 +  const panels = access.panels !== false
 +  const activity = panels ? startActivity({ relay, secretKey, owner, hexDir: process.env.HEX_DIR ?? process.cwd(), cancel }) : undefined
@@ -1500,7 +1689,9 @@ index 0000000000000000000000000000000000000000..499512b033b208ea065bc5f47002bcf6
 +
 +  async function post(thread: string, content: string, extra: string[][] = [], parent?: string): Promise<Event> {
 +    const channel = await channelOf(thread)
-+    return relay.publish({ kind: 9, content, tags: [['h', channel], ...threadTags(thread, parent), ['p', owner], ...extra] })
++    const sent = await relay.publish({ kind: 9, content, tags: [['h', channel], ...threadTags(thread, parent), ['p', owner], ...extra] })
++    texts.set(sent.id, { thread, text: content })
++    return sent
 +  }
 +
 +  async function place(name: string, where?: string) {
@@ -1622,6 +1813,37 @@ index 0000000000000000000000000000000000000000..499512b033b208ea065bc5f47002bcf6
 +    })
 +  }
 +
++  // Desktop shows an edit's attachments in place of the original's, so they carry over.
++  function edit(target: Event, text: string) {
++    const urls = filesOf(target).map(file => `](${file.url})`)
++    const media = target.content.split('\n').filter(line => urls.some(url => line.endsWith(url)))
++    const imeta = target.tags.filter(t => t[0] === 'imeta')
++    return relay.publish({ kind: 40003, content: [text, ...media].join('\n'), tags: [['h', tag(target, 'h')!], ['e', target.id], ...imeta] })
++  }
++
++  // A channel's canvas is its newest kind 40100 event; Desktop writes one a second
++  // past the head it read, so a new revision always sorts first.
++  async function canvas(channel: string, text?: string, revision?: string): Promise<string> {
++    const [head] = await relay.query([{ kinds: [CANVAS], '#h': [channel], limit: 1 }])
++    if (text === undefined) return head ? `${head.content}\n\n(revision: ${head.id})` : '(this channel has no canvas yet)'
++    const saved = await relay.publish({
++      kind: CANVAS,
++      content: text,
++      tags: [['h', channel], ...(revision ? [['expected-revision', revision]] : [])],
++      created_at: Math.max(now(), (head?.created_at ?? 0) + 1),
++    })
++    return `canvas saved (revision: ${saved.id})`
++  }
++
++  // The relay answers presence over /query only, one event per person who is
++  // online or away; anyone missing is offline, as Desktop reads it.
++  async function whoIsOnline(): Promise<string> {
++    const people = loadAccess().allowFrom ?? [owner]
++    const status = new Map((await bridge([{ kinds: [20001], authors: people }])).map(event => [tag(event, 'p') ?? event.pubkey, event.content]))
++    const lines = await Promise.all(people.map(async pubkey => `${await nameOf(pubkey)}: ${status.get(pubkey) ?? 'offline'}`))
++    return lines.join('\n')
++  }
++
 +  function listChannels(): string {
 +    const lines = [...channels].map(([id, channel]) => channel.dm ? `${channel.name}  (id: ${id}, direct message)` : `#${channel.name}  (id: ${id})`)
 +    return lines.join('\n') || '(none)'
@@ -1674,8 +1896,13 @@ index 0000000000000000000000000000000000000000..499512b033b208ea065bc5f47002bcf6
 +      (isChannel(busy) ? busy : homes.get(busy)) === channel && (!thread || busy === thread) && (!session || hub.session(busy) === session))
 +    if (matches.length === 0) return 'no_active_turn'
 +    if (matches.length > 1) return 'ambiguous_target'
-+    hub.stop(matches[0]!)
++    stop(matches[0]!)
 +    return 'sent'
++  }
++
++  function stop(thread: string) {
++    activity?.stopped(thread)
++    hub.stop(thread)
 +  }
 +
 +  async function call(caller: string, tool: string, args: Record<string, unknown>): Promise<string> {
@@ -1688,6 +1915,11 @@ index 0000000000000000000000000000000000000000..499512b033b208ea065bc5f47002bcf6
 +    if (tool === 'fetch_messages') return history(caller, args)
 +    if (tool === 'search_messages') return search(caller, args)
 +    if (tool === 'list_channels') return listChannels()
++    if (tool === 'presence') return whoIsOnline()
++    if (tool === 'canvas') {
++      const channel = args.channel ? readable(caller, channelNamed(args.channel as string)) : await channelOf(caller)
++      return canvas(channel, args.text as string | undefined, args.revision as string | undefined)
++    }
 +    const thread = args.thread ? hub.find(args.thread as string) : caller
 +    switch (tool) {
 +      case 'reply': {
@@ -1722,19 +1954,30 @@ index 0000000000000000000000000000000000000000..499512b033b208ea065bc5f47002bcf6
 +        return sentIds.length === 1 ? `sent (id: ${sentIds[0]})` : `sent ${sentIds.length} parts (ids: ${sentIds.join(', ')})`
 +      }
 +      case 'react': {
-+        await message(thread, args.message_id as string)
-+        await react(args.message_id as string, args.emoji as string)
-+        return 'reacted'
++        const target = await message(thread, args.message_id as string)
++        if (!args.remove) {
++          await react(target.id, args.emoji as string)
++          return 'reacted'
++        }
++        const mine = await relay.query([{ kinds: [7], authors: [me], '#e': [target.id], '#h': [tag(target, 'h')!] }])
++        const reaction = mine.find(event => event.content === args.emoji)
++        if (!reaction) throw new Error(`the bot hasn't reacted ${args.emoji} to that message`)
++        await relay.publish({ kind: 5, content: '', tags: [['e', reaction.id]] })
++        return 'reaction removed'
 +      }
 +      case 'edit_message': {
 +        const target = await message(thread, args.message_id as string)
 +        if (target.pubkey !== me) throw new Error('only the bot\'s own messages can be edited')
-+        // Desktop shows an edit's attachments in place of the original's, so they carry over.
-+        const urls = filesOf(target).map(file => `](${file.url})`)
-+        const media = target.content.split('\n').filter(line => urls.some(url => line.endsWith(url)))
-+        const imeta = target.tags.filter(t => t[0] === 'imeta')
-+        const edited = await relay.publish({ kind: 40003, content: [args.text as string, ...media].join('\n'), tags: [['h', tag(target, 'h')!], ['e', target.id], ...imeta] })
++        const edited = await edit(target, args.text as string)
++        texts.set(target.id, { thread, text: args.text as string })
 +        return `edited (id: ${edited.id})`
++      }
++      case 'delete_message': {
++        const target = await message(thread, args.message_id as string)
++        if (target.pubkey !== me) throw new Error('only the bot\'s own messages can be deleted')
++        await relay.publish({ kind: 5, content: '', tags: [['h', tag(target, 'h')!], ['e', target.id]] })
++        texts.delete(target.id)
++        return 'deleted'
 +      }
 +      case 'download_attachment': {
 +        const msg = await message(thread, args.message_id as string)
@@ -1750,7 +1993,10 @@ index 0000000000000000000000000000000000000000..499512b033b208ea065bc5f47002bcf6
 +      case 'rename_thread': {
 +        const name = title(args.title as string)
 +        hub.rename(thread, name)
-+        return `renamed to "${name}"`
++        const head = isChannel(thread) ? undefined : await message(thread, thread)
++        if (head?.pubkey !== me) return `renamed to "${name}"`
++        await edit(head, `**${name}**`)
++        return `renamed to "${name}", and its first message in Buzz now says so`
 +      }
 +      case 'close_thread': {
 +        if (isChannel(thread)) throw new Error('only threads can be closed')
@@ -1792,18 +2038,21 @@ index 0000000000000000000000000000000000000000..499512b033b208ea065bc5f47002bcf6
 +
 +  // A tag in a channel starts a thread on that message, or joins the thread
 +  // it was sent in; inside a thread Hex knows, and in a DM, no tag is needed.
++  // Desktop's replies at any depth carry the top-level message as their root, so
++  // each top-level message is one thread and every reply under it reaches its session.
 +  function threadOf(event: Event, tagged: boolean): string | undefined {
-+    const root = rootOf(event)
-+    if (root && hub.name(root) !== undefined) return root
++    const head = rootOf(event) ?? event.id
++    if (hub.name(head) !== undefined) return head
 +    const channel = tag(event, 'h')!
 +    if (channels.get(channel)?.dm) return channel
-+    if (tagged) return root ?? event.id
++    if (tagged) return head
 +  }
 +
-+  // A reply's reply marker is the thread head, unless it answers one message in particular.
-+  async function replyMeta(event: Event, thread: string): Promise<Record<string, string>> {
++  // A reply's reply marker is the thread head, unless it answers one message in
++  // particular; the head is named too when the reply brings Hex into the thread.
++  async function replyMeta(event: Event, thread: string, joined: boolean): Promise<Record<string, string>> {
 +    const parent = marked(event, 'reply')
-+    if (!parent || parent === thread) return {}
++    if (!parent || (parent === thread && !joined)) return {}
 +    const [replied] = await relay.query([{ kinds: MESSAGES, ids: [parent] }])
 +    if (!replied) return { reply_to_message_id: parent }
 +    const atts = listed(replied)
@@ -1823,8 +2072,57 @@ index 0000000000000000000000000000000000000000..499512b033b208ea065bc5f47002bcf6
 +    return original?.pubkey === event.pubkey ? original : undefined
 +  }
 +
-+  async function handleInbound(event: Event): Promise<void> {
++  async function about(event: Event, thread: string, channel = tag(event, 'h')): Promise<Record<string, string>> {
++    const where = channels.get(channel ?? '')
++    return {
++      chat_id: thread,
++      user: await nameOf(event.pubkey),
++      user_id: event.pubkey,
++      ts: iso(event.created_at),
++      ...(where && !where.dm ? { channel: where.name } : {}),
++    }
++  }
++
++  async function inbound(event: Event): Promise<void> {
 +    if (event.pubkey === me || !allowed(event.pubkey)) return
++    if (event.kind === 7) return handleReaction(event)
++    if (event.kind === 5 || event.kind === 9005) return handleDeletion(event)
++    return handleInbound(event)
++  }
++
++  // A reaction reaches the thread the message it's on belongs to, if Hex is in it.
++  async function handleReaction(event: Event): Promise<void> {
++    const id = event.tags.findLast(t => t[0] === 'e')?.[1]
++    const [target] = id ? await relay.query([{ kinds: MESSAGES, ids: [id] }]) : []
++    const thread = target && threadOf(target, false)
++    if (!thread) return
++    const meta = {
++      reaction_to_message_id: target.id,
++      reaction_to_user: target.pubkey === me ? 'me' : await nameOf(target.pubkey),
++      ...(target.content ? { reaction_to_text: target.content } : {}),
++    }
++    reactions.set(event.id, { thread, emoji: event.content, meta })
++    hub.deliver(thread, hub.name(thread) ?? await nameOf(event.pubkey), {
++      content: `(reaction: ${event.content})`,
++      meta: { ...(await about(event, thread, tag(target, 'h'))), reaction: event.content, ...meta },
++    })
++  }
++
++  async function handleDeletion(event: Event): Promise<void> {
++    const id = tag(event, 'e') ?? ''
++    const reaction = reactions.get(id)
++    const said = texts.get(id)
++    const thread = reaction?.thread ?? said?.thread
++    if (!thread) return
++    reactions.delete(id)
++    texts.delete(id)
++    const meta = await about(event, thread)
++    hub.deliver(thread, hub.name(thread) ?? meta.user!, reaction
++      ? { content: `(reaction removed: ${reaction.emoji})`, meta: { ...meta, reaction: reaction.emoji, reaction_removed: 'true', ...reaction.meta } }
++      : { content: '(deleted a message)', meta: { ...meta, deleted: 'true', message_id: id, ...(said?.text ? { deleted_text: said.text } : {}) } })
++  }
++
++  async function handleInbound(event: Event): Promise<void> {
 +    const original = await originalOf(event)
 +    if (!original) return
 +    const edited = original !== event
@@ -1832,48 +2130,70 @@ index 0000000000000000000000000000000000000000..499512b033b208ea065bc5f47002bcf6
 +    const thread = threadOf(original, tagged)
 +    if (!thread) return
 +    const channel = tag(original, 'h')!
-+    const where = channels.get(channel)
++    const joined = !edited && !isChannel(thread) && hub.name(thread) === undefined
 +    if (!isChannel(thread)) homes.set(thread, channel)
 +    const text = await unmention(event.content)
 +
 +    if (!edited && event.pubkey === owner && tagged && text === '!shutdown') return shutdown()
-+    if (!edited && event.pubkey === owner && tagged && text === '!cancel') return hub.stop(thread)
++    if (!edited && event.pubkey === owner && tagged && text === '!cancel') return stop(thread)
 +
 +    triggers.set(thread, [...(triggers.get(thread) ?? []), original.id])
++    texts.set(original.id, { thread, text: event.content })
 +    void ack(thread, original.id, '👀').catch(() => {})
 +
 +    // Attachments are listed (name/type/size) but not downloaded: the model
 +    // calls download_attachment when it wants them. The listing goes in meta
 +    // only, since an in-content annotation is forgeable by the sender.
 +    const atts = listed(event)
-+    const words = text.split(/\s+/).filter(word => word && !word.startsWith('@'))
++    const reply = await replyMeta(original, thread, joined)
++    const words = (text || reply.reply_to_text || '').split(/\s+/).filter(word => word && !word.startsWith('@'))
 +    const name = isChannel(thread) ? await nameOf(event.pubkey) : words.slice(0, 2).join(' ') || 'New thread'
 +
++    // A bare tag on someone's message brings Hex in to read it: the message is reply_to_*.
 +    const message: Message = {
-+      content: text || (atts.length > 0 ? '(attachment)' : ''),
++      content: text || (atts.length > 0 ? '(attachment)' : '(tagged you)'),
 +      meta: {
-+        chat_id: thread,
++        ...(await about(event, thread, channel)),
 +        message_id: original.id,
-+        user: await nameOf(event.pubkey),
-+        user_id: event.pubkey,
-+        ts: iso(event.created_at),
-+        ...(where && !where.dm ? { channel: where.name } : {}),
-+        ...(!edited && thread === event.id ? { new_thread: 'true' } : {}),
++        ...(joined ? { new_thread: 'true' } : {}),
 +        ...(atts.length > 0 ? { attachment_count: String(atts.length), attachments: atts.join('; ') } : {}),
-+        ...(await replyMeta(original, thread)),
++        ...reply,
 +        ...(edited ? { edited: 'true' } : {}),
 +      },
 +    }
 +    hub.deliver(thread, name, message)
 +  }
 +
++  // The last event handled, and every id handled in that second, so a restart
++  // picks up from there and nothing is delivered twice.
++  let cursor: { at: number; ids: string[] } = { at: start, ids: [] }
++  try {
++    cursor = JSON.parse(readFileSync(CURSOR_FILE, 'utf8'))
++  } catch {}
++
++  function handled(event: Event) {
++    if (event.created_at < cursor.at) return
++    cursor = event.created_at === cursor.at ? { at: cursor.at, ids: [...cursor.ids, event.id] } : { at: event.created_at, ids: [event.id] }
++    writeFileSync(`${CURSOR_FILE}.tmp`, JSON.stringify(cursor) + '\n')
++    renameSync(`${CURSOR_FILE}.tmp`, CURSOR_FILE)
++  }
++
++  // Events are handled one at a time, in the order they came, so a thread's
++  // messages reach its session in order.
++  let queue = Promise.resolve()
++  let off = false
++
 +  // The relay only sends channel messages live to a subscription naming its
 +  // channels, so membership changes swap it for one over the new set.
 +  let unlisten = () => {}
 +  function listen() {
 +    const previous = unlisten
-+    unlisten = channels.size === 0 ? () => {} : relay.subscribe([{ kinds: [9, 40003], '#h': [...channels.keys()], since: start }], event => {
-+      handleInbound(event).catch(e => log(`handleInbound failed: ${e}`))
++    unlisten = channels.size === 0 ? () => {} : relay.subscribe([{ kinds: INBOUND, '#h': [...channels.keys()], since: cursor.at }], event => {
++      queue = queue.then(async () => {
++        if (off || (event.created_at === cursor.at && cursor.ids.includes(event.id))) return
++        await inbound(event).catch(e => log(`handleInbound failed: ${e}`))
++        handled(event)
++      }).catch(e => log(`couldn't save where Buzz left off: ${e}`))
 +    })
 +    previous()
 +  }
@@ -1911,6 +2231,7 @@ index 0000000000000000000000000000000000000000..499512b033b208ea065bc5f47002bcf6
 +  // Buzz until the service restarts; the rest of the hub keeps running.
 +  async function shutdown() {
 +    log('shutting down')
++    off = true
 +    clearInterval(heartbeat)
 +    for (const timer of typing.values()) clearInterval(timer)
 +    typing.clear()
@@ -3264,10 +3585,10 @@ index 0000000000000000000000000000000000000000..a444199377b80e028db1be0fc082a7ba
 +}
 diff --git a/external_plugins/buzz/relay.ts b/external_plugins/buzz/relay.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..58bc8998c2afe2bc9d1ddd28df08cbfb5b52d55e
+index 0000000000000000000000000000000000000000..44eff7405c67b2f404d4fa71ba85c2287fb382b0
 --- /dev/null
 +++ b/external_plugins/buzz/relay.ts
-@@ -0,0 +1,160 @@
+@@ -0,0 +1,175 @@
 +import { finalizeEvent, getPublicKey, type Event } from 'nostr-tools/pure'
 +import type { Filter } from 'nostr-tools/filter'
 +
@@ -3289,7 +3610,7 @@ index 0000000000000000000000000000000000000000..58bc8998c2afe2bc9d1ddd28df08cbfb
 +
 +export function connectRelay({ url, secretKey, authTag }: { url: string; secretKey: Uint8Array; authTag: string[] }): Relay {
 +  const pubkey = getPublicKey(secretKey)
-+  const subs = new Map<string, { filters: Filter[]; onEvent: (event: Event) => void }>()
++  const subs = new Map<string, { filters: Filter[]; onEvent: (event: Event) => void; stored?: Event[] }>()
 +  const seen = new Set<string>()
 +  const requests = new Map<string, Request>()
 +  let socket: WebSocket | undefined
@@ -3297,7 +3618,7 @@ index 0000000000000000000000000000000000000000..58bc8998c2afe2bc9d1ddd28df08cbfb
 +  let ready = false
 +  let closed = false
 +  let attempt = 0
-+  let alive = now()
++  let alive = 0
 +  let answered = true
 +  let next = 0
 +
@@ -3309,11 +3630,21 @@ index 0000000000000000000000000000000000000000..58bc8998c2afe2bc9d1ddd28df08cbfb
 +    return finalizeEvent({ created_at: now(), ...template, tags: [...template.tags, authTag] }, secretKey)
 +  }
 +
-+  // Subscriptions start, or resume after a drop, from shortly before the
-+  // connection was last alive; an event seen once is never delivered again.
-+  function req(id: string, filters: Filter[]) {
-+    const since = alive - OVERLAP
++  // A subscription starts where its filters say and resumes after a drop from
++  // shortly before the connection was last alive. Stored events come newest
++  // first, so they're held until EOSE and delivered oldest first; an event seen
++  // once is never delivered again.
++  function req(id: string, filters: Filter[], since = 0) {
++    subs.get(id)!.stored = []
 +    send(['REQ', id, ...filters.map(filter => (filter.since === undefined ? filter : { ...filter, since: Math.max(filter.since, since) }))])
++  }
++
++  function flush(id: string) {
++    const sub = subs.get(id)
++    const stored = sub?.stored
++    if (!stored) return
++    sub.stored = undefined
++    for (const event of stored.sort((a, b) => a.created_at - b.created_at || a.id.localeCompare(b.id))) sub.onEvent(event)
 +  }
 +
 +  function open() {
@@ -3353,7 +3684,7 @@ index 0000000000000000000000000000000000000000..58bc8998c2afe2bc9d1ddd28df08cbfb
 +      }
 +      ready = true
 +      attempt = 0
-+      for (const [sub, { filters }] of subs) req(sub, filters)
++      for (const [sub, { filters }] of subs) req(sub, filters, alive - OVERLAP)
 +      for (const request of requests.values()) send(request.message)
 +    }
 +    if (type === 'OK' && id !== auth) requests.get(id)?.done(rest[0] ? undefined : rest[1] || 'refused')
@@ -3361,7 +3692,8 @@ index 0000000000000000000000000000000000000000..58bc8998c2afe2bc9d1ddd28df08cbfb
 +      const sub = subs.get(id)
 +      if (sub && !seen.has(rest[0].id)) {
 +        seen.add(rest[0].id)
-+        sub.onEvent(rest[0])
++        if (sub.stored) sub.stored.push(rest[0])
++        else sub.onEvent(rest[0])
 +      }
 +      requests.get(id)?.events?.push(rest[0])
 +    }
@@ -3369,9 +3701,13 @@ index 0000000000000000000000000000000000000000..58bc8998c2afe2bc9d1ddd28df08cbfb
 +      send(['CLOSE', id])
 +      requests.get(id)!.done()
 +    }
++    if (type === 'EOSE') flush(id)
 +    if (type === 'CLOSED') {
 +      if (requests.has(id)) requests.get(id)!.done(rest[0] || 'closed')
-+      else if (subs.has(id)) process.stderr.write(`buzz hub: relay closed a subscription: ${rest[0]}\n`)
++      else if (subs.has(id)) {
++        flush(id)
++        process.stderr.write(`buzz hub: relay closed a subscription: ${rest[0]}\n`)
++      }
 +    }
 +    if (type === 'NOTICE') process.stderr.write(`buzz hub: relay notice: ${id}\n`)
 +  }
@@ -3430,10 +3766,10 @@ index 0000000000000000000000000000000000000000..58bc8998c2afe2bc9d1ddd28df08cbfb
 +}
 diff --git a/external_plugins/buzz/server.ts b/external_plugins/buzz/server.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..63a0cd209b4d51684b7bc6a5b576bd1f00127518
+index 0000000000000000000000000000000000000000..3bf573963bd2c792b41cdfeaab3dcbe07d0fd477
 --- /dev/null
 +++ b/external_plugins/buzz/server.ts
-@@ -0,0 +1,237 @@
+@@ -0,0 +1,268 @@
 +#!/usr/bin/env bun
 +import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 +import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
@@ -3450,9 +3786,11 @@ index 0000000000000000000000000000000000000000..63a0cd209b4d51684b7bc6a5b576bd1f
 +    instructions: [
 +      'The sender reads Buzz, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat. Nobody watches this terminal either, so once your reply is sent, end the turn instead of summarizing it here.',
 +      '',
-+      'This session is one Buzz thread or direct message, the place for deeper work. Buzz renders Markdown, so answers can be longer and structured: headings, lists, and code blocks with a language. Its messages arrive as <channel source="buzz" chat_id="..." message_id="..." user="..." ts="...">, and everything you send with these tools lands back in that same thread. Buzz threads have no title, so if the tag has new_thread="true", name this thread for your own list and for handoffs: 1–2 words with rename_thread. If you were tagged into a thread that was already going, fetch_messages shows what came before. If the tag has attachment_count, the attachments attribute lists name/type/size — call download_attachment(message_id) to fetch them. If the tag has reply_to_message_id, the sender replied to that earlier message: reply_to_text is its text and reply_to_attachments lists its files (download_attachment with that id). edited="true" means the sender edited the message with that message_id and this is its new text. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply.',
++      'This session is one Buzz thread or direct message, the place for deeper work. Buzz renders Markdown, so answers can be longer and structured: headings, lists, and code blocks with a language. Its messages arrive as <channel source="buzz" chat_id="..." message_id="..." user="..." ts="...">, and everything you send with these tools lands back in that same thread. If the tag has new_thread="true", name this thread with rename_thread: 1–2 words. If you were tagged into a thread that was already going, reply_to_* is the message it hangs off ("(tagged you)" alone means: read that message) and fetch_messages shows the rest. If the tag has attachment_count, the attachments attribute lists name/type/size — call download_attachment(message_id) to fetch them. If the tag has reply_to_message_id, the sender replied to that earlier message: reply_to_text is its text and reply_to_attachments lists its files (download_attachment with that id). edited="true" means the sender edited the message with that message_id and this is its new text. A reaction arrives as "(reaction: 👍)", or "(reaction removed: 👍)" with reaction_removed="true", with reaction_to_message_id, reaction_to_user and reaction_to_text naming the message it is on. deleted="true" means the sender deleted the message with that message_id; deleted_text is what it said. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply.',
 +      '',
-+      'reply accepts file paths (files: ["/abs/path.png"]) for attachments. Use react to add emoji reactions, and edit_message for interim progress updates. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',
++      'reply accepts file paths (files: ["/abs/path.png"]) for attachments. Use react to add emoji reactions (remove: true takes yours off), edit_message for interim progress updates, and delete_message to take back a message you sent. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',
++      '',
++      'Each channel has one shared canvas, a Markdown document the user opens from the channel\'s details: canvas() reads it with its revision, and canvas(text, revision) replaces it, refused if someone changed it since that revision. presence tells you whether the user is online, away or offline.',
 +      '',
 +      'new_thread opens another thread with its own fresh session and hands it your prompt. Use it for work the user will want to follow or talk to on its own. handoff moves this whole conversation to another app, such as telegram, when the user asks: you stop here and continue there with your memory.',
 +      '',
@@ -3486,14 +3824,26 @@ index 0000000000000000000000000000000000000000..63a0cd209b4d51684b7bc6a5b576bd1f
 +    },
 +    {
 +      name: 'react',
-+      description: 'Add an emoji reaction to a Buzz message.',
++      description: 'Add an emoji reaction to a Buzz message, or take yours off.',
 +      inputSchema: {
 +        type: 'object',
 +        properties: {
 +          message_id: { type: 'string' },
 +          emoji: { type: 'string' },
++          remove: { type: 'boolean', description: 'Take your reaction with this emoji off instead.' },
 +        },
 +        required: ['message_id', 'emoji'],
++      },
++    },
++    {
++      name: 'delete_message',
++      description: 'Delete a message the bot sent.',
++      inputSchema: {
++        type: 'object',
++        properties: {
++          message_id: { type: 'string' },
++        },
++        required: ['message_id'],
 +      },
 +    },
 +    {
@@ -3546,13 +3896,30 @@ index 0000000000000000000000000000000000000000..63a0cd209b4d51684b7bc6a5b576bd1f
 +      },
 +    },
 +    {
++      name: 'canvas',
++      description: 'Read this channel\'s canvas, or replace it by passing text. Reading returns its Markdown and revision.',
++      inputSchema: {
++        type: 'object',
++        properties: {
++          text: { type: 'string', description: 'The whole new canvas, in Markdown.' },
++          revision: { type: 'string', description: 'The revision you read: the save is refused if the canvas changed since.' },
++          channel: { type: 'string', description: 'Channel whose canvas to use instead of this one, by name or id.' },
++        },
++      },
++    },
++    {
++      name: 'presence',
++      description: 'Whether the user is online, away or offline in Buzz right now.',
++      inputSchema: { type: 'object', properties: {} },
++    },
++    {
 +      name: 'list_channels',
 +      description: 'List the Buzz channels you are in, with their IDs. Direct messages are marked.',
 +      inputSchema: { type: 'object', properties: {} },
 +    },
 +    {
 +      name: 'rename_thread',
-+      description: 'Name this thread: 1–2 words, like a chat name ("Desk anchors", "Hub tests"). Buzz shows no thread titles, so the name is for your thread list and handoffs.',
++      description: 'Name this thread: 1–2 words, like a chat name ("Desk anchors", "Hub tests"). Buzz threads have no titles, so the name is for your thread list and handoffs; a thread you opened with new_thread also shows it as its first message.',
 +      inputSchema: {
 +        type: 'object',
 +        properties: {
