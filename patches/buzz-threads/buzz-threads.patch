@@ -790,10 +790,10 @@ index 0000000000000000000000000000000000000000..e7f5fdf660dd123b4dd66c8d9946b647
 +}
 diff --git a/external_plugins/buzz/bot.test.ts b/external_plugins/buzz/bot.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..a19ac38790d7ceb4afad9639a194db0d306a7f9f
+index 0000000000000000000000000000000000000000..dd3bfbba73512852bbb2c5b5db44bf2f986f59c2
 --- /dev/null
 +++ b/external_plugins/buzz/bot.test.ts
-@@ -0,0 +1,637 @@
+@@ -0,0 +1,666 @@
 +import { afterAll, afterEach, expect, test } from 'bun:test'
 +import type { ServerWebSocket, Subprocess } from 'bun'
 +import { connect, type Socket } from 'net'
@@ -1020,15 +1020,17 @@ index 0000000000000000000000000000000000000000..a19ac38790d7ceb4afad9639a194db0d
 +  const openSource = crypto.randomUUID()
 +  const secret = crypto.randomUUID()
 +  const dm = crypto.randomUUID()
++  const forum = crypto.randomUUID()
 +  const host = generateSecretKey()
 +  relay.inject(signed(key, 0, JSON.stringify({ name: 'Hex' })))
 +  relay.inject(signed(ownerKey, 0, JSON.stringify({ display_name: 'Bassim' })))
-+  for (const id of [channel, openSource, dm]) relay.inject(signed(host, 39002, '', [['d', id], ['p', owner], ['p', me]]))
++  for (const id of [channel, openSource, dm, forum]) relay.inject(signed(host, 39002, '', [['d', id], ['p', owner], ['p', me]]))
 +  relay.inject(signed(host, 39002, '', [['d', secret], ['p', owner]]))
 +  relay.inject(signed(host, 39000, '', [['d', channel], ['name', 'general'], ['t', 'stream']]))
 +  relay.inject(signed(host, 39000, '', [['d', openSource], ['name', 'open-source'], ['t', 'stream']]))
 +  relay.inject(signed(host, 39000, '', [['d', secret], ['name', 'secret'], ['t', 'stream']]))
 +  relay.inject(signed(host, 39000, '', [['d', dm], ['name', 'dm'], ['hidden'], ['t', 'dm']]))
++  relay.inject(signed(host, 39000, '', [['d', forum], ['name', 'ideas'], ['t', 'forum']]))
 +  prepare?.({ state, relay, channel, me })
 +
 +  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^(BUZZ_|HEX_|TELEGRAM_|DISCORD_)/.test(name)))
@@ -1079,13 +1081,14 @@ index 0000000000000000000000000000000000000000..a19ac38790d7ceb4afad9639a194db0d
 +    openSource,
 +    secret,
 +    dm,
++    forum,
 +    relay,
 +    published,
 +    calls,
 +    launches: () => calls().filter(args => args[0] === '--bg'),
 +    session,
-+    say: (content: string, tags: string[][] = [], from = ownerKey, where = channel, at?: number) => {
-+      const event = signed(from, 9, content, [['h', where], ...tags], at)
++    say: (content: string, tags: string[][] = [], from = ownerKey, where = channel, at?: number, kind = 9) => {
++      const event = signed(from, kind, content, [['h', where], ...tags], at)
 +      relay.inject(event)
 +      return event
 +    },
@@ -1421,6 +1424,31 @@ index 0000000000000000000000000000000000000000..a19ac38790d7ceb4afad9639a194db0d
 +  expect(scoped.text).not.toContain(reply.id)
 +})
 +
++test('a forum post that tags Hex is its own thread: comments on it reach the session, edits and deletes too, and replies post as comments', async () => {
++  const bot = await startBot()
++  const posted = (content: string, tags: string[][] = []) => bot.say(content, tags, ownerKey, bot.forum, undefined, 45001)
++  const comment = (content: string, tags: string[][] = []) => bot.say(content, tags, ownerKey, bot.forum, undefined, 45003)
++  posted('nobody asked hex here')
++  const post = posted('@Hex should we ship the relay PR', [['p', bot.me]])
++  const args = await until(() => bot.launches()[0])
++  expect(args[args.indexOf('--name') + 1]).toBe('should we')
++  const session = await bot.session(post.id)
++  const first = comment('the CI is green now', [['e', post.id, '', 'reply']])
++  bot.relay.inject(signed(ownerKey, 40003, 'the CI is finally green', [['h', bot.forum], ['e', first.id]]))
++  bot.relay.inject(signed(ownerKey, 5, '', [['h', bot.forum], ['e', first.id]]))
++  const inbound = await session.inbound(4)
++  expect(inbound.map(line => line.content)).toEqual(['should we ship the relay PR', 'the CI is green now', 'the CI is finally green', '(deleted a message)'])
++  expect(inbound[0].meta).toMatchObject({ chat_id: post.id, message_id: post.id, channel: 'ideas', new_thread: 'true' })
++  expect(inbound[2].meta).toMatchObject({ message_id: first.id, edited: 'true' })
++  expect(inbound[3].meta).toMatchObject({ deleted: 'true', message_id: first.id, deleted_text: 'the CI is finally green' })
++  const sent = (await session.call('reply', { text: 'ship it' })).text.match(/id: (\w+)/)[1]
++  expect(bot.relay.events.find(event => event.id === sent)).toMatchObject({ kind: 45003, tags: [['h', bot.forum], ['e', post.id, '', 'reply'], ['p', owner], bot.auth] })
++  await session.call('new_thread', { title: 'Release notes', prompt: 'draft them', channel: 'ideas' })
++  expect(await until(() => bot.relay.events.find(event => event.content === '**Release notes**'))).toMatchObject({ kind: 45001, tags: [['h', bot.forum], ['p', owner], bot.auth] })
++  await Bun.sleep(300)
++  expect(bot.launches().length).toBe(2)
++})
++
 +test('list_channels names the channels Hex is in, and marks direct messages', async () => {
 +  const bot = await startBot()
 +  const { session } = await threadStarted(bot)
@@ -1429,14 +1457,15 @@ index 0000000000000000000000000000000000000000..a19ac38790d7ceb4afad9639a194db0d
 +    `#general  (id: ${bot.channel})`,
 +    `#open-source  (id: ${bot.openSource})`,
 +    `dm  (id: ${bot.dm}, direct message)`,
++    `#ideas  (id: ${bot.forum})`,
 +  ].sort())
 +})
 diff --git a/external_plugins/buzz/bot.ts b/external_plugins/buzz/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..050ce0fc33cab76c1517c801398f332570d0134a
+index 0000000000000000000000000000000000000000..51d2714bd17adcab19b9b381c0dbe9c16d0b3df9
 --- /dev/null
 +++ b/external_plugins/buzz/bot.ts
-@@ -0,0 +1,808 @@
+@@ -0,0 +1,812 @@
 +#!/usr/bin/env bun
 +import { readFileSync, writeFileSync, mkdirSync, statSync, realpathSync, chmodSync, renameSync } from 'fs'
 +import { createHash } from 'crypto'
@@ -1508,10 +1537,12 @@ index 0000000000000000000000000000000000000000..050ce0fc33cab76c1517c801398f3325
 +// Buzz clients cap a message at 64 KiB, and a character takes at most 4 bytes.
 +const MAX_CHUNK_LIMIT = 16 * 1024
 +const MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024
-+// Chat messages, Buzz's older message kind, and diffs: what a channel's history is made of.
-+const MESSAGES = [9, 40002, 40008]
-+// Messages, edits, reactions, and deletions (NIP-09, and NIP-29's admin delete): what reaches Hex live.
-+const INBOUND = [9, 40003, 7, 5, 9005]
++// Chat messages, Buzz's older message kind, diffs, and forum posts and comments: what a channel's history is made of.
++const MESSAGES = [9, 40002, 40008, 45001, 45003]
++const POST = 45001
++const COMMENT = 45003
++// Messages, forum posts and comments, edits, reactions, and deletions (NIP-09, and NIP-29's admin delete): what reaches Hex live.
++const INBOUND = [9, POST, COMMENT, 40003, 7, 5, 9005]
 +const CANVAS = 40100
 +
 +// reply's files param takes any path, but channel state and .env files (keys)
@@ -1614,7 +1645,7 @@ index 0000000000000000000000000000000000000000..050ce0fc33cab76c1517c801398f3325
 +  const me = relay.pubkey
 +  const start = now()
 +  const http = url.replace(/^ws/, 'http').replace(/\/$/, '')
-+  const channels = new Map<string, { name: string; dm: boolean }>()
++  const channels = new Map<string, { name: string; dm: boolean; forum: boolean }>()
 +  const homes = new Map<string, string>()
 +  const names = new Map<string, Promise<string>>()
 +  const triggers = new Map<string, string[]>()
@@ -1687,16 +1718,17 @@ index 0000000000000000000000000000000000000000..050ce0fc33cab76c1517c801398f3325
 +    return parent && parent !== thread ? [['e', thread, '', 'root'], ['e', parent, '', 'reply']] : [['e', thread, '', 'reply']]
 +  }
 +
++  // In a forum channel every thread is a post, and a reply in it is a comment.
 +  async function post(thread: string, content: string, extra: string[][] = [], parent?: string): Promise<Event> {
 +    const channel = await channelOf(thread)
-+    const sent = await relay.publish({ kind: 9, content, tags: [['h', channel], ...threadTags(thread, parent), ['p', owner], ...extra] })
++    const sent = await relay.publish({ kind: channels.get(channel)?.forum ? COMMENT : 9, content, tags: [['h', channel], ...threadTags(thread, parent), ['p', owner], ...extra] })
 +    texts.set(sent.id, { thread, text: content })
 +    return sent
 +  }
 +
 +  async function place(name: string, where?: string) {
 +    const channel = channelNamed(where ?? loadAccess().channel)
-+    const root = await relay.publish({ kind: 9, content: `**${name}**`, tags: [['h', channel], ['p', owner]] })
++    const root = await relay.publish({ kind: channels.get(channel)!.forum ? POST : 9, content: `**${name}**`, tags: [['h', channel], ['p', owner]] })
 +    homes.set(root.id, channel)
 +    return { thread: root.id, link: link(channel, root.id) }
 +  }
@@ -2203,7 +2235,8 @@ index 0000000000000000000000000000000000000000..050ce0fc33cab76c1517c801398f3325
 +    for (const id of ids) {
 +      const meta = metas.find(meta => tag(meta, 'd') === id)
 +      const dm = meta?.tags.some(t => (t[0] === 't' && t[1] === 'dm') || t[0] === 'hidden') ?? false
-+      channels.set(id, { name: (meta && tag(meta, 'name')) ?? id, dm })
++      const forum = meta?.tags.some(t => t[0] === 't' && t[1] === 'forum') ?? false
++      channels.set(id, { name: (meta && tag(meta, 'name')) ?? id, dm, forum })
 +    }
 +    listen()
 +  }
@@ -3766,7 +3799,7 @@ index 0000000000000000000000000000000000000000..44eff7405c67b2f404d4fa71ba85c228
 +}
 diff --git a/external_plugins/buzz/server.ts b/external_plugins/buzz/server.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..3bf573963bd2c792b41cdfeaab3dcbe07d0fd477
+index 0000000000000000000000000000000000000000..a3283c8d917ca051c30de360f3852f9cfb689508
 --- /dev/null
 +++ b/external_plugins/buzz/server.ts
 @@ -0,0 +1,268 @@
@@ -3786,7 +3819,7 @@ index 0000000000000000000000000000000000000000..3bf573963bd2c792b41cdfeaab3dcbe0
 +    instructions: [
 +      'The sender reads Buzz, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat. Nobody watches this terminal either, so once your reply is sent, end the turn instead of summarizing it here.',
 +      '',
-+      'This session is one Buzz thread or direct message, the place for deeper work. Buzz renders Markdown, so answers can be longer and structured: headings, lists, and code blocks with a language. Its messages arrive as <channel source="buzz" chat_id="..." message_id="..." user="..." ts="...">, and everything you send with these tools lands back in that same thread. If the tag has new_thread="true", name this thread with rename_thread: 1–2 words. If you were tagged into a thread that was already going, reply_to_* is the message it hangs off ("(tagged you)" alone means: read that message) and fetch_messages shows the rest. If the tag has attachment_count, the attachments attribute lists name/type/size — call download_attachment(message_id) to fetch them. If the tag has reply_to_message_id, the sender replied to that earlier message: reply_to_text is its text and reply_to_attachments lists its files (download_attachment with that id). edited="true" means the sender edited the message with that message_id and this is its new text. A reaction arrives as "(reaction: 👍)", or "(reaction removed: 👍)" with reaction_removed="true", with reaction_to_message_id, reaction_to_user and reaction_to_text naming the message it is on. deleted="true" means the sender deleted the message with that message_id; deleted_text is what it said. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply.',
++      'This session is one Buzz thread or direct message, the place for deeper work. Buzz renders Markdown, so answers can be longer and structured: headings, lists, and code blocks with a language. Its messages arrive as <channel source="buzz" chat_id="..." message_id="..." user="..." ts="...">, and everything you send with these tools lands back in that same thread. If the tag has new_thread="true", name this thread with rename_thread: 1–2 words. If you were tagged into a thread that was already going, reply_to_* is the message it hangs off ("(tagged you)" alone means: read that message) and fetch_messages shows the rest. In a forum channel each post is its own thread: comments on it arrive here, and your replies post as comments on it. If the tag has attachment_count, the attachments attribute lists name/type/size — call download_attachment(message_id) to fetch them. If the tag has reply_to_message_id, the sender replied to that earlier message: reply_to_text is its text and reply_to_attachments lists its files (download_attachment with that id). edited="true" means the sender edited the message with that message_id and this is its new text. A reaction arrives as "(reaction: 👍)", or "(reaction removed: 👍)" with reaction_removed="true", with reaction_to_message_id, reaction_to_user and reaction_to_text naming the message it is on. deleted="true" means the sender deleted the message with that message_id; deleted_text is what it said. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply.',
 +      '',
 +      'reply accepts file paths (files: ["/abs/path.png"]) for attachments. Use react to add emoji reactions (remove: true takes yours off), edit_message for interim progress updates, and delete_message to take back a message you sent. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',
 +      '',

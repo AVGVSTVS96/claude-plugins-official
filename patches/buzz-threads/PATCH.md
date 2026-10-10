@@ -4,7 +4,7 @@ id: buzz-threads
 summary: Add a Buzz channel where every Buzz thread is its own Claude Code session through the thread hub, with Buzz's activity, memory and files panels.
 baseline: ac996c0dde7fb2a9f805cd5277ffc95ecd44a321
 patch_file: buzz-threads.patch
-patch_sha256: 12e83dd991cef195118f04e6df29d0ba46e3b65086afca3b57a3481d02738521
+patch_sha256: 08e5e2d3d26a16ab03b7013acb1cfef5643e93a638e4f303d62c5fb4a5f83bb5
 ---
 
 ## Intent
@@ -33,6 +33,11 @@ Buzz works like Discord:
   inside a reply, but every reply at any depth names the top-level message as
   its root, so it reaches that same session, with `reply_to_*` naming the
   message it answers.
+- In a forum channel (kind 39000 tagged `forum`), each post (kind 45001) is a
+  thread like a top-level message: a post that tags Hex starts its session,
+  comments on it (kind 45003) reach that session, edits, reactions and
+  deletes work the same, and Hex's replies post as comments on it.
+  `new_thread` in a forum channel opens a post.
 - A tag that brings Hex into a thread it wasn't in carries the message the
   thread hangs off as `reply_to_*`, so a bare "@Hex" under someone's post
   hands the session that post (content `(tagged you)`), and the session is

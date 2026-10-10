@@ -224,15 +224,17 @@ exit 0
   const openSource = crypto.randomUUID()
   const secret = crypto.randomUUID()
   const dm = crypto.randomUUID()
+  const forum = crypto.randomUUID()
   const host = generateSecretKey()
   relay.inject(signed(key, 0, JSON.stringify({ name: 'Hex' })))
   relay.inject(signed(ownerKey, 0, JSON.stringify({ display_name: 'Bassim' })))
-  for (const id of [channel, openSource, dm]) relay.inject(signed(host, 39002, '', [['d', id], ['p', owner], ['p', me]]))
+  for (const id of [channel, openSource, dm, forum]) relay.inject(signed(host, 39002, '', [['d', id], ['p', owner], ['p', me]]))
   relay.inject(signed(host, 39002, '', [['d', secret], ['p', owner]]))
   relay.inject(signed(host, 39000, '', [['d', channel], ['name', 'general'], ['t', 'stream']]))
   relay.inject(signed(host, 39000, '', [['d', openSource], ['name', 'open-source'], ['t', 'stream']]))
   relay.inject(signed(host, 39000, '', [['d', secret], ['name', 'secret'], ['t', 'stream']]))
   relay.inject(signed(host, 39000, '', [['d', dm], ['name', 'dm'], ['hidden'], ['t', 'dm']]))
+  relay.inject(signed(host, 39000, '', [['d', forum], ['name', 'ideas'], ['t', 'forum']]))
   prepare?.({ state, relay, channel, me })
 
   const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^(BUZZ_|HEX_|TELEGRAM_|DISCORD_)/.test(name)))
@@ -283,13 +285,14 @@ exit 0
     openSource,
     secret,
     dm,
+    forum,
     relay,
     published,
     calls,
     launches: () => calls().filter(args => args[0] === '--bg'),
     session,
-    say: (content: string, tags: string[][] = [], from = ownerKey, where = channel, at?: number) => {
-      const event = signed(from, 9, content, [['h', where], ...tags], at)
+    say: (content: string, tags: string[][] = [], from = ownerKey, where = channel, at?: number, kind = 9) => {
+      const event = signed(from, kind, content, [['h', where], ...tags], at)
       relay.inject(event)
       return event
     },
@@ -625,6 +628,31 @@ test('search_messages finds words in Hex\'s channels, naming each hit\'s channel
   expect(scoped.text).not.toContain(reply.id)
 })
 
+test('a forum post that tags Hex is its own thread: comments on it reach the session, edits and deletes too, and replies post as comments', async () => {
+  const bot = await startBot()
+  const posted = (content: string, tags: string[][] = []) => bot.say(content, tags, ownerKey, bot.forum, undefined, 45001)
+  const comment = (content: string, tags: string[][] = []) => bot.say(content, tags, ownerKey, bot.forum, undefined, 45003)
+  posted('nobody asked hex here')
+  const post = posted('@Hex should we ship the relay PR', [['p', bot.me]])
+  const args = await until(() => bot.launches()[0])
+  expect(args[args.indexOf('--name') + 1]).toBe('should we')
+  const session = await bot.session(post.id)
+  const first = comment('the CI is green now', [['e', post.id, '', 'reply']])
+  bot.relay.inject(signed(ownerKey, 40003, 'the CI is finally green', [['h', bot.forum], ['e', first.id]]))
+  bot.relay.inject(signed(ownerKey, 5, '', [['h', bot.forum], ['e', first.id]]))
+  const inbound = await session.inbound(4)
+  expect(inbound.map(line => line.content)).toEqual(['should we ship the relay PR', 'the CI is green now', 'the CI is finally green', '(deleted a message)'])
+  expect(inbound[0].meta).toMatchObject({ chat_id: post.id, message_id: post.id, channel: 'ideas', new_thread: 'true' })
+  expect(inbound[2].meta).toMatchObject({ message_id: first.id, edited: 'true' })
+  expect(inbound[3].meta).toMatchObject({ deleted: 'true', message_id: first.id, deleted_text: 'the CI is finally green' })
+  const sent = (await session.call('reply', { text: 'ship it' })).text.match(/id: (\w+)/)[1]
+  expect(bot.relay.events.find(event => event.id === sent)).toMatchObject({ kind: 45003, tags: [['h', bot.forum], ['e', post.id, '', 'reply'], ['p', owner], bot.auth] })
+  await session.call('new_thread', { title: 'Release notes', prompt: 'draft them', channel: 'ideas' })
+  expect(await until(() => bot.relay.events.find(event => event.content === '**Release notes**'))).toMatchObject({ kind: 45001, tags: [['h', bot.forum], ['p', owner], bot.auth] })
+  await Bun.sleep(300)
+  expect(bot.launches().length).toBe(2)
+})
+
 test('list_channels names the channels Hex is in, and marks direct messages', async () => {
   const bot = await startBot()
   const { session } = await threadStarted(bot)
@@ -633,5 +661,6 @@ test('list_channels names the channels Hex is in, and marks direct messages', as
     `#general  (id: ${bot.channel})`,
     `#open-source  (id: ${bot.openSource})`,
     `dm  (id: ${bot.dm}, direct message)`,
+    `#ideas  (id: ${bot.forum})`,
   ].sort())
 })

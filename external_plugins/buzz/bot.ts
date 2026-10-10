@@ -69,10 +69,12 @@ function secretKeyOf(key: string): Uint8Array {
 // Buzz clients cap a message at 64 KiB, and a character takes at most 4 bytes.
 const MAX_CHUNK_LIMIT = 16 * 1024
 const MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024
-// Chat messages, Buzz's older message kind, and diffs: what a channel's history is made of.
-const MESSAGES = [9, 40002, 40008]
-// Messages, edits, reactions, and deletions (NIP-09, and NIP-29's admin delete): what reaches Hex live.
-const INBOUND = [9, 40003, 7, 5, 9005]
+// Chat messages, Buzz's older message kind, diffs, and forum posts and comments: what a channel's history is made of.
+const MESSAGES = [9, 40002, 40008, 45001, 45003]
+const POST = 45001
+const COMMENT = 45003
+// Messages, forum posts and comments, edits, reactions, and deletions (NIP-09, and NIP-29's admin delete): what reaches Hex live.
+const INBOUND = [9, POST, COMMENT, 40003, 7, 5, 9005]
 const CANVAS = 40100
 
 // reply's files param takes any path, but channel state and .env files (keys)
@@ -175,7 +177,7 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
   const me = relay.pubkey
   const start = now()
   const http = url.replace(/^ws/, 'http').replace(/\/$/, '')
-  const channels = new Map<string, { name: string; dm: boolean }>()
+  const channels = new Map<string, { name: string; dm: boolean; forum: boolean }>()
   const homes = new Map<string, string>()
   const names = new Map<string, Promise<string>>()
   const triggers = new Map<string, string[]>()
@@ -248,16 +250,17 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
     return parent && parent !== thread ? [['e', thread, '', 'root'], ['e', parent, '', 'reply']] : [['e', thread, '', 'reply']]
   }
 
+  // In a forum channel every thread is a post, and a reply in it is a comment.
   async function post(thread: string, content: string, extra: string[][] = [], parent?: string): Promise<Event> {
     const channel = await channelOf(thread)
-    const sent = await relay.publish({ kind: 9, content, tags: [['h', channel], ...threadTags(thread, parent), ['p', owner], ...extra] })
+    const sent = await relay.publish({ kind: channels.get(channel)?.forum ? COMMENT : 9, content, tags: [['h', channel], ...threadTags(thread, parent), ['p', owner], ...extra] })
     texts.set(sent.id, { thread, text: content })
     return sent
   }
 
   async function place(name: string, where?: string) {
     const channel = channelNamed(where ?? loadAccess().channel)
-    const root = await relay.publish({ kind: 9, content: `**${name}**`, tags: [['h', channel], ['p', owner]] })
+    const root = await relay.publish({ kind: channels.get(channel)!.forum ? POST : 9, content: `**${name}**`, tags: [['h', channel], ['p', owner]] })
     homes.set(root.id, channel)
     return { thread: root.id, link: link(channel, root.id) }
   }
@@ -764,7 +767,8 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
     for (const id of ids) {
       const meta = metas.find(meta => tag(meta, 'd') === id)
       const dm = meta?.tags.some(t => (t[0] === 't' && t[1] === 'dm') || t[0] === 'hidden') ?? false
-      channels.set(id, { name: (meta && tag(meta, 'name')) ?? id, dm })
+      const forum = meta?.tags.some(t => t[0] === 't' && t[1] === 'forum') ?? false
+      channels.set(id, { name: (meta && tag(meta, 'name')) ?? id, dm, forum })
     }
     listen()
   }
