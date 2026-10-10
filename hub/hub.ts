@@ -8,7 +8,7 @@ export type Message = { content: string; meta: Record<string, string> }
 export type Call = (thread: string, tool: string, args: Record<string, unknown>) => Promise<string>
 export type State = (thread: string, busy: boolean) => void
 export type Failed = (thread: string, reason: string) => void
-type Thread = { name: string; session?: string }
+type Thread = { name: string; session?: string; previous?: string }
 type Agent = { sessionId: string; pid?: number; status?: string }
 export type Hub = ReturnType<typeof startHub>
 
@@ -129,6 +129,16 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
     leaving.delete(thread)
   }
 
+  // The main session is full, so the next one starts fresh, told which session it takes over from.
+  function renew(thread: string) {
+    const known = threads[thread]
+    if (thread !== main || !known?.session) return
+    stop(thread)
+    known.previous = known.session
+    delete known.session
+    save()
+  }
+
   function adopt(thread: string, name: string, session: string, prompt: string) {
     threads[thread] = { name, session }
     save()
@@ -182,7 +192,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
   }
 
   function start(known: Thread, thread: string, prompt?: string, fork?: string) {
-    const bound = { HEX_CHANNEL: channel, HEX_THREAD: thread, HEX_HUB: socketPath, ...(thread === main ? { HEX_MAIN: '1' } : {}) }
+    const bound = { HEX_CHANNEL: channel, HEX_THREAD: thread, HEX_HUB: socketPath, ...(thread === main ? { HEX_MAIN: '1' } : {}), ...(known.previous ? { HEX_PREVIOUS: known.previous } : {}) }
     let child
     try {
       child = spawn(launcher, [
@@ -249,6 +259,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
     const known = threads[thread] ?? (threads[thread] = { name: thread })
     if (session && known.session !== session) {
       known.session = session
+      delete known.previous
       save()
     }
     for (const message of queued.get(thread) ?? []) send(socket, { type: 'inbound', ...message })
@@ -275,6 +286,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
     function handle(request: any) {
       if (request.type === 'hello') welcome(thread = request.thread, request.session, socket)
       if (request.type === 'state') setState(request.thread, request.busy)
+      if (request.type === 'fresh') renew(request.thread)
       if (request.type === 'open') launch(request.thread, request.name, request.prompt)
       if (request.type === 'inbound') deliver(request.thread, threads[request.thread]?.name ?? request.thread, { content: request.content, meta: request.meta })
       if (request.type === 'call') {
@@ -289,7 +301,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
       live.delete(thread)
       setState(thread, false)
       if (leaving.has(thread)) forget(thread)
-      if (thread === main) setTimeout(revive, relaunch)
+      if (thread === main) setTimeout(revive, threads[main]?.previous ? 0 : relaunch)
     })
     socket.on('error', () => {})
   }).listen(socketPath)
