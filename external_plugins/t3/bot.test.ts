@@ -20,9 +20,11 @@ beforeEach(async () => {
   for (const path of [project, join(dir, 'hex'), join(dir, 'state'), join(dir, 'config', 'jobs', 'job12345'), join(dir, '.t3', 'scratch', 'chat')]) mkdirSync(path, { recursive: true })
   writeFileSync(join(dir, '.claude.json'), '{"projects":{}}')
   script('claude', `jq -cn '$ARGS.positional' --args -- "$@" >> "${dir}/claude"
-[ "$1 $2" = "agents --json" ] && echo '[]'
+[ "$1 $2" = "agents --json" ] && { cat "${dir}/agents" 2>/dev/null || echo '[]'; }
+[ "$1" = stop ] && [ -f "${dir}/agents" ] && kill $(jq '.[0].pid' "${dir}/agents") && rm "${dir}/agents"
 exit 0`)
   script('launch', `pwd >> "${dir}/cwd"
+jq -cn '$ARGS.positional' --args -- "$@" >> "${dir}/launched"
 [ -f "${dir}/broken" ] && { echo "Workspace not trusted." >&2; exit 1; }
 echo "backgrounded · job12345 · test"`)
   bot = Bun.spawn(['bun', join(import.meta.dir, 'bot.ts')], {
@@ -120,7 +122,46 @@ test('a new thread starts a hex session in its project, and a prompt streams the
   await Bun.sleep(100)
   hex.write(prompt, reply, done)
   expect(await answer).toEqual({ stopReason: 'end_turn' })
-  expect(updates).toEqual([expect.objectContaining({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'hi from hex' } })])
+  expect(updates.filter(update => update.sessionUpdate !== 'available_commands_update')).toEqual([expect.objectContaining({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'hi from hex' } })])
+})
+
+test('a session advertises /compact once T3 knows it', async () => {
+  const { agent, updates } = await t3()
+  await agent.request('session/new', { cwd: project, mcpServers: [] })
+  await until(() => updates.length)
+  expect(updates).toEqual([{ sessionUpdate: 'available_commands_update', availableCommands: [expect.objectContaining({ name: 'compact' })] }])
+})
+
+test('/compact stops a running session, resumes it with the command once it has exited, and ends at the compaction', async () => {
+  const { agent, updates } = await t3()
+  const { sessionId } = await agent.request('session/new', { cwd: project, mcpServers: [] })
+  const hex = await session(sessionId)
+  const running = Bun.spawn(['sleep', '60'])
+  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid: running.pid, status: 'idle' }]))
+  await until(() => updates.length)
+  updates.length = 0
+  const answer = agent.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: '/compact' }, { type: 'text', text: 'T3 context' }] })
+  await until(() => lines('launched').some(line => line.includes('"/compact"')))
+  expect(lines('claude')).toContain(JSON.stringify(['stop', SESSION.slice(0, 8)]))
+  expect(JSON.parse(lines('launched').at(-1)!)).toEqual(expect.arrayContaining(['--resume', SESSION, '/compact']))
+  hex.write(
+    { type: 'user', message: { content: '/compact' } },
+    { type: 'system', subtype: 'compact_boundary', compactMetadata: { trigger: 'manual' } },
+  )
+  expect(await answer).toEqual({ stopReason: 'end_turn' })
+  expect(hex.inbound).toEqual([])
+  expect(updates.map(update => update.sessionUpdate === 'compaction_update' && update.status)).toEqual(['in_progress', 'completed'])
+})
+
+test('a /compact that fails fails the prompt with the command\'s error', async () => {
+  const { agent, updates } = await t3()
+  const { sessionId } = await agent.request('session/new', { cwd: project, mcpServers: [] })
+  const hex = await session(sessionId)
+  const answer = agent.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: '/compact' }] })
+  await until(() => lines('launched').some(line => line.includes('"/compact"')))
+  hex.write({ type: 'system', subtype: 'local_command', content: '<local-command-stderr>Error: No messages to compact</local-command-stderr>' })
+  await expect(answer).rejects.toThrow('Error: No messages to compact')
+  await until(() => updates.some(update => update.sessionUpdate === 'compaction_update' && update.status === 'failed'))
 })
 
 test('a known thread resumes and an unknown one is not found', async () => {

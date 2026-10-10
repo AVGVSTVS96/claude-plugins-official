@@ -243,6 +243,19 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
     launch(thread, name)
   }
 
+  // Claude Code runs a slash command like /compact only as a session's first prompt,
+  // so a running session stops and resumes with it. `claude stop` returns before the
+  // process exits, and resuming before then starts a copy, so it waits for the exit.
+  function command(thread: string, text: string) {
+    const known = threads[thread]!
+    if (!known.session) return launch(thread, known.name, text)
+    agent(known.session, running => {
+      if (!running) return launch(thread, known.name, text)
+      stop(thread)
+      execFile('pidwait', ['--pid', String(running.pid)], () => launch(thread, known.name, text))
+    })
+  }
+
   function welcome(thread: string, session: string, socket: Socket) {
     live.set(thread, socket)
     settle(thread)
@@ -304,6 +317,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
 
   return {
     deliver,
+    command,
     open: (thread: string, name: string, prompt?: string, cwd?: string) => launch(thread, name, prompt, undefined, cwd),
     fork: (thread: string, name: string, session: string, prompt: string, cwd?: string) => launch(thread, name, prompt, session, cwd),
     main,

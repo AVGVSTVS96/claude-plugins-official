@@ -14,16 +14,17 @@ export function transcriptPath(cwd: string, session: string) {
 
 // Streams one turn of a session's transcript as ACP session/update notifications,
 // from where it ends now, or from its start when the session is new. Channel
-// prompts are skipped: the client already shows what it sent. Claude Code writes
-// the transcript in batches, so the Stop hook can run before the last reply is on
-// disk; the turn ends at the transcript's own turn_duration after the prompt.
+// prompts and slash commands are skipped: the client already shows what it sent.
+// Claude Code writes the transcript in batches, so the Stop hook can run before
+// the last reply is on disk; the turn ends at the transcript's own turn_duration
+// after the prompt. A /compact turn ends at its compaction, or with its error.
 export function follow({ path, sessionId, cwd, fresh, emit, end }: {
   path: string
   sessionId: string
   cwd: string
   fresh: boolean
   emit: (notification: SessionNotification) => void
-  end: () => void
+  end: (error?: string) => void
 }) {
   const tools = {}
   const tasks = new Map()
@@ -67,13 +68,12 @@ export function follow({ path, sessionId, cwd, fresh, emit, end }: {
       return
     }
     if (entry.type === 'user' && entry.origin?.kind === 'channel') asked = true
-    if (asked && entry.type === 'system' && entry.subtype === 'turn_duration') {
-      ended = true
-      watcher.close()
-      return end()
-    }
+    if (asked && entry.type === 'system' && entry.subtype === 'turn_duration') return stop()
+    if (entry.type === 'system' && entry.subtype === 'compact_boundary' && entry.compactMetadata?.trigger === 'manual') return stop()
+    const failed = entry.type === 'system' && entry.subtype === 'local_command' && entry.content?.match(/<local-command-stderr>([\s\S]*)<\/local-command-stderr>/)?.[1]
+    if (failed) return stop(failed)
     if ((entry.type !== 'assistant' && entry.type !== 'user') || entry.isSidechain) return
-    if (entry.type === 'user' && (entry.isMeta || entry.origin)) return
+    if (entry.type === 'user' && (entry.isMeta || entry.origin || /^\/\S/.test(entry.message?.content))) return
     const content = entry.type === 'user' ? stripLocalCommandMetadata(entry.message?.content) : entry.message?.content
     if (content == null) return
     const notifications = toAcpNotifications(content as any, entry.type, sessionId, tools, client, logger, {
@@ -85,6 +85,12 @@ export function follow({ path, sessionId, cwd, fresh, emit, end }: {
       toolUseResult: entry.toolUseResult,
     })
     for (const notification of notifications) emit(notification)
+  }
+
+  function stop(error?: string) {
+    ended = true
+    watcher.close()
+    end(error)
   }
 
   return {

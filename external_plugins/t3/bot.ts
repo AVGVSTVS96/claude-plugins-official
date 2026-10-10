@@ -6,7 +6,7 @@ import { homedir } from 'os'
 import { basename, join } from 'path'
 import { fileURLToPath } from 'url'
 import { randomUUID } from 'crypto'
-import { agent, ndJsonStream, PROTOCOL_VERSION, RequestError, type AgentContext, type ContentBlock, type PromptResponse, type StopReason } from '@agentclientprotocol/sdk'
+import { agent, ndJsonStream, PROTOCOL_VERSION, RequestError, type AgentContext, type ContentBlock, type PromptResponse, type SessionNotification, type StopReason } from '@agentclientprotocol/sdk'
 import { startHub } from '../../hub/hub.ts'
 import { follow, transcriptPath } from './transcript.ts'
 import { version } from './package.json'
@@ -18,11 +18,13 @@ const HEX_DIR = process.env.HEX_DIR ?? process.cwd()
 const HOME = homedir()
 const SCRATCH = join(HOME, '.t3', 'scratch')
 const CLAUDE_JSON = join(HOME, '.claude.json')
+const COMMANDS = [{ name: 'compact', description: 'Summarize the conversation so far to free up context' }]
 
 type Turn = {
   client: AgentContext
   reader?: ReturnType<typeof follow>
   sent: Promise<unknown>
+  compaction?: string
   resolve: (response: PromptResponse) => void
   reject: (error: Error) => void
 }
@@ -61,17 +63,26 @@ function reader(thread: string, session: string, turn: Turn, fresh: boolean) {
     sessionId: thread,
     cwd,
     fresh,
-    end: () => finish(thread, 'end_turn'),
-    emit: notification => (turn.sent = turn.sent.then(() => turn.client.notify('session/update', notification)).catch(() => {})),
+    end: error => finish(thread, 'end_turn', error),
+    emit: notification => send(turn, notification),
   })
 }
 
-function finish(thread: string, stopReason: StopReason) {
+function send(turn: Turn, notification: SessionNotification) {
+  turn.sent = turn.sent.then(() => turn.client.notify('session/update', notification)).catch(() => {})
+}
+
+function compaction(turn: Turn, thread: string, status: string, error?: string) {
+  send(turn, { sessionId: thread, update: { sessionUpdate: 'compaction_update', compactionId: turn.compaction!, status, ...(error && { error }) } })
+}
+
+function finish(thread: string, stopReason: StopReason, error?: string) {
   const turn = turns.get(thread)
   if (!turn) return
   turns.delete(thread)
   turn.reader?.close()
-  void turn.sent.then(() => turn.resolve({ stopReason }))
+  if (turn.compaction) compaction(turn, thread, error ? 'failed' : stopReason === 'cancelled' ? 'cancelled' : 'completed', error)
+  void turn.sent.then(() => (error ? turn.reject(RequestError.internalError(undefined, error)) : turn.resolve({ stopReason })))
 }
 
 function known(thread: string) {
@@ -82,13 +93,23 @@ function known(thread: string) {
 function prompt(thread: string, blocks: ContentBlock[], client: AgentContext): Promise<PromptResponse> {
   const name = hub.name(known(thread))!
   if (turns.has(thread)) throw RequestError.invalidRequest(undefined, 'this thread is already working on a prompt')
+  const session = hub.session(thread)
+  // T3 Code follows a command with its own context block, which the command doesn't take.
+  const compact = blocks[0]?.type === 'text' && blocks[0].text.trim() === '/compact'
+  if (compact && !session) throw RequestError.invalidRequest(undefined, 'this thread has nothing to compact yet')
   return new Promise((resolve, reject) => {
-    const turn: Turn = { client, sent: Promise.resolve(), resolve, reject }
+    const turn: Turn = { client, sent: Promise.resolve(), resolve, reject, ...(compact && { compaction: randomUUID() }) }
     turns.set(thread, turn)
-    const session = hub.session(thread)
     if (session) turn.reader = reader(thread, session, turn, false)
-    hub.deliver(thread, name, { content: render(blocks), meta: { ts: new Date().toISOString() } })
+    if (!compact) return hub.deliver(thread, name, { content: render(blocks), meta: { ts: new Date().toISOString() } })
+    compaction(turn, thread, 'in_progress')
+    hub.command(thread, '/compact')
   })
+}
+
+// Sent once the session/new or session/resume answer is out, so the client knows the session.
+function advertise(client: AgentContext, sessionId: string) {
+  setImmediate(() => client.notify('session/update', { sessionId, update: { sessionUpdate: 'available_commands_update', availableCommands: COMMANDS } }).catch(() => {}))
 }
 
 // Stopping the session ends the turn; the next prompt resumes it.
@@ -151,13 +172,17 @@ function serve(socket: Socket) {
       },
       authMethods: [],
     }))
-    .onRequest('session/new', ({ params }) => {
+    .onRequest('session/new', ({ params, client }) => {
       const thread = randomUUID()
       const folder = folderFor(params.cwd)
       hub.open(thread, basename(folder ?? HEX_DIR), undefined, folder)
+      advertise(client, thread)
       return { sessionId: thread }
     })
-    .onRequest('session/resume', ({ params }) => (known(params.sessionId), {}))
+    .onRequest('session/resume', ({ params, client }) => {
+      advertise(client, known(params.sessionId))
+      return {}
+    })
     .onRequest('session/prompt', ({ params, client }) => prompt(params.sessionId, params.prompt, client))
     .onNotification('session/cancel', ({ params }) => cancel(params.sessionId))
     .connect(ndJsonStream(Writable.toWeb(socket) as WritableStream<Uint8Array>, Readable.toWeb(socket) as ReadableStream<Uint8Array>))
