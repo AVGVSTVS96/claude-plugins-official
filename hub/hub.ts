@@ -8,7 +8,7 @@ export type Message = { content: string; meta: Record<string, string> }
 export type Call = (thread: string, tool: string, args: Record<string, unknown>) => Promise<string>
 export type State = (thread: string, busy: boolean) => void
 export type Failed = (thread: string, reason: string) => void
-type Thread = { name: string; session?: string }
+type Thread = { name: string; session?: string; cwd?: string }
 type Agent = { sessionId: string; pid?: number; status?: string }
 export type Hub = ReturnType<typeof startHub>
 
@@ -129,8 +129,8 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
     leaving.delete(thread)
   }
 
-  function adopt(thread: string, name: string, session: string, prompt: string) {
-    threads[thread] = { name, session }
+  function adopt(thread: string, name: string, session: string, prompt: string, cwd?: string) {
+    threads[thread] = { name, session, ...(cwd && { cwd }) }
     save()
     launch(thread, name, prompt)
   }
@@ -154,10 +154,10 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
     socket.write(JSON.stringify(payload) + '\n')
   }
 
-  function launch(thread: string, name: string, prompt?: string, fork?: string) {
+  function launch(thread: string, name: string, prompt?: string, fork?: string, cwd?: string) {
     if (launching.has(thread)) return
     retiring.delete(thread)
-    const known = threads[thread] ?? (threads[thread] = { name })
+    const known = threads[thread] ?? (threads[thread] = { name, ...(cwd && { cwd }) })
     if (prompt || queued.has(thread)) setState(thread, true)
     launching.set(thread, undefined)
     if (fork) return start(known, thread, prompt, fork)
@@ -192,7 +192,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
         ...(fork ? ['--resume', fork, '--fork-session'] : known.session ? ['--resume', known.session] : []),
         '--settings', JSON.stringify({ enabledPlugins: { [plugin]: true }, env: bound }),
         ...(prompt ? [prompt] : []),
-      ], { cwd: hexDir, env, stdio: ['ignore', 'pipe', 'pipe'] })
+      ], { cwd: known.cwd ?? hexDir, env, stdio: ['ignore', 'pipe', 'pipe'] })
     } catch (error) {
       return fail(thread, String(error))
     }
@@ -232,8 +232,8 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
   function fail(thread: string, reason: string) {
     if (!launching.has(thread) || live.has(thread)) return
     settle(thread)
-    setState(thread, false)
     failed(thread, reason)
+    setState(thread, false)
   }
 
   function deliver(thread: string, name: string, message: Message) {
@@ -241,6 +241,19 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
     if (socket) return send(socket, { type: 'inbound', ...message })
     queued.set(thread, [...(queued.get(thread) ?? []), message])
     launch(thread, name)
+  }
+
+  // Claude Code runs a slash command like /compact only as a session's first prompt,
+  // so a running session stops and resumes with it. `claude stop` returns before the
+  // process exits, and resuming before then starts a copy, so it waits for the exit.
+  function command(thread: string, text: string) {
+    const known = threads[thread]!
+    if (!known.session) return launch(thread, known.name, text)
+    agent(known.session, running => {
+      if (!running) return launch(thread, known.name, text)
+      stop(thread)
+      execFile('pidwait', ['--pid', String(running.pid)], () => launch(thread, known.name, text))
+    })
   }
 
   function welcome(thread: string, session: string, socket: Socket) {
@@ -305,11 +318,13 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
 
   return {
     deliver,
-    open: (thread: string, name: string, prompt: string) => launch(thread, name, prompt),
-    fork: (thread: string, name: string, session: string, prompt: string) => launch(thread, name, prompt, session),
+    command,
+    open: (thread: string, name: string, prompt?: string, cwd?: string) => launch(thread, name, prompt, undefined, cwd),
+    fork: (thread: string, name: string, session: string, prompt: string, cwd?: string) => launch(thread, name, prompt, session, cwd),
     main,
     session: (thread: string) => threads[thread]?.session,
     name: (thread: string) => threads[thread]?.name,
+    cwd: (thread: string) => threads[thread]?.cwd,
     stop,
     release,
     adopt,
@@ -332,7 +347,8 @@ export async function move(from: Hub, thread: string, to: string, name: string, 
   if (!session) throw new Error('this thread has no session yet')
   const { thread: dest, link } = await target.place(name, where)
   const prompt = `This conversation just moved to ${to}, into the thread "${name}". Your ${to} tools now post there. Carry on where you left off.`
-  if (thread === from.main) target.hub.fork(dest, name, session, prompt)
-  else void from.release(thread).then(session => target.hub.adopt(dest, name, session, prompt))
+  const cwd = from.cwd(thread)
+  if (thread === from.main) target.hub.fork(dest, name, session, prompt, cwd)
+  else void from.release(thread).then(session => target.hub.adopt(dest, name, session, prompt, cwd))
   return link
 }

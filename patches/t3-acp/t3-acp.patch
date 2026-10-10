@@ -1,0 +1,1056 @@
+diff --git a/external_plugins/t3/.claude-plugin/plugin.json b/external_plugins/t3/.claude-plugin/plugin.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..19b32a731f73ba769c8ef9bf1bb3d7f405736c2d
+--- /dev/null
++++ b/external_plugins/t3/.claude-plugin/plugin.json
+@@ -0,0 +1,11 @@
++{
++  "name": "t3",
++  "description": "T3 Code channel: hex as an ACP agent, where every T3 thread is its own session in that thread's project.",
++  "version": "0.1.0",
++  "keywords": [
++    "t3",
++    "acp",
++    "channel",
++    "mcp"
++  ]
++}
+diff --git a/external_plugins/t3/.gitignore b/external_plugins/t3/.gitignore
+new file mode 100644
+index 0000000000000000000000000000000000000000..c2658d7d1b31848c3b71960543cb0368e56cd4c7
+--- /dev/null
++++ b/external_plugins/t3/.gitignore
+@@ -0,0 +1 @@
++node_modules/
+diff --git a/external_plugins/t3/.mcp.json b/external_plugins/t3/.mcp.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..dcc8a6b03ed18c6bd60d12c019669f62f5a456e3
+--- /dev/null
++++ b/external_plugins/t3/.mcp.json
+@@ -0,0 +1,8 @@
++{
++  "mcpServers": {
++    "t3": {
++      "command": "bun",
++      "args": ["run", "--cwd", "${CLAUDE_PLUGIN_ROOT}", "--shell=bun", "--silent", "start"]
++    }
++  }
++}
+diff --git a/external_plugins/t3/.npmrc b/external_plugins/t3/.npmrc
+new file mode 100644
+index 0000000000000000000000000000000000000000..214c29d1395919ce175f26d140526368127981ba
+--- /dev/null
++++ b/external_plugins/t3/.npmrc
+@@ -0,0 +1 @@
++registry=https://registry.npmjs.org/
+diff --git a/external_plugins/t3/README.md b/external_plugins/t3/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..a76e4586c0af750eea2fd3a071f231191409f684
+--- /dev/null
++++ b/external_plugins/t3/README.md
+@@ -0,0 +1,12 @@
++# T3 Code
++
++A channel that serves the agent to [T3 Code](https://github.com/pingdotgg/t3code) as an [ACP](https://agentclientprotocol.com) agent. Pick it in T3's agent picker, in any project, and that T3 thread is its own Claude Code session working in that project, run by the hub like every Telegram topic or Buzz thread. Its intent, invariants and design live in [`patches/t3-acp/PATCH.md`](../../patches/t3-acp/PATCH.md).
++
++- `bot.ts` runs in the hub service (`bun hub/serve.ts`) next to Telegram, Discord and Buzz. It embeds the hub and serves ACP on `acp.sock`: `session/new` opens a thread in the request's `cwd`, `session/prompt` delivers the message and streams the turn back, `session/cancel` stops it, and `session/resume` picks a thread up again after T3 restarts.
++- `transcript.ts` turns a session's Claude Code transcript into ACP `session/update` notifications: text, thinking, tool calls and their results.
++- `server.ts` is the channel each session loads. It only delivers T3's messages: the session's own output is what T3 shows, so it has no reply tool.
++- `acp.ts` is what T3 starts. It relays stdio to `acp.sock`, so T3 reaches the agent that's already running instead of starting one.
++
++State lives in `~/.claude/channels/hex/t3/` (or `T3_STATE_DIR`): `threads.json`, the sockets, and `inbox/`, where pasted images and files land for the session to read.
++
++Add the agent in T3 Code's settings as a local ACP agent whose command is `bun acp.ts <state dir>/acp.sock`. hex does it with `hex acp`.
+diff --git a/external_plugins/t3/acp.ts b/external_plugins/t3/acp.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..c12bf015726ea411ac246ded94d2493cf0520686
+--- /dev/null
++++ b/external_plugins/t3/acp.ts
+@@ -0,0 +1,20 @@
++#!/usr/bin/env bun
++import { connect } from 'net'
++
++// T3 Code starts this as its ACP agent; the agent itself runs in the hub service.
++const path = process.argv[2]
++if (!path) {
++  process.stderr.write('usage: acp.ts <path to the t3 hub acp.sock>\n')
++  process.exit(2)
++}
++
++const socket = connect(path)
++socket.on('connect', () => {
++  process.stdin.pipe(socket)
++  socket.pipe(process.stdout)
++})
++socket.on('error', error => {
++  process.stderr.write(`hex acp: can't reach hex at ${path} (${error.message}). Is hex running?\n`)
++  process.exit(1)
++})
++socket.on('close', () => process.exit(0))
+diff --git a/external_plugins/t3/bot.test.ts b/external_plugins/t3/bot.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..f976442760ddbf65d418575a7b39fadd6cb6af26
+--- /dev/null
++++ b/external_plugins/t3/bot.test.ts
+@@ -0,0 +1,221 @@
++import { afterEach, beforeEach, expect, test } from 'bun:test'
++import { connect, type Socket } from 'net'
++import { Readable, Writable } from 'stream'
++import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'fs'
++import { tmpdir } from 'os'
++import { join } from 'path'
++import type { Subprocess } from 'bun'
++import { client, ndJsonStream, type SessionNotification } from '@agentclientprotocol/sdk'
++
++const SESSION = '0a1b2c3d-0000-4000-8000-000000000000'
++
++let dir: string
++let project: string
++let bot: Subprocess
++const sockets: Socket[] = []
++
++beforeEach(async () => {
++  dir = mkdtempSync(join(tmpdir(), 't3-bot-'))
++  project = join(dir, 'project')
++  for (const path of [project, join(dir, 'hex'), join(dir, 'state'), join(dir, 'config', 'jobs', 'job12345'), join(dir, '.t3', 'scratch', 'chat')]) mkdirSync(path, { recursive: true })
++  writeFileSync(join(dir, '.claude.json'), '{"projects":{}}')
++  script('claude', `jq -cn '$ARGS.positional' --args -- "$@" >> "${dir}/claude"
++[ "$1 $2" = "agents --json" ] && { cat "${dir}/agents" 2>/dev/null || echo '[]'; }
++[ "$1" = stop ] && [ -f "${dir}/agents" ] && kill $(jq '.[0].pid' "${dir}/agents") && rm "${dir}/agents"
++exit 0`)
++  script('launch', `pwd >> "${dir}/cwd"
++jq -cn '$ARGS.positional' --args -- "$@" >> "${dir}/launched"
++[ -f "${dir}/broken" ] && { echo "Workspace not trusted." >&2; exit 1; }
++echo "backgrounded · job12345 · test"`)
++  bot = Bun.spawn(['bun', join(import.meta.dir, 'bot.ts')], {
++    env: {
++      ...process.env,
++      HOME: dir,
++      PATH: `${dir}:${process.env.PATH}`,
++      T3_STATE_DIR: join(dir, 'state'),
++      HEX_DIR: join(dir, 'hex'),
++      HEX_LAUNCHER: join(dir, 'launch'),
++      CLAUDE_CONFIG_DIR: join(dir, 'config'),
++    },
++    stderr: 'ignore',
++  })
++  await until(() => existsSync(join(dir, 'state', 'acp.sock')))
++})
++
++afterEach(() => {
++  for (const socket of sockets.splice(0)) socket.destroy()
++  bot.kill()
++})
++
++function script(name: string, body: string) {
++  writeFileSync(join(dir, name), `#!/bin/sh\n${body}\n`)
++  chmodSync(join(dir, name), 0o755)
++}
++
++function lines(file: string) {
++  return existsSync(join(dir, file)) ? readFileSync(join(dir, file), 'utf8').split('\n').slice(0, -1) : []
++}
++
++async function until<T>(check: () => T, timeout = 5000): Promise<NonNullable<T>> {
++  for (const end = Date.now() + timeout; Date.now() < end; await Bun.sleep(20)) {
++    const value = check()
++    if (value) return value
++  }
++  throw new Error('timed out')
++}
++
++async function open(path: string) {
++  const socket = connect(path)
++  sockets.push(socket)
++  await new Promise(resolve => socket.on('connect', resolve))
++  return socket
++}
++
++// T3 Code's side: an ACP client on the agent's socket.
++async function t3() {
++  const socket = await open(join(dir, 'state', 'acp.sock'))
++  const updates: SessionNotification['update'][] = []
++  const connection = client({ name: 't3' })
++    .onNotification('session/update', ({ params }) => void updates.push(params.update))
++    .connect(ndJsonStream(Writable.toWeb(socket) as WritableStream<Uint8Array>, Readable.toWeb(socket) as ReadableStream<Uint8Array>))
++  const agent = connection.agent
++  await agent.request('initialize', { protocolVersion: 1, clientCapabilities: {} })
++  return { agent, updates }
++}
++
++// The hex session's side: its channel saying hello on the hub socket, and its hooks.
++async function session(thread: string) {
++  const socket = await open(join(dir, 'state', 'hub.sock'))
++  const inbound: any[] = []
++  let buffer = ''
++  socket.setEncoding('utf8')
++  socket.on('data', (chunk: string) => {
++    buffer += chunk
++    const parts = buffer.split('\n')
++    buffer = parts.pop()!
++    inbound.push(...parts.map(line => JSON.parse(line)))
++  })
++  socket.write(JSON.stringify({ type: 'hello', thread, session: SESSION }) + '\n')
++  const transcript = join(dir, 'config', 'projects', project.replace(/[^a-zA-Z0-9]/g, '-'), `${SESSION}.jsonl`)
++  mkdirSync(join(transcript, '..'), { recursive: true })
++  return {
++    inbound,
++    busy: () => socket.write(JSON.stringify({ type: 'state', thread, busy: true }) + '\n'),
++    write: (...entries: object[]) => appendFileSync(transcript, entries.map(entry => JSON.stringify(entry) + '\n').join('')),
++  }
++}
++
++const prompt = { type: 'user', origin: { kind: 'channel' }, isMeta: true, message: { content: '<channel source="t3">hi</channel>' } }
++const reply = { type: 'assistant', message: { id: 'm1', content: [{ type: 'text', text: 'hi from hex' }] } }
++const done = { type: 'system', subtype: 'turn_duration' }
++
++test('a new thread starts a hex session in its project, and a prompt streams the turn until the transcript ends it', async () => {
++  const { agent, updates } = await t3()
++  const { sessionId } = await agent.request('session/new', { cwd: project, mcpServers: [] })
++  await until(() => lines('cwd').length)
++  expect(lines('cwd')).toEqual([project])
++  const hex = await session(sessionId)
++  const answer = agent.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'hi' }] })
++  await until(() => hex.inbound.length)
++  expect(hex.inbound[0]).toMatchObject({ type: 'inbound', content: 'hi' })
++  hex.busy()
++  await Bun.sleep(100)
++  hex.write(prompt, reply, done)
++  expect(await answer).toEqual({ stopReason: 'end_turn' })
++  expect(updates.filter(update => update.sessionUpdate !== 'available_commands_update')).toEqual([expect.objectContaining({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'hi from hex' } })])
++})
++
++test('a session advertises /compact once T3 knows it', async () => {
++  const { agent, updates } = await t3()
++  await agent.request('session/new', { cwd: project, mcpServers: [] })
++  await until(() => updates.length)
++  expect(updates).toEqual([{ sessionUpdate: 'available_commands_update', availableCommands: [expect.objectContaining({ name: 'compact' })] }])
++})
++
++test('/compact stops a running session, resumes it with the command once it has exited, and ends at the compaction', async () => {
++  const { agent, updates } = await t3()
++  const { sessionId } = await agent.request('session/new', { cwd: project, mcpServers: [] })
++  const hex = await session(sessionId)
++  const running = Bun.spawn(['sleep', '60'])
++  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid: running.pid, status: 'idle' }]))
++  await until(() => updates.length)
++  updates.length = 0
++  const answer = agent.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: '/compact' }, { type: 'text', text: 'T3 context' }] })
++  await until(() => lines('launched').some(line => line.includes('"/compact"')))
++  expect(lines('claude')).toContain(JSON.stringify(['stop', SESSION.slice(0, 8)]))
++  expect(JSON.parse(lines('launched').at(-1)!)).toEqual(expect.arrayContaining(['--resume', SESSION, '/compact']))
++  hex.write(
++    { type: 'user', message: { content: '/compact' } },
++    { type: 'system', subtype: 'compact_boundary', compactMetadata: { trigger: 'manual' } },
++  )
++  expect(await answer).toEqual({ stopReason: 'end_turn' })
++  expect(hex.inbound).toEqual([])
++  expect(updates.map(update => update.sessionUpdate === 'compaction_update' && update.status)).toEqual(['in_progress', 'completed'])
++})
++
++test('a /compact that fails fails the prompt with the command\'s error', async () => {
++  const { agent, updates } = await t3()
++  const { sessionId } = await agent.request('session/new', { cwd: project, mcpServers: [] })
++  const hex = await session(sessionId)
++  const answer = agent.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: '/compact' }] })
++  await until(() => lines('launched').some(line => line.includes('"/compact"')))
++  hex.write({ type: 'system', subtype: 'local_command', content: '<local-command-stderr>Error: No messages to compact</local-command-stderr>' })
++  await expect(answer).rejects.toThrow('Error: No messages to compact')
++  await until(() => updates.some(update => update.sessionUpdate === 'compaction_update' && update.status === 'failed'))
++})
++
++test('a known thread resumes and an unknown one is not found', async () => {
++  const { agent } = await t3()
++  const { sessionId } = await agent.request('session/new', { cwd: project, mcpServers: [] })
++  expect(await agent.request('session/resume', { sessionId, cwd: project, mcpServers: [] })).toEqual({})
++  expect(agent.request('session/resume', { sessionId: 'nope', cwd: project, mcpServers: [] })).rejects.toThrow('Resource not found')
++})
++
++test('cancelling stops the session and answers the prompt as cancelled', async () => {
++  const { agent } = await t3()
++  const { sessionId } = await agent.request('session/new', { cwd: project, mcpServers: [] })
++  const hex = await session(sessionId)
++  const answer = agent.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'run for a while' }] })
++  await until(() => hex.inbound.length)
++  await agent.notify('session/cancel', { sessionId })
++  expect(await answer).toEqual({ stopReason: 'cancelled' })
++  await until(() => lines('claude').some(line => line.startsWith('["stop"')))
++  expect(lines('claude')).toContain(JSON.stringify(['stop', SESSION.slice(0, 8)]))
++})
++
++test('a chat with no project works in hex\'s folder, and a project folder is trusted for good', async () => {
++  const { agent } = await t3()
++  for (const cwd of [dir, join(dir, '.t3', 'scratch', 'chat'), project]) await agent.request('session/new', { cwd, mcpServers: [] })
++  await until(() => lines('cwd').length === 3)
++  expect(lines('cwd')).toEqual([join(dir, 'hex'), join(dir, 'hex'), project])
++  expect(JSON.parse(readFileSync(join(dir, '.claude.json'), 'utf8')).projects).toEqual({ [project]: { hasTrustDialogAccepted: true } })
++})
++
++test('a session that fails to start fails the prompt with its reason', async () => {
++  writeFileSync(join(dir, 'broken'), '')
++  const { agent } = await t3()
++  const { sessionId } = await agent.request('session/new', { cwd: project, mcpServers: [] })
++  expect(agent.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'hi' }] })).rejects.toThrow('Workspace not trusted.')
++})
++
++test('images and files reach the session as paths it can read', async () => {
++  const { agent } = await t3()
++  const { sessionId } = await agent.request('session/new', { cwd: project, mcpServers: [] })
++  const hex = await session(sessionId)
++  agent.request('session/prompt', {
++    sessionId,
++    prompt: [
++      { type: 'text', text: 'look' },
++      { type: 'image', data: Buffer.from('png bytes').toString('base64'), mimeType: 'image/png' },
++      { type: 'resource_link', name: 'notes.md', uri: 'file:///work/notes.md' },
++      { type: 'resource', resource: { uri: 'file:///work/a.ts', text: 'export {}' } },
++    ],
++  }).catch(() => {})
++  await until(() => hex.inbound.length)
++  const [text, image, link, file] = hex.inbound[0].content.split('\n\n')
++  expect(text).toBe('look')
++  const saved = image.match(/^\[image: (.+\.png)\]$/)[1]
++  expect(readFileSync(saved, 'utf8')).toBe('png bytes')
++  expect(link).toBe('[notes.md](/work/notes.md)')
++  expect(file).toBe('<file path="/work/a.ts">\nexport {}\n</file>')
++})
+diff --git a/external_plugins/t3/bot.ts b/external_plugins/t3/bot.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..c2cb5ece227e661ab4ce4b10a431ef36382dbaeb
+--- /dev/null
++++ b/external_plugins/t3/bot.ts
+@@ -0,0 +1,193 @@
++#!/usr/bin/env bun
++import { createServer, type Socket } from 'net'
++import { Readable, Writable } from 'stream'
++import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
++import { homedir } from 'os'
++import { basename, join } from 'path'
++import { fileURLToPath } from 'url'
++import { randomUUID } from 'crypto'
++import { agent, ndJsonStream, PROTOCOL_VERSION, RequestError, type AgentContext, type ContentBlock, type PromptResponse, type SessionNotification, type StopReason } from '@agentclientprotocol/sdk'
++import { startHub } from '../../hub/hub.ts'
++import { follow, transcriptPath } from './transcript.ts'
++import { version } from './package.json'
++
++const STATE_DIR = process.env.T3_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'hex', 't3')
++const INBOX_DIR = join(STATE_DIR, 'inbox')
++const SOCKET = join(STATE_DIR, 'acp.sock')
++const HEX_DIR = process.env.HEX_DIR ?? process.cwd()
++const HOME = homedir()
++const SCRATCH = join(HOME, '.t3', 'scratch')
++const CLAUDE_JSON = join(HOME, '.claude.json')
++const COMMANDS = [{ name: 'compact', description: 'Summarize the conversation so far to free up context' }]
++
++type Turn = {
++  client: AgentContext
++  reader?: ReturnType<typeof follow>
++  sent: Promise<unknown>
++  compaction?: string
++  resolve: (response: PromptResponse) => void
++  reject: (error: Error) => void
++}
++
++// One ACP prompt per thread at a time: it is answered when the session's turn ends.
++const turns = new Map<string, Turn>()
++
++mkdirSync(INBOX_DIR, { recursive: true, mode: 0o700 })
++
++const hub = startHub({
++  stateDir: STATE_DIR,
++  channel: process.env.T3_CHANNEL ?? 'plugin:t3@hex',
++  call: async (_, tool) => {
++    throw new Error(`unknown tool: ${tool}`)
++  },
++  // A new thread's session is only known once it says hello, before its first prompt.
++  state: (thread, busy) => {
++    const turn = turns.get(thread)
++    const session = hub.session(thread)
++    if (busy && turn && session && !turn.reader) turn.reader = reader(thread, session, turn, true)
++  },
++  failed: (thread, reason) => {
++    const turn = turns.get(thread)
++    turns.delete(thread)
++    turn?.reader?.close()
++    turn?.reject(RequestError.internalError(undefined, `hex couldn't start this thread's session: ${reason}`))
++  },
++  hexDir: HEX_DIR,
++  launcher: process.env.HEX_LAUNCHER,
++})
++
++function reader(thread: string, session: string, turn: Turn, fresh: boolean) {
++  const cwd = hub.cwd(thread) ?? HEX_DIR
++  return follow({
++    path: transcriptPath(cwd, session),
++    sessionId: thread,
++    cwd,
++    fresh,
++    end: error => finish(thread, 'end_turn', error),
++    emit: notification => send(turn, notification),
++  })
++}
++
++function send(turn: Turn, notification: SessionNotification) {
++  turn.sent = turn.sent.then(() => turn.client.notify('session/update', notification)).catch(() => {})
++}
++
++function compaction(turn: Turn, thread: string, status: string, error?: string) {
++  send(turn, { sessionId: thread, update: { sessionUpdate: 'compaction_update', compactionId: turn.compaction!, status, ...(error && { error }) } })
++}
++
++function finish(thread: string, stopReason: StopReason, error?: string) {
++  const turn = turns.get(thread)
++  if (!turn) return
++  turns.delete(thread)
++  turn.reader?.close()
++  if (turn.compaction) compaction(turn, thread, error ? 'failed' : stopReason === 'cancelled' ? 'cancelled' : 'completed', error)
++  void turn.sent.then(() => (error ? turn.reject(RequestError.internalError(undefined, error)) : turn.resolve({ stopReason })))
++}
++
++function known(thread: string) {
++  if (!hub.name(thread)) throw RequestError.resourceNotFound(thread)
++  return thread
++}
++
++function prompt(thread: string, blocks: ContentBlock[], client: AgentContext): Promise<PromptResponse> {
++  const name = hub.name(known(thread))!
++  if (turns.has(thread)) throw RequestError.invalidRequest(undefined, 'this thread is already working on a prompt')
++  const session = hub.session(thread)
++  // T3 Code follows a command with its own context block, which the command doesn't take.
++  const compact = blocks[0]?.type === 'text' && blocks[0].text.trim() === '/compact'
++  if (compact && !session) throw RequestError.invalidRequest(undefined, 'this thread has nothing to compact yet')
++  return new Promise((resolve, reject) => {
++    const turn: Turn = { client, sent: Promise.resolve(), resolve, reject, ...(compact && { compaction: randomUUID() }) }
++    turns.set(thread, turn)
++    if (session) turn.reader = reader(thread, session, turn, false)
++    if (!compact) return hub.deliver(thread, name, { content: render(blocks), meta: { ts: new Date().toISOString() } })
++    compaction(turn, thread, 'in_progress')
++    hub.command(thread, '/compact')
++  })
++}
++
++// Sent once the session/new or session/resume answer is out, so the client knows the session.
++function advertise(client: AgentContext, sessionId: string) {
++  setImmediate(() => client.notify('session/update', { sessionId, update: { sessionUpdate: 'available_commands_update', availableCommands: COMMANDS } }).catch(() => {}))
++}
++
++// Stopping the session ends the turn; the next prompt resumes it.
++function cancel(thread: string) {
++  if (!turns.has(thread)) return
++  hub.stop(thread)
++  finish(thread, 'cancelled')
++}
++
++// Images and binary files land in the inbox, so the session reads them by path.
++function render(blocks: ContentBlock[]) {
++  return blocks.map(block => {
++    switch (block.type) {
++      case 'text':
++        return block.text
++      case 'resource_link':
++        return `[${block.name}](${path(block.uri)})`
++      case 'resource':
++        if ('text' in block.resource) return `<file path="${path(block.resource.uri)}">\n${block.resource.text}\n</file>`
++        return `[file: ${save(block.resource.blob, block.resource.mimeType)}] (from ${path(block.resource.uri)})`
++      case 'image':
++      case 'audio':
++        return `[${block.type}: ${save(block.data, block.mimeType)}]`
++    }
++  }).join('\n\n')
++}
++
++function path(uri: string) {
++  return uri.startsWith('file://') ? fileURLToPath(uri) : uri
++}
++
++function save(base64: string, mimeType?: string | null) {
++  const file = join(INBOX_DIR, `${randomUUID()}.${mimeType?.split('/')[1]?.replace(/\W.*/, '') || 'bin'}`)
++  writeFileSync(file, Buffer.from(base64, 'base64'), { mode: 0o600 })
++  return file
++}
++
++// Claude Code never saves trust for the home folder and asks once per new folder,
++// but a hex session runs headless with nobody to accept. A T3 chat with no project
++// (home or T3's scratch folders) works in hex's own folder; a project folder is
++// trusted for good the first time hex opens there.
++function folderFor(cwd: string): string | undefined {
++  if (cwd === HOME || cwd === HEX_DIR || cwd.startsWith(SCRATCH)) return
++  const config = JSON.parse(readFileSync(CLAUDE_JSON, 'utf8'))
++  if (config.projects?.[cwd]?.hasTrustDialogAccepted) return cwd
++  config.projects = { ...config.projects, [cwd]: { ...config.projects?.[cwd], hasTrustDialogAccepted: true } }
++  writeFileSync(`${CLAUDE_JSON}.hex`, JSON.stringify(config, null, 2))
++  renameSync(`${CLAUDE_JSON}.hex`, CLAUDE_JSON)
++  return cwd
++}
++
++function serve(socket: Socket) {
++  agent({ name: 'hex' })
++    .onRequest('initialize', () => ({
++      protocolVersion: PROTOCOL_VERSION,
++      agentInfo: { name: 'hex', title: 'hex', version },
++      agentCapabilities: {
++        promptCapabilities: { image: true, audio: true, embeddedContext: true },
++        sessionCapabilities: { resume: {} },
++      },
++      authMethods: [],
++    }))
++    .onRequest('session/new', ({ params, client }) => {
++      const thread = randomUUID()
++      const folder = folderFor(params.cwd)
++      hub.open(thread, basename(folder ?? HEX_DIR), undefined, folder)
++      advertise(client, thread)
++      return { sessionId: thread }
++    })
++    .onRequest('session/resume', ({ params, client }) => {
++      advertise(client, known(params.sessionId))
++      return {}
++    })
++    .onRequest('session/prompt', ({ params, client }) => prompt(params.sessionId, params.prompt, client))
++    .onNotification('session/cancel', ({ params }) => cancel(params.sessionId))
++    .connect(ndJsonStream(Writable.toWeb(socket) as WritableStream<Uint8Array>, Readable.toWeb(socket) as ReadableStream<Uint8Array>))
++  socket.on('error', () => {})
++}
++
++rmSync(SOCKET, { force: true })
++createServer(serve).listen(SOCKET)
+diff --git a/external_plugins/t3/bun.lock b/external_plugins/t3/bun.lock
+new file mode 100644
+index 0000000000000000000000000000000000000000..65607f26b741773cb110c416a96320da90d4bf9a
+--- /dev/null
++++ b/external_plugins/t3/bun.lock
+@@ -0,0 +1,241 @@
++{
++  "lockfileVersion": 2,
++  "configVersion": 1,
++  "workspaces": {
++    "": {
++      "name": "claude-channel-t3",
++      "dependencies": {
++        "@agentclientprotocol/claude-agent-acp": "^0.86.0",
++        "@agentclientprotocol/sdk": "^1.7.0",
++        "@modelcontextprotocol/sdk": "^1.0.0",
++      },
++    },
++  },
++  "packages": {
++    "@agentclientprotocol/claude-agent-acp": ["@agentclientprotocol/claude-agent-acp@0.86.0", "", { "dependencies": { "@agentclientprotocol/sdk": "1.7.0", "@anthropic-ai/claude-agent-sdk": "0.3.287", "diff": "9.0.0", "zod": "4.6.5" }, "bin": { "claude-agent-acp": "dist/index.js" } }, "sha512-TrdQZvT8YT3eOzMZngatm5GJi93dR4/bHoDXRd+8TxfY1cVYtJFK3KApIr6aDreti/Xn15rGCqX7OxxOV/sM4Q=="],
++
++    "@agentclientprotocol/sdk": ["@agentclientprotocol/sdk@1.7.0", "", { "peerDependencies": { "zod": "^3.25.0 || ^4.0.0" } }, "sha512-ZORuxsuEnLjRly7t6Ad7zAsWitjWsyprswyPUHz/yycPb+tTm3DGa8XheaHhRXqX8LS9snuxaYavXSRA50TlHw=="],
++
++    "@anthropic-ai/claude-agent-sdk": ["@anthropic-ai/claude-agent-sdk@0.3.287", "", { "optionalDependencies": { "@anthropic-ai/claude-agent-sdk-darwin-arm64": "0.3.287", "@anthropic-ai/claude-agent-sdk-darwin-x64": "0.3.287", "@anthropic-ai/claude-agent-sdk-linux-arm64": "0.3.287", "@anthropic-ai/claude-agent-sdk-linux-arm64-musl": "0.3.287", "@anthropic-ai/claude-agent-sdk-linux-x64": "0.3.287", "@anthropic-ai/claude-agent-sdk-linux-x64-musl": "0.3.287", "@anthropic-ai/claude-agent-sdk-win32-arm64": "0.3.287", "@anthropic-ai/claude-agent-sdk-win32-x64": "0.3.287" }, "peerDependencies": { "@anthropic-ai/sdk": ">=0.93.0", "@modelcontextprotocol/sdk": "^1.29.0", "zod": "^4.0.0" } }, "sha512-DrYUMzmSVfL1VciNDo/9BhxiVnTsSCKVzxLHB3+NvvRiyN4pfWTKFrUzQesPnWswds9x1Ir10Gi6GRsnjT0UkA=="],
++
++    "@anthropic-ai/claude-agent-sdk-darwin-arm64": ["@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.287", "", { "os": "darwin", "cpu": "arm64" }, "sha512-Ic9GCrPBmMroLi7q+IeQQdtVDQLOaaSxkH1NzPsSRZxSvFcMH6M7zz/LahzlLQTdDyebcyMLk4aBXl4H8NnbFw=="],
++
++    "@anthropic-ai/claude-agent-sdk-darwin-x64": ["@anthropic-ai/claude-agent-sdk-darwin-x64@0.3.287", "", { "os": "darwin", "cpu": "x64" }, "sha512-7BxpyKMkzLQxCdq4OEnrjtLRC3O69l0LSBZYyUPXPTCFTnvzqpELjPRUssyW9auKEtVoh8eTySwC2rwGzuMUqA=="],
++
++    "@anthropic-ai/claude-agent-sdk-linux-arm64": ["@anthropic-ai/claude-agent-sdk-linux-arm64@0.3.287", "", { "os": "linux", "cpu": "arm64" }, "sha512-CWqO5p3YSBmpi/qHywul0re6fjljbDMZVj45PouNb1Qqws2Wi2h/Wp/ojOnfQAmq4m29pV2qgDnN2UtjaOobKA=="],
++
++    "@anthropic-ai/claude-agent-sdk-linux-arm64-musl": ["@anthropic-ai/claude-agent-sdk-linux-arm64-musl@0.3.287", "", { "os": "linux", "cpu": "arm64" }, "sha512-2WuRGYigs03B0Z7EnG72Ogiz1cMWIAyTwmV+DpNelhFeKb9VUevLkVRvS9nVQvyin/sO3FCBHV8dYsgZEwpmvQ=="],
++
++    "@anthropic-ai/claude-agent-sdk-linux-x64": ["@anthropic-ai/claude-agent-sdk-linux-x64@0.3.287", "", { "os": "linux", "cpu": "x64" }, "sha512-/6Zw5nym4xfc2eFGaIrS7dt7JoBgASsGUnLWMoPV4M1hGH0tOSPzpixfb4OWO6r9iw9Nn/Zk5Ke1KRuMuja2+Q=="],
++
++    "@anthropic-ai/claude-agent-sdk-linux-x64-musl": ["@anthropic-ai/claude-agent-sdk-linux-x64-musl@0.3.287", "", { "os": "linux", "cpu": "x64" }, "sha512-be7lBO3WihsGbGQbMCAowxmt8vqGgmUo2HkbBee8jrch04LG4LCRj6Ry/gHtYSTle30WAnoyqCLsPHFj064waw=="],
++
++    "@anthropic-ai/claude-agent-sdk-win32-arm64": ["@anthropic-ai/claude-agent-sdk-win32-arm64@0.3.287", "", { "os": "win32", "cpu": "arm64" }, "sha512-6AdDoLnnVG9aRrWoGVQjS3i4+hceCGFEHVPkMBzbVFs76G1WKlY/ZMnELu3X+ZE5QJFT3j4qqmdJ0y+QbrycEg=="],
++
++    "@anthropic-ai/claude-agent-sdk-win32-x64": ["@anthropic-ai/claude-agent-sdk-win32-x64@0.3.287", "", { "os": "win32", "cpu": "x64" }, "sha512-fczDcWG2Hu+nYQgxeQEsGn5l+3M06RpJXysIsu/BmHTPl7UceTfTpSYr6O/9GU/sNhU0CADJaIIZNwQTfK0DWw=="],
++
++    "@anthropic-ai/sdk": ["@anthropic-ai/sdk@0.132.1", "", { "dependencies": { "json-schema-to-ts": "^3.1.1", "standardwebhooks": "^1.0.0" }, "peerDependencies": { "zod": "^3.25.0 || ^4.0.0" }, "optionalPeers": ["zod"], "bin": { "anthropic-ai-sdk": "bin/cli" } }, "sha512-Dg+Rd0effi+4FyNwgEx6JXl9COefsZ3C7BOPSKYIWboQOEIi9HXtu1WBdND0DIgMF7Qt1vuCSjsbs7sjUkzJuQ=="],
++
++    "@babel/runtime": ["@babel/runtime@7.29.10", "", {}, "sha512-NpugTzbKgGrNe45Ui32cN8vCFFMxVtP/9rtfwv0nP5FRDAjvYBxJcLVpYA9mr1jxP6cnIT7x9LUzuDTbWYYNRA=="],
++
++    "@hono/node-server": ["@hono/node-server@2.1.4", "", { "peerDependencies": { "hono": "^4 || ^5.0.0-0" } }, "sha512-2g1qeHl4BduwDn6L8nkAvDrPUWPMlkQ//a5NhP/zIyaXKMjZNRV+cG9Csu+BiJFf6+68pqzjf4Hi5sJGKHuS1g=="],
++
++    "@modelcontextprotocol/sdk": ["@modelcontextprotocol/sdk@1.32.1", "", { "dependencies": { "@hono/node-server": "^1.19.9 || ^2.0.5", "ajv": "^8.17.1", "ajv-formats": "^3.0.1", "content-type": "^1.0.5", "cors": "^2.8.5", "cross-spawn": "^7.0.5", "eventsource": "^3.0.2", "eventsource-parser": "^3.0.0", "express": "^5.2.1", "express-rate-limit": "^8.2.1", "hono": "^4.11.4", "jose": "^6.1.3", "json-schema-typed": "^8.0.2", "pkce-challenge": "^5.0.0", "raw-body": "^3.0.0", "zod": "^3.25 || ^4.0", "zod-to-json-schema": "^3.25.1" }, "peerDependencies": { "@cfworker/json-schema": "^4.1.1" }, "optionalPeers": ["@cfworker/json-schema"] }, "sha512-2DdE+SJDtzLEEWzY1ZjY7Q+VcPhcV1KisD3zI4u0XZyktsjHum1mwbMI+JaulUBi2OZk+KJAi2uPXzxichPkdw=="],
++
++    "@stablelib/base64": ["@stablelib/base64@1.0.1", "", {}, "sha512-1bnPQqSxSuc3Ii6MhBysoWCg58j97aUjuCSZrGSmDxNqtytIi0k8utUenAwTZN4V5mXXYGsVUI9zeBqy+jBOSQ=="],
++
++    "accepts": ["accepts@2.0.0", "", { "dependencies": { "mime-types": "^3.0.0", "negotiator": "^1.0.0" } }, "sha512-5cvg6CtKwfgdmVqY1WIiXKc3Q1bkRqGLi+2W/6ao+6Y7gu/RCwRuAhGEzh5B4KlszSuTLgZYuqFqo5bImjNKng=="],
++
++    "ajv": ["ajv@8.20.0", "", { "dependencies": { "fast-deep-equal": "^3.1.3", "fast-uri": "^3.0.1", "json-schema-traverse": "^1.0.0", "require-from-string": "^2.0.2" } }, "sha512-Thbli+OlOj+iMPYFBVBfJ3OmCAnaSyNn4M1vz9T6Gka5Jt9ba/HIR56joy65tY6kx/FCF5VXNB819Y7/GUrBGA=="],
++
++    "ajv-formats": ["ajv-formats@3.0.1", "", { "dependencies": { "ajv": "^8.0.0" } }, "sha512-8iUql50EUR+uUcdRQ3HDqa6EVyo3docL8g5WJ3FNcWmu62IbkGUue/pEyLBW8VGKKucTPgqeks4fIU1DA4yowQ=="],
++
++    "body-parser": ["body-parser@2.3.0", "", { "dependencies": { "bytes": "^3.1.2", "content-type": "^2.0.0", "debug": "^4.4.3", "http-errors": "^2.0.1", "iconv-lite": "^0.7.2", "on-finished": "^2.4.1", "qs": "^6.15.2", "raw-body": "^3.0.2", "type-is": "^2.1.0" } }, "sha512-2cGmJupaNgg+QUwVLAucDuWuoMZ6EX9iHDRswZ5lsNYEmwPaRknMPCLZz07yTzVq/83p4o/wzbDZbBrTvGGTIw=="],
++
++    "bytes": ["bytes@3.1.2", "", {}, "sha512-/Nf7TyzTx6S3yRJObOAV7956r8cr2+Oj8AC5dt8wSP3BQAoeX58NoHyCU8P8zGkNXStjTSi6fzO6F0pBdcYbEg=="],
++
++    "call-bind-apply-helpers": ["call-bind-apply-helpers@1.0.2", "", { "dependencies": { "es-errors": "^1.3.0", "function-bind": "^1.1.2" } }, "sha512-Sp1ablJ0ivDkSzjcaJdxEunN5/XvksFJ2sMBFfq6x0ryhQV/2b/KwFe21cMpmHtPOSij8K99/wSfoEuTObmuMQ=="],
++
++    "call-bound": ["call-bound@1.0.4", "", { "dependencies": { "call-bind-apply-helpers": "^1.0.2", "get-intrinsic": "^1.3.0" } }, "sha512-+ys997U96po4Kx/ABpBCqhA9EuxJaQWDQg7295H4hBphv3IZg0boBKuwYpt4YXp6MZ5AmZQnU/tyMTlRpaSejg=="],
++
++    "content-disposition": ["content-disposition@1.1.0", "", {}, "sha512-5jRCH9Z/+DRP7rkvY83B+yGIGX96OYdJmzngqnw2SBSxqCFPd0w2km3s5iawpGX8krnwSGmF0FW5Nhr0Hfai3g=="],
++
++    "content-type": ["content-type@1.0.5", "", {}, "sha512-nTjqfcBFEipKdXCv4YDQWCfmcLZKm81ldF0pAopTvyrFGVbcR6P/VAAd5G7N+0tTr8QqiU0tFadD6FK4NtJwOA=="],
++
++    "cookie": ["cookie@0.7.2", "", {}, "sha512-yki5XnKuf750l50uGTllt6kKILY4nQ1eNIQatoXEByZ5dWgnKqbnqmTrBE5B4N7lrMJKQ2ytWMiTO2o0v6Ew/w=="],
++
++    "cookie-signature": ["cookie-signature@1.2.2", "", {}, "sha512-D76uU73ulSXrD1UXF4KE2TMxVVwhsnCgfAyTg9k8P6KGZjlXKrOLe4dJQKI3Bxi5wjesZoFXJWElNWBjPZMbhg=="],
++
++    "cors": ["cors@2.8.6", "", { "dependencies": { "object-assign": "^4", "vary": "^1" } }, "sha512-tJtZBBHA6vjIAaF6EnIaq6laBBP9aq/Y3ouVJjEfoHbRBcHBAHYcMh/w8LDrk2PvIMMq8gmopa5D4V8RmbrxGw=="],
++
++    "cross-spawn": ["cross-spawn@7.0.6", "", { "dependencies": { "path-key": "^3.1.0", "shebang-command": "^2.0.0", "which": "^2.0.1" } }, "sha512-uV2QOWP2nWzsy2aMp8aRibhi9dlzF5Hgh5SHaB9OiTGEyDTiJJyx0uy51QXdyWbtAHNua4XJzUKca3OzKUd3vA=="],
++
++    "debug": ["debug@4.4.3", "", { "dependencies": { "ms": "^2.1.3" }, "peerDependencies": { "supports-color": "*" }, "optionalPeers": ["supports-color"] }, "sha512-RGwwWnwQvkVfavKVt22FGLw+xYSdzARwm0ru6DhTVA3umU5hZc28V3kO4stgYryrTlLpuvgI9GiijltAjNbcqA=="],
++
++    "depd": ["depd@2.0.0", "", {}, "sha512-g7nH6P6dyDioJogAAGprGpCtVImJhpPk/roCzdb3fIh61/s/nPsfR6onyMwkCAR/OlC3yBC0lESvUoQEAssIrw=="],
++
++    "diff": ["diff@9.0.0", "", {}, "sha512-svtcdpS8CgJyqAjEQIXdb3OjhFVVYjzGAPO8WGCmRbrml64SPw/jJD4GoE98aR7r25A0XcgrK3F02yw9R/vhQw=="],
++
++    "dunder-proto": ["dunder-proto@1.0.1", "", { "dependencies": { "call-bind-apply-helpers": "^1.0.1", "es-errors": "^1.3.0", "gopd": "^1.2.0" } }, "sha512-KIN/nDJBQRcXw0MLVhZE9iQHmG68qAVIBg9CqmUYjmQIhgij9U5MFvrqkUL5FbtyyzZuOeOt0zdeRe4UY7ct+A=="],
++
++    "ee-first": ["ee-first@1.1.1", "", {}, "sha512-WMwm9LhRUo+WUaRN+vRuETqG89IgZphVSNkdFgeb6sS/E4OrDIN7t48CAewSHXc6C8lefD8KKfr5vY61brQlow=="],
++
++    "encodeurl": ["encodeurl@2.0.0", "", {}, "sha512-Q0n9HRi4m6JuGIV1eFlmvJB7ZEVxu93IrMyiMsGC0lrMJMWzRgx6WGquyfQgZVb31vhGgXnfmPNNXmxnOkRBrg=="],
++
++    "es-define-property": ["es-define-property@1.0.1", "", {}, "sha512-e3nRfgfUZ4rNGL232gUgX06QNyyez04KdjFrF+LTRoOXmrOgFKDg4BCdsjW8EnT69eqdYGmRpJwiPVYNrCaW3g=="],
++
++    "es-errors": ["es-errors@1.3.0", "", {}, "sha512-Zf5H2Kxt2xjTvbJvP2ZWLEICxA6j+hAmMzIlypy4xcBg1vKVnx89Wy0GbS+kf5cwCVFFzdCFh2XSCFNULS6csw=="],
++
++    "es-object-atoms": ["es-object-atoms@1.1.2", "", { "dependencies": { "es-errors": "^1.3.0" } }, "sha512-HWcBoN6NileqtSydK2FqHbS/LoDd2pqrnQHLyJzBj4kOp/ky2MWMN694xOfkK8/SnUsW2DH7EfyVlydKCsm1Zw=="],
++
++    "escape-html": ["escape-html@1.0.3", "", {}, "sha512-NiSupZ4OeuGwr68lGIeym/ksIZMJodUGOSCZ/FSnTxcrekbvqrgdUxlJOMpijaKZVjAJrWrGs/6Jy8OMuyj9ow=="],
++
++    "etag": ["etag@1.8.1", "", {}, "sha512-aIL5Fx7mawVa300al2BnEE4iNvo1qETxLrPI/o05L7z6go7fCw1J6EQmbK4FmJ2AS7kgVF/KEZWufBfdClMcPg=="],
++
++    "eventsource": ["eventsource@3.0.7", "", { "dependencies": { "eventsource-parser": "^3.0.1" } }, "sha512-CRT1WTyuQoD771GW56XEZFQ/ZoSfWid1alKGDYMmkt2yl8UXrVR4pspqWNEcqKvVIzg6PAltWjxcSSPrboA4iA=="],
++
++    "eventsource-parser": ["eventsource-parser@3.1.1", "", {}, "sha512-EKN1vKAMcZ8MlYMpaNuxN6R9yakzH6uajHcHVTqWJzvu5pWw9DyhbP35HH8MVBQ+dZjAfDxk+A8NiR9KWaXiyQ=="],
++
++    "express": ["express@5.2.1", "", { "dependencies": { "accepts": "^2.0.0", "body-parser": "^2.2.1", "content-disposition": "^1.0.0", "content-type": "^1.0.5", "cookie": "^0.7.1", "cookie-signature": "^1.2.1", "debug": "^4.4.0", "depd": "^2.0.0", "encodeurl": "^2.0.0", "escape-html": "^1.0.3", "etag": "^1.8.1", "finalhandler": "^2.1.0", "fresh": "^2.0.0", "http-errors": "^2.0.0", "merge-descriptors": "^2.0.0", "mime-types": "^3.0.0", "on-finished": "^2.4.1", "once": "^1.4.0", "parseurl": "^1.3.3", "proxy-addr": "^2.0.7", "qs": "^6.14.0", "range-parser": "^1.2.1", "router": "^2.2.0", "send": "^1.1.0", "serve-static": "^2.2.0", "statuses": "^2.0.1", "type-is": "^2.0.1", "vary": "^1.1.2" } }, "sha512-hIS4idWWai69NezIdRt2xFVofaF4j+6INOpJlVOLDO8zXGpUVEVzIYk12UUi2JzjEzWL3IOAxcTubgz9Po0yXw=="],
++
++    "express-rate-limit": ["express-rate-limit@8.7.1", "", { "dependencies": { "debug": "^4.4.3", "ip-address": "^10.2.0" }, "peerDependencies": { "express": ">= 4.11" } }, "sha512-2FXbqkygil3mZiXzEtM0IjE/UBmBNot0J1GEVrJT4JbrvwOSoEtqtO+wHbiMQELWe1eNvHoYRg2dkjOid+6JkA=="],
++
++    "fast-deep-equal": ["fast-deep-equal@3.1.3", "", {}, "sha512-f3qQ9oQy9j2AhBe/H9VC91wLmKBCCU/gDOnKNAYG5hswO7BLKj09Hc5HYNz9cGI++xlpDCIgDaitVs03ATR84Q=="],
++
++    "fast-sha256": ["fast-sha256@1.3.0", "", {}, "sha512-n11RGP/lrWEFI/bWdygLxhI+pVeo1ZYIVwvvPkW7azl/rOy+F3HYRZ2K5zeE9mmkhQppyv9sQFx0JM9UabnpPQ=="],
++
++    "fast-uri": ["fast-uri@3.1.8", "", {}, "sha512-GZMtZUTNRpOVIECoXwLNZS5xUGE+mVNbTB8h/7Rwh2TFWcBQiPzTgyZi05BF9UMZKkLJv8XBRJTlU7zg8+ZfMg=="],
++
++    "finalhandler": ["finalhandler@2.1.1", "", { "dependencies": { "debug": "^4.4.0", "encodeurl": "^2.0.0", "escape-html": "^1.0.3", "on-finished": "^2.4.1", "parseurl": "^1.3.3", "statuses": "^2.0.1" } }, "sha512-S8KoZgRZN+a5rNwqTxlZZePjT/4cnm0ROV70LedRHZ0p8u9fRID0hJUZQpkKLzro8LfmC8sx23bY6tVNxv8pQA=="],
++
++    "forwarded": ["forwarded@0.2.0", "", {}, "sha512-buRG0fpBtRHSTCOASe6hD258tEubFoRLb4ZNA6NxMVHNw2gOcwHo9wyablzMzOA5z9xA9L1KNjk/Nt6MT9aYow=="],
++
++    "fresh": ["fresh@2.0.0", "", {}, "sha512-Rx/WycZ60HOaqLKAi6cHRKKI7zxWbJ31MhntmtwMoaTeF7XFH9hhBp8vITaMidfljRQ6eYWCKkaTK+ykVJHP2A=="],
++
++    "function-bind": ["function-bind@1.1.2", "", {}, "sha512-7XHNxH7qX9xG5mIwxkhumTox/MIRNcOgDrxWsMt2pAr23WHp6MrRlN7FBSFpCpr+oVO0F744iUgR82nJMfG2SA=="],
++
++    "get-intrinsic": ["get-intrinsic@1.3.0", "", { "dependencies": { "call-bind-apply-helpers": "^1.0.2", "es-define-property": "^1.0.1", "es-errors": "^1.3.0", "es-object-atoms": "^1.1.1", "function-bind": "^1.1.2", "get-proto": "^1.0.1", "gopd": "^1.2.0", "has-symbols": "^1.1.0", "hasown": "^2.0.2", "math-intrinsics": "^1.1.0" } }, "sha512-9fSjSaos/fRIVIp+xSJlE6lfwhES7LNtKaCBIamHsjr2na1BiABJPo0mOjjz8GJDURarmCPGqaiVg5mfjb98CQ=="],
++
++    "get-proto": ["get-proto@1.0.1", "", { "dependencies": { "dunder-proto": "^1.0.1", "es-object-atoms": "^1.0.0" } }, "sha512-sTSfBjoXBp89JvIKIefqw7U2CCebsc74kiY6awiGogKtoSGbgjYE/G/+l9sF3MWFPNc9IcoOC4ODfKHfxFmp0g=="],
++
++    "gopd": ["gopd@1.2.0", "", {}, "sha512-ZUKRh6/kUFoAiTAtTYPZJ3hw9wNxx+BIBOijnlG9PnrJsCcSjs1wyyD6vJpaYtgnzDrKYRSqf3OO6Rfa93xsRg=="],
++
++    "has-symbols": ["has-symbols@1.1.0", "", {}, "sha512-1cDNdwJ2Jaohmb3sg4OmKaMBwuC48sYni5HUw2DvsC8LjGTLK9h+eb1X6RyuOHe4hT0ULCW68iomhjUoKUqlPQ=="],
++
++    "hasown": ["hasown@2.0.4", "", { "dependencies": { "function-bind": "^1.1.2" } }, "sha512-T2UbfbBEF32wiepXIsMlTW9+dDYC6wMh/t/vYA4tuOMKqWz/n3vr1NFSxQiyP+zk2mXsoMA/i/7qV6LKut1t1A=="],
++
++    "hono": ["hono@4.13.13", "", {}, "sha512-CQ46U0ZkAGmbT/4UxdzzGJpacP2IeKgY4a5/tOI9AABbpOMfK739wfDXmv1usCk+3RkKj1hQy4/fjhiwa2xlrA=="],
++
++    "http-errors": ["http-errors@2.0.1", "", { "dependencies": { "depd": "~2.0.0", "inherits": "~2.0.4", "setprototypeof": "~1.2.0", "statuses": "~2.0.2", "toidentifier": "~1.0.1" } }, "sha512-4FbRdAX+bSdmo4AUFuS0WNiPz8NgFt+r8ThgNWmlrjQjt1Q7ZR9+zTlce2859x4KSXrwIsaeTqDoKQmtP8pLmQ=="],
++
++    "iconv-lite": ["iconv-lite@0.7.3", "", { "dependencies": { "safer-buffer": ">= 2.1.2 < 3.0.0" } }, "sha512-IKXpvIzjnC9XTAUbVBcMfGS0EPaIXtW6v+zr+RRp+hqULEpo0owZax6wyRwPOJbWbzjYspQwusTsfVr0ifh4uQ=="],
++
++    "inherits": ["inherits@2.0.4", "", {}, "sha512-k/vGaX4/Yla3WzyMCvTQOXYeIHvqOKtnqBduzTHpzpQZzAskKMhZ2K+EnBiSM9zGSoIFeMpXKxa4dYeZIQqewQ=="],
++
++    "ip-address": ["ip-address@10.7.3", "", {}, "sha512-A1kdq/tSb5QjvKvAMgIoEvDBIgL7qaqVP/jkvSwYYRZ9iEzvPpopxp2wQfu3SuZRHtpHNxMn8Fs0bS+gf5Xmwg=="],
++
++    "ipaddr.js": ["ipaddr.js@1.9.1", "", {}, "sha512-0KI/607xoxSToH7GjN1FfSbLoU0+btTicjsQSWQlh/hZykN8KpmMf7uYwPW3R+akZ6R/w18ZlXSHBYXiYUPO3g=="],
++
++    "is-promise": ["is-promise@4.0.0", "", {}, "sha512-hvpoI6korhJMnej285dSg6nu1+e6uxs7zG3BYAm5byqDsgJNWwxzM6z6iZiAgQR4TJ30JmBTOwqZUw3WlyH3AQ=="],
++
++    "isexe": ["isexe@2.0.0", "", {}, "sha512-RHxMLp9lnKHGHRng9QFhRCMbYAcVpn69smSGcq3f36xjgVVWThj4qqLbTLlq7Ssj8B+fIQ1EuCEGI2lKsyQeIw=="],
++
++    "jose": ["jose@6.2.12", "", {}, "sha512-9NiFmJEex0sy2Dk58j2UGBSHgUs2ypF9eZSu4L6vjOX3Dp96Sw1F3uL+H+D1sx02jZZdzUT0HgvCy59CuvXcWw=="],
++
++    "json-schema-to-ts": ["json-schema-to-ts@3.1.1", "", { "dependencies": { "@babel/runtime": "^7.18.3", "ts-algebra": "^2.0.0" } }, "sha512-+DWg8jCJG2TEnpy7kOm/7/AxaYoaRbjVB4LFZLySZlWn8exGs3A4OLJR966cVvU26N7X9TWxl+Jsw7dzAqKT6g=="],
++
++    "json-schema-traverse": ["json-schema-traverse@1.0.0", "", {}, "sha512-NM8/P9n3XjXhIZn1lLhkFaACTOURQXjWhV4BA/RnOv8xvgqtqpAX9IO4mRQxSx1Rlo4tqzeqb0sOlruaOy3dug=="],
++
++    "json-schema-typed": ["json-schema-typed@8.0.2", "", {}, "sha512-fQhoXdcvc3V28x7C7BMs4P5+kNlgUURe2jmUT1T//oBRMDrqy1QPelJimwZGo7Hg9VPV3EQV5Bnq4hbFy2vetA=="],
++
++    "math-intrinsics": ["math-intrinsics@1.1.0", "", {}, "sha512-/IXtbwEk5HTPyEwyKX6hGkYXxM9nbj64B+ilVJnC/R6B0pH5G4V3b0pVbL7DBj4tkhBAppbQUlf6F6Xl9LHu1g=="],
++
++    "media-typer": ["media-typer@1.1.1", "", {}, "sha512-yz3xRaG20c6/BOzvYoDaGtPmGscs7YivItZEEqe6GbwNfHuxu9YNmvnEkMzKldAGY4/80pRcQRZSEnhquk9XuQ=="],
++
++    "merge-descriptors": ["merge-descriptors@2.0.0", "", {}, "sha512-Snk314V5ayFLhp3fkUREub6WtjBfPdCPY1Ln8/8munuLuiYhsABgBVWsozAG+MWMbVEvcdcpbi9R7ww22l9Q3g=="],
++
++    "mime-db": ["mime-db@1.54.0", "", {}, "sha512-aU5EJuIN2WDemCcAp2vFBfp/m4EAhWJnUNSSw0ixs7/kXbd6Pg64EmwJkNdFhB8aWt1sH2CTXrLxo/iAGV3oPQ=="],
++
++    "mime-types": ["mime-types@3.0.2", "", { "dependencies": { "mime-db": "^1.54.0" } }, "sha512-Lbgzdk0h4juoQ9fCKXW4by0UJqj+nOOrI9MJ1sSj4nI8aI2eo1qmvQEie4VD1glsS250n15LsWsYtCugiStS5A=="],
++
++    "ms": ["ms@2.1.3", "", {}, "sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA=="],
++
++    "negotiator": ["negotiator@1.1.0", "", { "dependencies": { "content-type": "^2.1.0" } }, "sha512-NMPBRMJgiQHjbd8phG3Vebdx4kZ1H121rbl5IkMqeOsahptB9BKo/d7oJ3zTXqTgagn2bWlNSXkh0QUGM31RYg=="],
++
++    "object-assign": ["object-assign@4.1.1", "", {}, "sha512-rJgTQnkUnH1sFw8yT6VSU3zD3sWmu6sZhIseY8VX+GRu3P6F7Fu+JNDoXfklElbLJSnc3FUQHVe4cU5hj+BcUg=="],
++
++    "object-inspect": ["object-inspect@1.13.4", "", {}, "sha512-W67iLl4J2EXEGTbfeHCffrjDfitvLANg0UlX3wFUUSTx92KXRFegMHUVgSqE+wvhAbi4WqjGg9czysTV2Epbew=="],
++
++    "on-finished": ["on-finished@2.4.1", "", { "dependencies": { "ee-first": "1.1.1" } }, "sha512-oVlzkg3ENAhCk2zdv7IJwd/QUD4z2RxRwpkcGY8psCVcCYZNq4wYnVWALHM+brtuJjePWiYF/ClmuDr8Ch5+kg=="],
++
++    "once": ["once@1.4.0", "", { "dependencies": { "wrappy": "1" } }, "sha512-lNaJgI+2Q5URQBkccEKHTQOPaXdUxnZZElQTZY0MFUAuaEqe1E+Nyvgdz/aIyNi6Z9MzO5dv1H8n58/GELp3+w=="],
++
++    "parseurl": ["parseurl@1.3.3", "", {}, "sha512-CiyeOxFT/JZyN5m0z9PfXw4SCBJ6Sygz1Dpl0wqjlhDEGGBP1GnsUVEL0p63hoG1fcj3fHynXi9NYO4nWOL+qQ=="],
++
++    "path-key": ["path-key@3.1.1", "", {}, "sha512-ojmeN0qd+y0jszEtoY48r0Peq5dwMEkIlCOu6Q5f41lfkswXuKtYrhgoTpLnyIcHm24Uhqx+5Tqm2InSwLhE6Q=="],
++
++    "path-to-regexp": ["path-to-regexp@8.4.2", "", {}, "sha512-qRcuIdP69NPm4qbACK+aDogI5CBDMi1jKe0ry5rSQJz8JVLsC7jV8XpiJjGRLLol3N+R5ihGYcrPLTno6pAdBA=="],
++
++    "pkce-challenge": ["pkce-challenge@5.0.1", "", {}, "sha512-wQ0b/W4Fr01qtpHlqSqspcj3EhBvimsdh0KlHhH8HRZnMsEa0ea2fTULOXOS9ccQr3om+GcGRk4e+isrZWV8qQ=="],
++
++    "proxy-addr": ["proxy-addr@2.0.8", "", { "dependencies": { "forwarded": "0.2.0", "ipaddr.js": "1.9.1" } }, "sha512-5nnx0yGyVUcY6t9RnWcARWtwT9F1D8O9rt08htPvnd49W1IgZtmLkhu9WfMzQj1cFxjHIO6connUNVW5k7AVyQ=="],
++
++    "qs": ["qs@6.16.0", "", { "dependencies": { "es-define-property": "^1.0.1", "side-channel": "^1.1.1" } }, "sha512-h6fhOIaRrID2CbEY2fqs+7t+UXZo+MLAnU5gRIq85uFtdiUPCdsApMlHhXogKVM4HM2DVbIjGNTTYH2OcmP1vA=="],
++
++    "range-parser": ["range-parser@1.3.0", "", {}, "sha512-hek2mFQpPuI4E1BBKrSto+BU3e3x4xuarsbiwr3+lf7p44juvFMV0XFWQAP3xUyqXA4RrXLIoaSUGbSt056ZMw=="],
++
++    "raw-body": ["raw-body@3.0.2", "", { "dependencies": { "bytes": "~3.1.2", "http-errors": "~2.0.1", "iconv-lite": "~0.7.0", "unpipe": "~1.0.0" } }, "sha512-K5zQjDllxWkf7Z5xJdV0/B0WTNqx6vxG70zJE4N0kBs4LovmEYWJzQGxC9bS9RAKu3bgM40lrd5zoLJ12MQ5BA=="],
++
++    "require-from-string": ["require-from-string@2.0.2", "", {}, "sha512-Xf0nWe6RseziFMu+Ap9biiUbmplq6S9/p+7w7YXP/JBHhrUDDUhwa+vANyubuqfZWTveU//DYVGsDG7RKL/vEw=="],
++
++    "router": ["router@2.2.0", "", { "dependencies": { "debug": "^4.4.0", "depd": "^2.0.0", "is-promise": "^4.0.0", "parseurl": "^1.3.3", "path-to-regexp": "^8.0.0" } }, "sha512-nLTrUKm2UyiL7rlhapu/Zl45FwNgkZGaCpZbIHajDYgwlJCOzLSk+cIPAnsEqV955GjILJnKbdQC1nVPz+gAYQ=="],
++
++    "safer-buffer": ["safer-buffer@2.1.2", "", {}, "sha512-YZo3K82SD7Riyi0E1EQPojLz7kpepnSQI9IyPbHHg1XXXevb5dJI7tpyN2ADxGcQbHG7vcyRHk0cbwqcQriUtg=="],
++
++    "send": ["send@1.2.1", "", { "dependencies": { "debug": "^4.4.3", "encodeurl": "^2.0.0", "escape-html": "^1.0.3", "etag": "^1.8.1", "fresh": "^2.0.0", "http-errors": "^2.0.1", "mime-types": "^3.0.2", "ms": "^2.1.3", "on-finished": "^2.4.1", "range-parser": "^1.2.1", "statuses": "^2.0.2" } }, "sha512-1gnZf7DFcoIcajTjTwjwuDjzuz4PPcY2StKPlsGAQ1+YH20IRVrBaXSWmdjowTJ6u8Rc01PoYOGHXfP1mYcZNQ=="],
++
++    "serve-static": ["serve-static@2.2.1", "", { "dependencies": { "encodeurl": "^2.0.0", "escape-html": "^1.0.3", "parseurl": "^1.3.3", "send": "^1.2.0" } }, "sha512-xRXBn0pPqQTVQiC8wyQrKs2MOlX24zQ0POGaj0kultvoOCstBQM5yvOhAVSUwOMjQtTvsPWoNCHfPGwaaQJhTw=="],
++
++    "setprototypeof": ["setprototypeof@1.2.0", "", {}, "sha512-E5LDX7Wrp85Kil5bhZv46j8jOeboKq5JMmYM3gVGdGH8xFpPWXUMsNrlODCrkoxMEeNi/XZIwuRvY4XNwYMJpw=="],
++
++    "shebang-command": ["shebang-command@2.0.0", "", { "dependencies": { "shebang-regex": "^3.0.0" } }, "sha512-kHxr2zZpYtdmrN1qDjrrX/Z1rR1kG8Dx+gkpK1G4eXmvXswmcE1hTWBWYUzlraYw1/yZp6YuDY77YtvbN0dmDA=="],
++
++    "shebang-regex": ["shebang-regex@3.0.0", "", {}, "sha512-7++dFhtcx3353uBaq8DDR4NuxBetBzC7ZQOhmTQInHEd6bSrXdiEyzCvG07Z44UYdLShWUyXt5M/yhz8ekcb1A=="],
++
++    "side-channel": ["side-channel@1.1.1", "", { "dependencies": { "es-errors": "^1.3.0", "object-inspect": "^1.13.4", "side-channel-list": "^1.0.1", "side-channel-map": "^1.0.1", "side-channel-weakmap": "^1.0.2" } }, "sha512-6x6dK6zJdpTzF4sQeNYxwtvBzf6Eg4GtlesS94HOvTudUeyK2WXAaIfmDgsyslYrRBeFIlsi54AYsFGUuhmvrQ=="],
++
++    "side-channel-list": ["side-channel-list@1.0.1", "", { "dependencies": { "es-errors": "^1.3.0", "object-inspect": "^1.13.4" } }, "sha512-mjn/0bi/oUURjc5Xl7IaWi/OJJJumuoJFQJfDDyO46+hBWsfaVM65TBHq2eoZBhzl9EchxOijpkbRC8SVBQU0w=="],
++
++    "side-channel-map": ["side-channel-map@1.0.1", "", { "dependencies": { "call-bound": "^1.0.2", "es-errors": "^1.3.0", "get-intrinsic": "^1.2.5", "object-inspect": "^1.13.3" } }, "sha512-VCjCNfgMsby3tTdo02nbjtM/ewra6jPHmpThenkTYh8pG9ucZ/1P8So4u4FGBek/BjpOVsDCMoLA/iuBKIFXRA=="],
++
++    "side-channel-weakmap": ["side-channel-weakmap@1.0.2", "", { "dependencies": { "call-bound": "^1.0.2", "es-errors": "^1.3.0", "get-intrinsic": "^1.2.5", "object-inspect": "^1.13.3", "side-channel-map": "^1.0.1" } }, "sha512-WPS/HvHQTYnHisLo9McqBHOJk2FkHO/tlpvldyrnem4aeQp4hai3gythswg6p01oSoTl58rcpiFAjF2br2Ak2A=="],
++
++    "standardwebhooks": ["standardwebhooks@1.1.1", "", { "dependencies": { "@stablelib/base64": "^1.0.0", "fast-sha256": "^1.3.0" } }, "sha512-bCbX9ZEyFkWPsRz7Bl3NuQUJohmwGSev/yhr7vhaGPlc4AfIrspIRa6cPTBuI1ItmrTDJ4d/S2hCsfe4+vQGnQ=="],
++
++    "statuses": ["statuses@2.0.2", "", {}, "sha512-DvEy55V3DB7uknRo+4iOGT5fP1slR8wQohVdknigZPMpMstaKJQWhwiYBACJE3Ul2pTnATihhBYnRhZQHGBiRw=="],
++
++    "toidentifier": ["toidentifier@1.0.1", "", {}, "sha512-o5sSPKEkg/DIQNmH43V0/uerLrpzVedkUh8tGNvaeXpfpuwjKenlSox/2O/BTlZUtEe+JG7s5YhEz608PlAHRA=="],
++
++    "ts-algebra": ["ts-algebra@2.0.0", "", {}, "sha512-FPAhNPFMrkwz76P7cdjdmiShwMynZYN6SgOujD1urY4oNm80Ou9oMdmbR45LotcKOXoy7wSmHkRFE6Mxbrhefw=="],
++
++    "type-is": ["type-is@2.1.0", "", { "dependencies": { "content-type": "^2.0.0", "media-typer": "^1.1.0", "mime-types": "^3.0.0" } }, "sha512-faYHw0anBbc/kWF3zFTEnxSFOAGUX9GFbOBthvDdLsIlEoWOFOtS0zgCiQYwIskL9iGXZL3kAXD8OoZ4GmMATA=="],
++
++    "unpipe": ["unpipe@1.0.0", "", {}, "sha512-pjy2bYhSsufwWlKwPc+l3cN7+wuJlK6uz0YdJEOlQDbl6jo/YlPi4mb8agUkVC8BF7V8NuzeyPNqRksA3hztKQ=="],
++
++    "vary": ["vary@1.1.2", "", {}, "sha512-BNGbWLfd0eUPabhkXUVm0j8uuvREyTh5ovRa/dyow/BqAbZJyC+5fU+IzQOzmAKzYqYRAISoRhdQr3eIZ/PXqg=="],
++
++    "which": ["which@2.0.2", "", { "dependencies": { "isexe": "^2.0.0" }, "bin": { "node-which": "./bin/node-which" } }, "sha512-BLI3Tl1TW3Pvl70l3yq3Y64i+awpwXqsGBYWkkqMtnbXgrMD+yj7rhW0kuEDxzJaYXGjEW5ogapKNMEKNMjibA=="],
++
++    "wrappy": ["wrappy@1.0.2", "", {}, "sha512-l4Sp/DRseor9wL6EvV2+TuQn63dMkPjZ/sp9XkghTEbV9KlPS1xUsZ3u7/IQO4wxtcFB4bgpQPRcR3QCvezPcQ=="],
++
++    "zod": ["zod@4.6.5", "", {}, "sha512-v5l/aFXZQeai4awLbOpSoHecE9UiMrnfx75tEXLjNonXVARxQ5mOeipTjROUchszUNCqnE+hqAMujRsRHsut2Q=="],
++
++    "zod-to-json-schema": ["zod-to-json-schema@3.25.2", "", { "peerDependencies": { "zod": "^3.25.28 || ^4" } }, "sha512-O/PgfnpT1xKSDeQYSCfRI5Gy3hPf91mKVDuYLUHZJMiDFptvP41MSnWofm8dnCm0256ZNfZIM7DSzuSMAFnjHA=="],
++
++    "body-parser/content-type": ["content-type@2.1.0", "", {}, "sha512-mj7UPXE0jaqaOsukNZRUEfEi2AcL7C/vwmwcHV0O97eO1E1pxBZuyjlZrx5seTaNBg1U6+o35wpa35Qfcc+7ag=="],
++
++    "negotiator/content-type": ["content-type@2.1.0", "", {}, "sha512-mj7UPXE0jaqaOsukNZRUEfEi2AcL7C/vwmwcHV0O97eO1E1pxBZuyjlZrx5seTaNBg1U6+o35wpa35Qfcc+7ag=="],
++
++    "type-is/content-type": ["content-type@2.1.0", "", {}, "sha512-mj7UPXE0jaqaOsukNZRUEfEi2AcL7C/vwmwcHV0O97eO1E1pxBZuyjlZrx5seTaNBg1U6+o35wpa35Qfcc+7ag=="],
++  }
++}
+diff --git a/external_plugins/t3/bunfig.toml b/external_plugins/t3/bunfig.toml
+new file mode 100644
+index 0000000000000000000000000000000000000000..7112054b720266b866c74bc3b48350f67a252778
+--- /dev/null
++++ b/external_plugins/t3/bunfig.toml
+@@ -0,0 +1,4 @@
++# claude-agent-acp's SDK optionally installs a ~230 MB Claude Code binary per platform;
++# only its transcript converter is used here.
++[install]
++optional = false
+diff --git a/external_plugins/t3/package.json b/external_plugins/t3/package.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..5db105f7c76cab8a23353e9783441056719d7a81
+--- /dev/null
++++ b/external_plugins/t3/package.json
+@@ -0,0 +1,14 @@
++{
++  "name": "claude-channel-t3",
++  "version": "0.1.0",
++  "license": "Apache-2.0",
++  "type": "module",
++  "scripts": {
++    "start": "bun install --no-summary 1>&2 && bun server.ts"
++  },
++  "dependencies": {
++    "@agentclientprotocol/claude-agent-acp": "^0.86.0",
++    "@agentclientprotocol/sdk": "^1.7.0",
++    "@modelcontextprotocol/sdk": "^1.0.0"
++  }
++}
+diff --git a/external_plugins/t3/server.ts b/external_plugins/t3/server.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..958c2871abf3049e772d8f95686bf2ef649c4c6b
+--- /dev/null
++++ b/external_plugins/t3/server.ts
+@@ -0,0 +1,58 @@
++#!/usr/bin/env bun
++import { Server } from '@modelcontextprotocol/sdk/server/index.js'
++import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
++import { ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
++import { connect } from 'net'
++
++const SOCKET = process.env.HEX_HUB
++const THREAD = process.env.HEX_CHANNEL?.startsWith('plugin:t3@') ? process.env.HEX_THREAD : undefined
++
++const mcp = new Server(
++  { name: 't3', version: '0.1.0' },
++  {
++    capabilities: { tools: {}, experimental: { 'claude/channel': {} } },
++    instructions: [
++      'This session is one T3 Code thread. Unlike the chat apps, the user reads this session itself: T3 Code shows your text, tool calls and edits live as you work. So answer in plain text, as you would in a terminal; there is no reply tool here.',
++      '',
++      'Messages arrive as <channel source="t3" ts="...">. Images and files the user attaches show up in them as absolute paths: Read them. Your working directory is the project this thread was opened in.',
++    ].join('\n'),
++  },
++)
++
++mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [] }))
++
++function connectHub(): void {
++  const socket = connect(SOCKET!)
++  let buffer = ''
++  socket.setEncoding('utf8')
++  socket.on('connect', () => {
++    // Claude Code starts listening for channel notifications ~30ms after its last
++    // request to this server (tools/list) and never signals it; notifications
++    // before that are dropped. Saying hello flushes queued messages, so wait.
++    setTimeout(() => socket.write(JSON.stringify({ type: 'hello', thread: THREAD, session: process.env.CLAUDE_CODE_SESSION_ID }) + '\n'), 1000)
++  })
++  socket.on('data', (chunk: string) => {
++    buffer += chunk
++    for (let end = buffer.indexOf('\n'); end >= 0; end = buffer.indexOf('\n')) {
++      const event = JSON.parse(buffer.slice(0, end))
++      buffer = buffer.slice(end + 1)
++      if (event.type === 'inbound') {
++        mcp.notification({
++          method: 'notifications/claude/channel',
++          params: { content: event.content, meta: event.meta },
++        }).catch(err => process.stderr.write(`t3 channel: failed to deliver inbound to Claude: ${err}\n`))
++      }
++    }
++  })
++  socket.on('close', () => setTimeout(connectHub, 2000))
++  socket.on('error', () => {})
++}
++
++mcp.oninitialized = () => {
++  if (THREAD && SOCKET) connectHub()
++}
++
++await mcp.connect(new StdioServerTransport())
++
++process.stdin.on('end', () => process.exit(0))
++process.stdin.on('close', () => process.exit(0))
+diff --git a/external_plugins/t3/transcript.test.ts b/external_plugins/t3/transcript.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..038a2700eaeb5d2c0efa2db379d8cdda19949214
+--- /dev/null
++++ b/external_plugins/t3/transcript.test.ts
+@@ -0,0 +1,78 @@
++import { afterEach, beforeEach, expect, test } from 'bun:test'
++import { appendFileSync, mkdtempSync, writeFileSync } from 'fs'
++import { tmpdir } from 'os'
++import { join } from 'path'
++import type { SessionNotification } from '@agentclientprotocol/sdk'
++import { follow } from './transcript.ts'
++
++let dir: string
++let path: string
++let updates: SessionNotification['update'][]
++let ended: number
++let reader: ReturnType<typeof follow> | undefined
++
++const prompt = { type: 'user', origin: { kind: 'channel' }, isMeta: true, message: { content: '<channel source="t3">hi</channel>' } }
++const text = (id: string, words: string) => ({ type: 'assistant', message: { id, content: [{ type: 'text', text: words }] } })
++const bash = { type: 'assistant', message: { id: 'm2', content: [{ type: 'tool_use', id: 'tool1', name: 'Bash', input: { command: 'pwd' } }] } }
++const result = { type: 'user', uuid: 'u1', message: { content: [{ type: 'tool_result', tool_use_id: 'tool1', content: '/work' }] } }
++const done = { type: 'system', subtype: 'turn_duration' }
++
++beforeEach(() => {
++  dir = mkdtempSync(join(tmpdir(), 't3-transcript-'))
++  path = join(dir, 'session.jsonl')
++  updates = []
++  ended = 0
++})
++
++afterEach(() => reader?.close())
++
++function write(...entries: object[]) {
++  appendFileSync(path, entries.map(entry => JSON.stringify(entry) + '\n').join(''))
++}
++
++function start(fresh: boolean) {
++  reader = follow({ path, sessionId: 'thread', cwd: '/work', fresh, emit: n => void updates.push(n.update), end: () => void ended++ })
++}
++
++async function until(check: () => unknown, timeout = 3000) {
++  for (const end = Date.now() + timeout; Date.now() < end; await Bun.sleep(20)) if (check()) return
++  throw new Error('timed out')
++}
++
++test('a turn streams from where the transcript ends, without the channel prompt, and ends at its turn_duration', async () => {
++  write(prompt, text('m0', 'an earlier turn'), done)
++  start(false)
++  write(prompt, bash, result, text('m3', 'you are in /work'), done, text('m4', 'a later turn'))
++  await until(() => ended)
++  expect(updates.map(update => update.sessionUpdate)).toEqual(['tool_call', 'tool_call_update', 'agent_message_chunk'])
++  expect(updates.at(-1)).toMatchObject({ content: { type: 'text', text: 'you are in /work' } })
++  expect(ended).toBe(1)
++})
++
++test('a new session streams from its start, once its transcript appears', async () => {
++  start(true)
++  write(prompt, text('m1', 'hello'))
++  await until(() => updates.length)
++  expect(ended).toBe(0)
++  write(done)
++  await until(() => ended)
++  expect(updates).toEqual([expect.objectContaining({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'hello' } })])
++})
++
++test('a turn_duration before the prompt is an earlier turn ending, not this one', async () => {
++  start(true)
++  write(done, prompt, text('m1', 'still going'))
++  await until(() => updates.length)
++  expect(ended).toBe(0)
++})
++
++test('a line written in two pieces is read once it is whole', async () => {
++  start(true)
++  const line = JSON.stringify(text('m1', 'whole')) + '\n'
++  writeFileSync(path, JSON.stringify(prompt) + '\n' + line.slice(0, 20))
++  await Bun.sleep(100)
++  expect(updates).toEqual([])
++  appendFileSync(path, line.slice(20))
++  await until(() => updates.length)
++  expect(updates[0]).toMatchObject({ content: { text: 'whole' } })
++})
+diff --git a/external_plugins/t3/transcript.ts b/external_plugins/t3/transcript.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..b7396b2e3acd6df88e007d6c6ec73d385cbbda32
+--- /dev/null
++++ b/external_plugins/t3/transcript.ts
+@@ -0,0 +1,110 @@
++import { closeSync, fstatSync, mkdirSync, openSync, readSync, statSync, watch } from 'fs'
++import { homedir } from 'os'
++import { basename, dirname, join } from 'path'
++import { stripLocalCommandMetadata, toAcpNotifications } from '@agentclientprotocol/claude-agent-acp'
++import type { SessionNotification } from '@agentclientprotocol/sdk'
++
++const PROJECTS = join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'projects')
++const client = { sessionUpdate: async () => {} } as unknown as Parameters<typeof toAcpNotifications>[4]
++const logger = { log: () => {}, error: (...args: unknown[]) => process.stderr.write(`t3 hub: transcript: ${args.join(' ')}\n`) }
++
++export function transcriptPath(cwd: string, session: string) {
++  return join(PROJECTS, cwd.replace(/[^a-zA-Z0-9]/g, '-'), `${session}.jsonl`)
++}
++
++// Streams one turn of a session's transcript as ACP session/update notifications,
++// from where it ends now, or from its start when the session is new. Channel
++// prompts and slash commands are skipped: the client already shows what it sent.
++// Claude Code writes the transcript in batches, so the Stop hook can run before
++// the last reply is on disk; the turn ends at the transcript's own turn_duration
++// after the prompt. A /compact turn ends at its compaction, or with its error.
++export function follow({ path, sessionId, cwd, fresh, emit, end }: {
++  path: string
++  sessionId: string
++  cwd: string
++  fresh: boolean
++  emit: (notification: SessionNotification) => void
++  end: (error?: string) => void
++}) {
++  const tools = {}
++  const tasks = new Map()
++  let offset = fresh ? 0 : sizeOf(path)
++  let rest = Buffer.alloc(0)
++  let asked = false
++  let ended = false
++
++  mkdirSync(dirname(path), { recursive: true })
++  const watcher = watch(dirname(path), (_, file) => file === basename(path) && read())
++  read()
++
++  function read() {
++    if (ended) return
++    let fd
++    try {
++      fd = openSync(path, 'r')
++    } catch {
++      return
++    }
++    try {
++      const size = fstatSync(fd).size
++      if (size <= offset) return
++      const chunk = Buffer.alloc(size - offset)
++      readSync(fd, chunk, 0, chunk.length, offset)
++      offset = size
++      const data = Buffer.concat([rest, chunk])
++      const last = data.lastIndexOf(10)
++      rest = data.subarray(last + 1)
++      if (last >= 0) for (const line of data.subarray(0, last).toString('utf8').split('\n')) if (!ended) convert(line)
++    } finally {
++      closeSync(fd)
++    }
++  }
++
++  function convert(line: string) {
++    let entry
++    try {
++      entry = JSON.parse(line)
++    } catch {
++      return
++    }
++    if (entry.type === 'user' && entry.origin?.kind === 'channel') asked = true
++    if (asked && entry.type === 'system' && entry.subtype === 'turn_duration') return stop()
++    if (entry.type === 'system' && entry.subtype === 'compact_boundary' && entry.compactMetadata?.trigger === 'manual') return stop()
++    const failed = entry.type === 'system' && entry.subtype === 'local_command' && entry.content?.match(/<local-command-stderr>([\s\S]*)<\/local-command-stderr>/)?.[1]
++    if (failed) return stop(failed)
++    if ((entry.type !== 'assistant' && entry.type !== 'user') || entry.isSidechain) return
++    if (entry.type === 'user' && (entry.isMeta || entry.origin || /^\/\S/.test(entry.message?.content))) return
++    const content = entry.type === 'user' ? stripLocalCommandMetadata(entry.message?.content) : entry.message?.content
++    if (content == null) return
++    const notifications = toAcpNotifications(content as any, entry.type, sessionId, tools, client, logger, {
++      registerHooks: false,
++      replay: true,
++      cwd,
++      taskState: tasks,
++      messageId: entry.type === 'assistant' ? entry.message.id : entry.uuid,
++      toolUseResult: entry.toolUseResult,
++    })
++    for (const notification of notifications) emit(notification)
++  }
++
++  function stop(error?: string) {
++    ended = true
++    watcher.close()
++    end(error)
++  }
++
++  return {
++    close() {
++      ended = true
++      watcher.close()
++    },
++  }
++}
++
++function sizeOf(path: string) {
++  try {
++    return statSync(path).size
++  } catch {
++    return 0
++  }
++}

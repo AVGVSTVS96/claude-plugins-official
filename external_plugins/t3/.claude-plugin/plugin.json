@@ -1,0 +1,11 @@
+{
+  "name": "t3",
+  "description": "T3 Code channel: hex as an ACP agent, where every T3 thread is its own session in that thread's project.",
+  "version": "0.1.0",
+  "keywords": [
+    "t3",
+    "acp",
+    "channel",
+    "mcp"
+  ]
+}

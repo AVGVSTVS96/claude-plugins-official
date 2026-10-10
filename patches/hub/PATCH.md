@@ -4,7 +4,7 @@ id: hub
 summary: Add a client-agnostic hub that gives every chat thread its own Claude Code session and moves threads between clients.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: hub.patch
-patch_sha256: 35bfcf0b6b7e63340b7c4691ecebd58d689a9b3e3d213374384d549fe0e5be89
+patch_sha256: 6eee38e7c71e4f75698fe312262454e1acb521422cb739510b5a1bd8b552334b
 ---
 
 ## Intent
@@ -26,7 +26,11 @@ through Claude's job record and reports a failed start with its reason.
 Sessions report busy and idle through hooks that run `hub/state.ts`; the
 hub hands those to the client and stops a session that stays idle, unless
 `claude agents --json` still reports it busy (background tasks outlive the
-turn's Stop hook). A client can open a thread with a prompt, close one (its
+turn's Stop hook). A thread's session runs in the hex folder, or in a folder of
+its own that the client opened it in; `threads.json` keeps that folder, so the
+session resumes there and keeps it when it moves to another client. A failed
+start is reported before the thread goes idle, so a client still waiting on the
+start sees why. A client can open a thread with a prompt, close one (its
 session stops once idle and the thread is forgotten), stop a thread's session
 now (its next message resumes it), find threads by name and rename them. A
 local program can hand a thread a message over the socket (`inbound`), as if it
@@ -37,7 +41,7 @@ starts, never stops it for being idle, and starts it again when its session
 has been gone for 30 seconds.
 
 `hub/serve.ts` is the service: it runs every client (Telegram, Discord,
-Buzz) in one process. Each client registers in `clients` with a `place` that opens an
+Buzz, T3 Code) in one process. Each chat client registers in `clients` with a `place` that opens an
 empty thread, which lets `move` hand a thread to another client: its session
 stops once its turn ends (`release`) and resumes there with its memory
 (`adopt`). The main thread never leaves, so a copy of it continues there
@@ -67,7 +71,7 @@ instead (`fork`, `--fork-session`).
 
 ## Verification
 
-`bun test hub` drives routing, queueing, resume, running sessions, the main
+`bun test hub` drives routing, queueing, resume, folders, running sessions, the main
 thread (started with the hub, kept running, revived), the launcher and its
 environment, failed starts, busy and idle, idle stops, stopping, closing, naming and
 handoffs (release, adopt, fork) and bad input against a fake `claude`. Run `scripts/verify`.
