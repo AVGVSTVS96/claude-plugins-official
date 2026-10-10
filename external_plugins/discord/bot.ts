@@ -31,6 +31,7 @@ import {
   type NewsChannel,
   type TextChannel,
   type ThreadChannel,
+  type DMChannel,
 } from 'discord.js'
 import { readFileSync, writeFileSync, mkdirSync, statSync, realpathSync, chmodSync } from 'fs'
 import { homedir } from 'os'
@@ -196,13 +197,21 @@ async function downloadAttachment(att: Attachment): Promise<string> {
 
 function serve(token: string) {
   const client = new Client({
-    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.GuildMessageReactions, GatewayIntentBits.GuildMessagePolls, GatewayIntentBits.MessageContent],
-    partials: [Partials.Message, Partials.Reaction, Partials.User, Partials.Poll, Partials.PollAnswer],
+    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.GuildMessageReactions, GatewayIntentBits.GuildMessagePolls, GatewayIntentBits.MessageContent, GatewayIntentBits.DirectMessages, GatewayIntentBits.DirectMessageReactions, GatewayIntentBits.DirectMessagePolls],
+    partials: [Partials.Channel, Partials.Message, Partials.Reaction, Partials.User, Partials.Poll, Partials.PollAnswer],
   })
 
-  async function threadChannel(thread: string): Promise<ThreadChannel> {
+  // A session talks in a thread, or in a DM, which is one conversation.
+  async function threadChannel(thread: string): Promise<ThreadChannel | DMChannel> {
     const ch = await client.channels.fetch(thread)
-    if (!ch?.isThread()) throw new Error(`${thread} is not a Discord thread`)
+    if (!ch?.isThread() && !ch?.isDMBased()) throw new Error(`${thread} is not a Discord thread or DM`)
+    return ch as ThreadChannel | DMChannel
+  }
+
+  const nameOf = (ch: ThreadChannel | DMChannel) => ch.isThread() ? ch.name : 'DM'
+
+  function inThread(ch: ThreadChannel | DMChannel): ThreadChannel {
+    if (!ch.isThread()) throw new Error('a DM is not a thread')
     return ch
   }
 
@@ -283,8 +292,8 @@ function serve(token: string) {
   }
 
   // A thread's starter message lives in the channel it hangs off, under the thread's own id.
-  async function message(ch: ThreadChannel, id: string): Promise<DiscordMessage> {
-    const msg = id === ch.id ? await ch.fetchStarterMessage() : await ch.messages.fetch(id)
+  async function message(ch: ThreadChannel | DMChannel, id: string): Promise<DiscordMessage> {
+    const msg = ch.isThread() && id === ch.id ? await ch.fetchStarterMessage() : await ch.messages.fetch(id)
     if (!msg) throw new Error(`no message ${id} in this thread`)
     return msg
   }
@@ -311,7 +320,8 @@ function serve(token: string) {
   async function call(caller: string, tool: string, args: Record<string, unknown>): Promise<string> {
     if (tool === 'new_thread') {
       const name = title(args.title as string)
-      const parent = (args.channel as string | undefined) ?? (await threadChannel(caller)).parent?.name
+      const here = await threadChannel(caller)
+      const parent = (args.channel as string | undefined) ?? (here.isThread() ? here.parent?.name : undefined)
       const { thread, link } = await place(name, parent)
       hub.open(thread, name, args.prompt as string)
       return `started thread "${name}": ${link}`
@@ -421,21 +431,22 @@ function serve(token: string) {
       }
       case 'rename_thread': {
         const name = title(args.title as string)
-        await ch.setName(name)
+        await inThread(ch).setName(name)
         hub.rename(thread, name)
         return `renamed to "${name}"`
       }
       case 'close_thread': {
+        const closing = inThread(ch)
         hub.retire(thread)
-        await ch.setArchived(true)
-        return `archived "${ch.name}"; its session stops once it's idle`
+        await closing.setArchived(true)
+        return `archived "${closing.name}"; its session stops once it's idle`
       }
       case 'handoff': {
         const to = args.to as string
-        const name = args.title ? title(args.title as string) : ch.name
+        const name = args.title ? title(args.title as string) : nameOf(ch)
         const target = await move(hub, thread, to, name)
         await ch.send(`Moved to ${to}: ${target}`)
-        await ch.setArchived(true)
+        if (ch.isThread()) await ch.setArchived(true)
         return `moving to ${to}: ${target}. Your session stops here once this turn ends and resumes there.`
       }
       default:
@@ -459,8 +470,8 @@ function serve(token: string) {
 
   // A tag in a channel starts a thread on that message, Claude-tag style;
   // inside a thread every message reaches its session without one.
-  async function threadOf(msg: DiscordMessage): Promise<ThreadChannel | undefined> {
-    if (msg.channel.isThread()) return msg.channel
+  async function threadOf(msg: DiscordMessage): Promise<ThreadChannel | DMChannel | undefined> {
+    if (msg.channel.isThread() || msg.channel.isDMBased()) return msg.channel as ThreadChannel | DMChannel
     if (!isText(msg.channel) || !client.user || !msg.mentions.has(client.user)) return
     if (msg.thread) return msg.thread
     const words = msg.content.replace(/<@[!&]?\d+>/g, '').trim().split(/\s+/).filter(Boolean)
@@ -487,8 +498,8 @@ function serve(token: string) {
     const ch = await threadOf(msg)
     if (!ch) return
     const opened = !edited && ch.id === msg.id
-    const forum = !!ch.parent?.isThreadOnly()
-    if (ch.archived) await ch.setArchived(false).catch(() => {})
+    const forum = ch.isThread() && !!ch.parent?.isThreadOnly()
+    if (ch.isThread() && ch.archived) await ch.setArchived(false).catch(() => {})
 
     void ch.sendTyping().catch(() => {})
     if (access.ackReaction) void msg.react(access.ackReaction).catch(() => {})
@@ -510,9 +521,9 @@ function serve(token: string) {
         user: msg.author.username,
         user_id: msg.author.id,
         ts: msg.createdAt.toISOString(),
-        ...(ch.parent ? { channel: ch.parent.name } : {}),
+        ...(ch.isThread() && ch.parent ? { channel: ch.parent.name } : {}),
         ...(opened && !forum ? { new_thread: 'true' } : {}),
-        ...(opened && forum ? { post_title: ch.name } : {}),
+        ...(opened && forum ? { post_title: nameOf(ch) } : {}),
         ...(atts.length > 0 ? { attachment_count: String(atts.length), attachments: atts.join('; ') } : {}),
         ...(stickers.length > 0 ? { stickers: stickers.join('; ') } : {}),
         ...(poll ? { poll: poll.question.text!, poll_options: poll.answers.map(a => a.text).join('; '), ...(poll.allowMultiselect ? { poll_multiple: 'true' } : {}) } : {}),
@@ -521,13 +532,13 @@ function serve(token: string) {
         ...(forwarded ? { forwarded: 'true' } : {}),
       },
     }
-    hub.deliver(ch.id, ch.name, message)
+    hub.deliver(ch.id, nameOf(ch), message)
   }
 
   // Reactions and deletes reach only a thread the hub already serves: in it,
   // or on the message it hangs off, which shares the thread's id.
-  async function servedThread(msg: DiscordMessage | PartialMessage): Promise<ThreadChannel | undefined> {
-    const id = msg.channel.isThread() ? msg.channelId : msg.id
+  async function servedThread(msg: DiscordMessage | PartialMessage): Promise<ThreadChannel | DMChannel | undefined> {
+    const id = msg.channel.isThread() || msg.channel.isDMBased() ? msg.channelId : msg.id
     return hub.name(id) ? threadChannel(id) : undefined
   }
 
@@ -538,7 +549,7 @@ function serve(token: string) {
     const target = reaction.message.partial ? await reaction.message.fetch().catch(() => undefined) : reaction.message
     const who = user.partial ? await user.fetch() : user
     const emoji = reaction.emoji.toString()
-    hub.deliver(ch.id, ch.name, {
+    hub.deliver(ch.id, nameOf(ch), {
       content: `(${removed ? 'reaction removed' : 'reaction'}: ${emoji})`,
       meta: {
         chat_id: ch.id,
@@ -560,7 +571,7 @@ function serve(token: string) {
     if (deleting.delete(msg.id)) return
     const ch = await servedThread(msg)
     if (!ch) return
-    hub.deliver(ch.id, ch.name, {
+    hub.deliver(ch.id, nameOf(ch), {
       content: '(deleted a message)',
       meta: {
         chat_id: ch.id,
@@ -580,7 +591,7 @@ function serve(token: string) {
     if (msg.author.id !== client.user!.id || !msg.poll) return
     const vote = msg.poll.answers.get(answer.id)?.text ?? ''
     const who = await client.users.fetch(userId)
-    hub.deliver(ch.id, ch.name, {
+    hub.deliver(ch.id, nameOf(ch), {
       content: `(${removed ? 'vote removed' : 'vote'}: ${vote})`,
       meta: {
         chat_id: ch.id,
@@ -601,7 +612,7 @@ function serve(token: string) {
     const chosen = Number(tap.customId)
     await tap.update({ components: buttons(labels, chosen) })
     const ch = await threadChannel(tap.channelId)
-    hub.deliver(ch.id, ch.name, {
+    hub.deliver(ch.id, nameOf(ch), {
       content: labels[chosen]!,
       meta: {
         chat_id: ch.id,
@@ -645,12 +656,12 @@ function serve(token: string) {
   })
 
   client.on('messageCreate', msg => {
-    if (msg.author.bot || !msg.inGuild()) return
+    if (msg.author.bot) return
     handleInbound(msg).catch(failure('handleInbound'))
   })
 
   client.on('messageUpdate', (before, after) => {
-    if (before.partial || before.content === after.content || after.author.bot || !after.inGuild()) return
+    if (before.partial || before.content === after.content || after.author.bot) return
     handleInbound(after, true).catch(failure('handleInbound'))
   })
 

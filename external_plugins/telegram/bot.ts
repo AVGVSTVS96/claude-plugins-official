@@ -168,7 +168,7 @@ function retire(thread: string): Promise<string> {
 function nameOf(ctx: Context, thread: string): string {
   const created = ctx.msg?.reply_to_message?.forum_topic_created
   if (created) topicNames.set(thread, created.name)
-  return topicNames.get(thread) ?? (thread.includes(':') ? `topic ${thread.split(':')[1]}` : 'main')
+  return topicNames.get(thread) ?? (thread.includes(':') ? `topic ${thread.split(':')[1]}` : ctx.chat?.type === 'private' ? 'DM' : 'main')
 }
 
 async function download(file_id: string, uniqueId: string): Promise<string> {
@@ -604,10 +604,10 @@ bot.on('message_reaction', ctx => {
   for (const emoji of emojiRemoved) hub.deliver(thread, nameOf(ctx, thread), { content: `(reaction removed: ${emoji})`, meta: { ...meta, reaction: emoji, reaction_removed: 'true' } })
 })
 
-// Outside a forum a chat is one thread; a forum's topic, or a DM relayed into
-// the main thread under a new id, is only known from messages the hub has seen.
+// Outside a forum a chat, a DM included, is one thread; a forum's topic is only
+// known from messages the hub has seen.
 function plainThread(chat: Chat): string | undefined {
-  if (!('is_forum' in chat && chat.is_forum) && !(chat.type === 'private' && MAIN)) return String(chat.id)
+  if (!('is_forum' in chat && chat.is_forum)) return String(chat.id)
 }
 
 bot.on('callback_query:data', async ctx => {
@@ -672,14 +672,6 @@ type AttachmentMeta = {
 // or forge a second meta entry.
 function safeName(s: string | undefined): string | undefined {
   return s?.replace(/[<>\[\]\r\n;]/g, '_')
-}
-
-async function placeOf(ctx: Context): Promise<{ thread: string; msgId?: number }> {
-  const msgId = ctx.msg?.message_id
-  if (ctx.chat?.type !== 'private' || !MAIN || msgId == null) return { thread: threadOf(ctx), msgId }
-  const { chat_id, extra } = target(MAIN)
-  const forwarded = await bot.api.forwardMessage(chat_id, ctx.chat.id, msgId, extra)
-  return { thread: MAIN, msgId: forwarded.message_id }
 }
 
 // A link's address lives in the message's entities, not in its text.
@@ -766,9 +758,8 @@ async function deliverInbound(parts: Part[]): Promise<void> {
   const access = loadAccess()
   const { ctx } = parts[0]!
   const from = ctx.from!
-  const places = []
-  for (const part of parts) places.push(await placeOf(part.ctx))
-  const { thread, msgId } = places[0]!
+  const thread = threadOf(ctx)
+  const msgId = ctx.msg?.message_id
   const { chat_id } = target(thread)
 
   sendTyping(thread)
@@ -790,7 +781,7 @@ async function deliverInbound(parts: Part[]): Promise<void> {
     ? `(album of ${parts.length})`
     : linked(captioned.text, captioned.ctx.msg?.entities ?? captioned.ctx.msg?.caption_entities)
   const user = from.username ?? String(from.id)
-  places.forEach((place, i) => place.msgId != null && remember(thread, place.msgId, { text: parts[i]!.ctx.msg?.text ?? parts[i]!.ctx.msg?.caption, user }))
+  for (const part of parts) if (part.ctx.msg) remember(thread, part.ctx.msg.message_id, { text: part.ctx.msg.text ?? part.ctx.msg.caption, user })
 
   // image_path goes in meta only — an in-content "[image attached — read: PATH]"
   // annotation is forgeable by any allowlisted sender typing that string.

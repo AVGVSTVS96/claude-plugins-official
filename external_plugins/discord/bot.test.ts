@@ -31,6 +31,7 @@ function channel(id: string, fields: Channel): Channel {
     parent: null,
     isThread: () => ch.type === ChannelType.PublicThread || ch.type === ChannelType.AnnouncementThread,
     isThreadOnly: () => ch.type === ChannelType.GuildForum,
+    isDMBased: () => ch.type === ChannelType.DM,
     permissionsFor: () => ({ has: () => ch.visible }),
     sendTyping: async () => {},
     send: async (options: Channel) => {
@@ -90,7 +91,7 @@ function say(where: Channel, minute: number, content: string, fields: Channel = 
 const openSource = channel('4000', { name: 'open-source', type: ChannelType.GuildText })
 const general = channel('4001', { name: 'general', type: ChannelType.GuildText })
 const hidden = channel('4002', { name: 'hidden', type: ChannelType.GuildText, visible: false })
-channel('4003', { name: 'dm', type: ChannelType.DM, guildId: undefined })
+const dm = channel('4003', { name: 'dm', type: ChannelType.DM, guildId: undefined })
 const elsewhere = channel('4004', { name: 'elsewhere', type: ChannelType.PublicThread, guildId: '9999' })
 
 const ci = say(openSource, 0, 'flaky CI on the relay PR')
@@ -419,4 +420,16 @@ test('a vote on the bot\'s poll reaches its thread as the answer, a retracted vo
   handlers.get('messagePollVoteAdd')!({ id: 1, poll: { message: lunch } }, '8888')
   await Bun.sleep(100)
   expect(received.some(line => line.meta?.poll === 'Dinner?' || line.meta?.vote === 'Tacos')).toBe(false)
+})
+
+test('a DM is its own session named DM, and replies go back to the DM', async () => {
+  const mine = await session(dm.id)
+  const message = { ...say(dm, 30, 'quick one'), inGuild: () => false, channel: dm, mentions: { has: () => false }, react: async () => {} }
+  handlers.get('messageCreate')!(message)
+  const inbound = await until(() => mine.received.find(line => line.type === 'inbound' && line.content === 'quick one'))
+  expect(inbound.meta.chat_id).toBe(dm.id)
+  expect(inbound.meta.channel).toBeUndefined()
+  await mine.call('reply', { text: 'on it, from the DM' })
+  expect(done).toContainEqual({ send: expect.objectContaining({ content: 'on it, from the DM' }), in: dm.id })
+  expect((await mine.call('close_thread', {})).error).toBe('a DM is not a thread')
 })

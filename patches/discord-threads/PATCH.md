@@ -4,7 +4,7 @@ id: discord-threads
 summary: Rework the Discord channel so every thread in a server is its own Claude Code session, Claude-tag style, through the thread hub.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: discord-threads.patch
-patch_sha256: 6872974acd74726a3e7ce84d24bdef8df6e0ae8b99f0716b0ddb86a947c82fd3
+patch_sha256: c70c81316fd21e3ef0355cf6468d0059ce7aa25b2c31a58c168fc5adfa37a15f
 ---
 
 ## Intent
@@ -46,6 +46,9 @@ Discord is the place for deeper work, Claude-tag style:
   message search, and says when Discord is still indexing.
 - Announcement channels work like text channels: a tag starts a thread,
   and they can be read, searched and posted into.
+- A DM to the bot is its own conversation: one session named `DM`,
+  separate from every thread. Thread-only tools (`rename_thread`,
+  `close_thread`) say a DM is not a thread.
 - Forum posts get sessions like any thread. A new post carries its title as
   `post_title` instead of asking for a rename.
 - The typing indicator follows the session's real busy state.
@@ -85,7 +88,7 @@ Discord is the place for deeper work, Claude-tag style:
 4. Without `DISCORD_BOT_TOKEN`, Discord stays off and the rest of the hub
    service runs.
 5. Deliberately dropped from upstream, never ported back: pairing and
-   `/discord:access` (single user; `access.json` holds `allowFrom`), DMs,
+   `/discord:access` (single user; `access.json` holds `allowFrom`),
    the per-channel opt-in, and permission relay.
 6. Keep upstream's wording and structure wherever code is shared, so heals
    stay small.
@@ -96,7 +99,8 @@ Both halves build and the hub tests pass. `bun test external_plugins/discord`
 runs the tools and gateway events against a fake Discord client: channel
 paging, thread drill-in, search, the channel named on arrival, refusal of
 hidden channels, DMs and other servers, reactions, deletes, button taps,
-stickers, polls, forum posts and announcement channels. Run `scripts/verify`.
+stickers, polls, forum posts, announcement channels, and a DM as its own
+session. Run `scripts/verify`.
 
 ## Removal
 
