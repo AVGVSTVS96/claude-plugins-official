@@ -4,7 +4,7 @@ id: t3-acp
 summary: Serve the agent to T3 Code as an ACP agent, where every T3 thread is its own Claude Code session in that thread's project, through the thread hub.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: t3-acp.patch
-patch_sha256: f5c892eebb41db0583d4d6dab299b162e57fbdb0f3afce938cbfd0fe7c470585
+patch_sha256: 50581f789f3cf668c7cb8c0f40d37835c8eaba84ddcec843452fd9065b9d0621
 ---
 
 ## Intent
@@ -30,6 +30,11 @@ agent's work itself, so the session's own output is the conversation:
   new session. Channel prompts are skipped: T3 already shows what it sent.
 - `session/cancel` stops the session and answers `cancelled`; the next prompt
   resumes it. `session/resume` accepts any thread the hub knows.
+- The MCP servers T3 sends with `session/new` and `session/resume` (its own
+  `t3-code` server: html_render, preview, delegate_task and the rest) reach the
+  session as `--mcp-config`. A session loads them only as it starts, so when they
+  change, the next prompt goes to a fresh start of the session, unless it is busy
+  with background work.
 - A session that fails to start fails the prompt with its reason, such as a
   workspace Claude Code doesn't trust yet.
 - `server.ts` is the channel each session loads. It delivers T3's messages and

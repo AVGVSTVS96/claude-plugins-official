@@ -89,10 +89,10 @@ index 0000000000000000000000000000000000000000..c12bf015726ea411ac246ded94d2493c
 +socket.on('close', () => process.exit(0))
 diff --git a/external_plugins/t3/bot.test.ts b/external_plugins/t3/bot.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..f976442760ddbf65d418575a7b39fadd6cb6af26
+index 0000000000000000000000000000000000000000..7121f539e1c14c6b7fb9f7240387c2107ea1903a
 --- /dev/null
 +++ b/external_plugins/t3/bot.test.ts
-@@ -0,0 +1,221 @@
+@@ -0,0 +1,248 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { connect, type Socket } from 'net'
 +import { Readable, Writable } from 'stream'
@@ -259,6 +259,33 @@ index 0000000000000000000000000000000000000000..f976442760ddbf65d418575a7b39fadd
 +  await until(() => updates.some(update => update.sessionUpdate === 'compaction_update' && update.status === 'failed'))
 +})
 +
++const t3Tools = (token: string) => ({ name: 't3-code', command: '/opt/t3code', args: ['acp-mcp-bridge'], env: [{ name: 'T3_ACP_MCP_AUTHORIZATION', value: token }] })
++
++test('a session gets T3\'s MCP servers, and starts again with them when they change', async () => {
++  const { agent } = await t3()
++  const { sessionId } = await agent.request('session/new', { cwd: project, mcpServers: [t3Tools('one'), { type: 'http', name: 'docs', url: 'http://localhost:9/mcp', headers: [{ name: 'Authorization', value: 'Bearer x' }] }] })
++  await until(() => lines('launched').length)
++  const launched = JSON.parse(lines('launched')[0]!)
++  expect(JSON.parse(launched[launched.indexOf('--mcp-config') + 1])).toEqual({
++    mcpServers: {
++      't3-code': { command: '/opt/t3code', args: ['acp-mcp-bridge'], env: { T3_ACP_MCP_AUTHORIZATION: 'one' } },
++      docs: { type: 'http', url: 'http://localhost:9/mcp', headers: { Authorization: 'Bearer x' } },
++    },
++  })
++  const hex = await session(sessionId)
++  const running = Bun.spawn(['sleep', '60'])
++  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid: running.pid, status: 'idle' }]))
++  await agent.request('session/resume', { sessionId, cwd: project, mcpServers: [t3Tools('two')] })
++  agent.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'hi' }] }).catch(() => {})
++  await until(() => lines('launched').length === 2)
++  expect(lines('claude')).toContain(JSON.stringify(['stop', SESSION.slice(0, 8)]))
++  expect(lines('launched')[1]).toContain('two')
++  expect(hex.inbound).toEqual([])
++  const fresh = await session(sessionId)
++  await until(() => fresh.inbound.length)
++  expect(fresh.inbound[0]).toMatchObject({ type: 'inbound', content: 'hi' })
++})
++
 +test('a known thread resumes and an unknown one is not found', async () => {
 +  const { agent } = await t3()
 +  const { sessionId } = await agent.request('session/new', { cwd: project, mcpServers: [] })
@@ -316,10 +343,10 @@ index 0000000000000000000000000000000000000000..f976442760ddbf65d418575a7b39fadd
 +})
 diff --git a/external_plugins/t3/bot.ts b/external_plugins/t3/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..c2cb5ece227e661ab4ce4b10a431ef36382dbaeb
+index 0000000000000000000000000000000000000000..03e53b3c3b6e08c2bb4c218795b834d10ca10f8c
 --- /dev/null
 +++ b/external_plugins/t3/bot.ts
-@@ -0,0 +1,193 @@
+@@ -0,0 +1,222 @@
 +#!/usr/bin/env bun
 +import { createServer, type Socket } from 'net'
 +import { Readable, Writable } from 'stream'
@@ -328,7 +355,7 @@ index 0000000000000000000000000000000000000000..c2cb5ece227e661ab4ce4b10a431ef36
 +import { basename, join } from 'path'
 +import { fileURLToPath } from 'url'
 +import { randomUUID } from 'crypto'
-+import { agent, ndJsonStream, PROTOCOL_VERSION, RequestError, type AgentContext, type ContentBlock, type PromptResponse, type SessionNotification, type StopReason } from '@agentclientprotocol/sdk'
++import { agent, ndJsonStream, PROTOCOL_VERSION, RequestError, type AgentContext, type ContentBlock, type McpServer, type PromptResponse, type SessionNotification, type StopReason } from '@agentclientprotocol/sdk'
 +import { startHub } from '../../hub/hub.ts'
 +import { follow, transcriptPath } from './transcript.ts'
 +import { version } from './package.json'
@@ -354,6 +381,11 @@ index 0000000000000000000000000000000000000000..c2cb5ece227e661ab4ce4b10a431ef36
 +// One ACP prompt per thread at a time: it is answered when the session's turn ends.
 +const turns = new Map<string, Turn>()
 +
++// T3 Code hands each thread its own MCP servers, with tools like html_render, preview
++// and delegate_task. A session loads them as it starts, so it starts again when they change.
++const servers = new Map<string, string>()
++const started = new Map<string, string | undefined>()
++
 +mkdirSync(INBOX_DIR, { recursive: true, mode: 0o700 })
 +
 +const hub = startHub({
@@ -374,9 +406,28 @@ index 0000000000000000000000000000000000000000..c2cb5ece227e661ab4ce4b10a431ef36
 +    turn?.reader?.close()
 +    turn?.reject(RequestError.internalError(undefined, `hex couldn't start this thread's session: ${reason}`))
 +  },
++  args: thread => {
++    const config = servers.get(thread)
++    started.set(thread, config)
++    return config ? ['--mcp-config', config] : []
++  },
 +  hexDir: HEX_DIR,
 +  launcher: process.env.HEX_LAUNCHER,
 +})
++
++function remember(thread: string, list: McpServer[] = []) {
++  const entries = list.flatMap(server => {
++    if (!('type' in server)) return [[server.name, { command: server.command, args: server.args, env: pairs(server.env) }] as const]
++    if (server.type === 'acp') return []
++    return [[server.name, { type: server.type, url: server.url, headers: pairs(server.headers) }] as const]
++  })
++  if (entries.length) servers.set(thread, JSON.stringify({ mcpServers: Object.fromEntries(entries) }))
++  else servers.delete(thread)
++}
++
++function pairs(list: { name: string; value: string }[]) {
++  return Object.fromEntries(list.map(({ name, value }) => [name, value]))
++}
 +
 +function reader(thread: string, session: string, turn: Turn, fresh: boolean) {
 +  const cwd = hub.cwd(thread) ?? HEX_DIR
@@ -423,7 +474,10 @@ index 0000000000000000000000000000000000000000..c2cb5ece227e661ab4ce4b10a431ef36
 +    const turn: Turn = { client, sent: Promise.resolve(), resolve, reject, ...(compact && { compaction: randomUUID() }) }
 +    turns.set(thread, turn)
 +    if (session) turn.reader = reader(thread, session, turn, false)
-+    if (!compact) return hub.deliver(thread, name, { content: render(blocks), meta: { ts: new Date().toISOString() } })
++    if (!compact) {
++      const message = { content: render(blocks), meta: { ts: new Date().toISOString() } }
++      return servers.get(thread) === started.get(thread) ? hub.deliver(thread, name, message) : hub.refresh(thread, message)
++    }
 +    compaction(turn, thread, 'in_progress')
 +    hub.command(thread, '/compact')
 +  })
@@ -497,12 +551,14 @@ index 0000000000000000000000000000000000000000..c2cb5ece227e661ab4ce4b10a431ef36
 +    .onRequest('session/new', ({ params, client }) => {
 +      const thread = randomUUID()
 +      const folder = folderFor(params.cwd)
++      remember(thread, params.mcpServers)
 +      hub.open(thread, basename(folder ?? HEX_DIR), undefined, folder)
 +      advertise(client, thread)
 +      return { sessionId: thread }
 +    })
 +    .onRequest('session/resume', ({ params, client }) => {
-+      advertise(client, known(params.sessionId))
++      remember(known(params.sessionId), params.mcpServers)
++      advertise(client, params.sessionId)
 +      return {}
 +    })
 +    .onRequest('session/prompt', ({ params, client }) => prompt(params.sessionId, params.prompt, client))

@@ -4,7 +4,7 @@ id: hub
 summary: Add a client-agnostic hub that gives every chat thread its own Claude Code session and moves threads between clients.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: hub.patch
-patch_sha256: 6eee38e7c71e4f75698fe312262454e1acb521422cb739510b5a1bd8b552334b
+patch_sha256: bdb6125eb81e60610d95744ac3f03d23b57d9eafe416038e4f049ec5de961b5d
 ---
 
 ## Intent
@@ -34,7 +34,10 @@ start sees why. A client can open a thread with a prompt, close one (its
 session stops once idle and the thread is forgotten), stop a thread's session
 now (its next message resumes it), find threads by name and rename them. A
 local program can hand a thread a message over the socket (`inbound`), as if it
-came from the app. Each session's settings enable only its client's plugin.
+came from the app. A client can add launch arguments per thread, and hand a
+message to a fresh start of a thread's session so it picks up new ones (a session
+busy with background work keeps running and takes it as it is). Each session's
+settings enable only its client's plugin.
 
 The main thread is always running: the hub starts it (or resumes it) when it
 starts, never stops it for being idle, and starts it again when its session

@@ -164,6 +164,33 @@ test('a /compact that fails fails the prompt with the command\'s error', async (
   await until(() => updates.some(update => update.sessionUpdate === 'compaction_update' && update.status === 'failed'))
 })
 
+const t3Tools = (token: string) => ({ name: 't3-code', command: '/opt/t3code', args: ['acp-mcp-bridge'], env: [{ name: 'T3_ACP_MCP_AUTHORIZATION', value: token }] })
+
+test('a session gets T3\'s MCP servers, and starts again with them when they change', async () => {
+  const { agent } = await t3()
+  const { sessionId } = await agent.request('session/new', { cwd: project, mcpServers: [t3Tools('one'), { type: 'http', name: 'docs', url: 'http://localhost:9/mcp', headers: [{ name: 'Authorization', value: 'Bearer x' }] }] })
+  await until(() => lines('launched').length)
+  const launched = JSON.parse(lines('launched')[0]!)
+  expect(JSON.parse(launched[launched.indexOf('--mcp-config') + 1])).toEqual({
+    mcpServers: {
+      't3-code': { command: '/opt/t3code', args: ['acp-mcp-bridge'], env: { T3_ACP_MCP_AUTHORIZATION: 'one' } },
+      docs: { type: 'http', url: 'http://localhost:9/mcp', headers: { Authorization: 'Bearer x' } },
+    },
+  })
+  const hex = await session(sessionId)
+  const running = Bun.spawn(['sleep', '60'])
+  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid: running.pid, status: 'idle' }]))
+  await agent.request('session/resume', { sessionId, cwd: project, mcpServers: [t3Tools('two')] })
+  agent.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'hi' }] }).catch(() => {})
+  await until(() => lines('launched').length === 2)
+  expect(lines('claude')).toContain(JSON.stringify(['stop', SESSION.slice(0, 8)]))
+  expect(lines('launched')[1]).toContain('two')
+  expect(hex.inbound).toEqual([])
+  const fresh = await session(sessionId)
+  await until(() => fresh.inbound.length)
+  expect(fresh.inbound[0]).toMatchObject({ type: 'inbound', content: 'hi' })
+})
+
 test('a known thread resumes and an unknown one is not found', async () => {
   const { agent } = await t3()
   const { sessionId } = await agent.request('session/new', { cwd: project, mcpServers: [] })

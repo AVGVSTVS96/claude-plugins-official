@@ -6,7 +6,7 @@ import { homedir } from 'os'
 import { basename, join } from 'path'
 import { fileURLToPath } from 'url'
 import { randomUUID } from 'crypto'
-import { agent, ndJsonStream, PROTOCOL_VERSION, RequestError, type AgentContext, type ContentBlock, type PromptResponse, type SessionNotification, type StopReason } from '@agentclientprotocol/sdk'
+import { agent, ndJsonStream, PROTOCOL_VERSION, RequestError, type AgentContext, type ContentBlock, type McpServer, type PromptResponse, type SessionNotification, type StopReason } from '@agentclientprotocol/sdk'
 import { startHub } from '../../hub/hub.ts'
 import { follow, transcriptPath } from './transcript.ts'
 import { version } from './package.json'
@@ -32,6 +32,11 @@ type Turn = {
 // One ACP prompt per thread at a time: it is answered when the session's turn ends.
 const turns = new Map<string, Turn>()
 
+// T3 Code hands each thread its own MCP servers, with tools like html_render, preview
+// and delegate_task. A session loads them as it starts, so it starts again when they change.
+const servers = new Map<string, string>()
+const started = new Map<string, string | undefined>()
+
 mkdirSync(INBOX_DIR, { recursive: true, mode: 0o700 })
 
 const hub = startHub({
@@ -52,9 +57,28 @@ const hub = startHub({
     turn?.reader?.close()
     turn?.reject(RequestError.internalError(undefined, `hex couldn't start this thread's session: ${reason}`))
   },
+  args: thread => {
+    const config = servers.get(thread)
+    started.set(thread, config)
+    return config ? ['--mcp-config', config] : []
+  },
   hexDir: HEX_DIR,
   launcher: process.env.HEX_LAUNCHER,
 })
+
+function remember(thread: string, list: McpServer[] = []) {
+  const entries = list.flatMap(server => {
+    if (!('type' in server)) return [[server.name, { command: server.command, args: server.args, env: pairs(server.env) }] as const]
+    if (server.type === 'acp') return []
+    return [[server.name, { type: server.type, url: server.url, headers: pairs(server.headers) }] as const]
+  })
+  if (entries.length) servers.set(thread, JSON.stringify({ mcpServers: Object.fromEntries(entries) }))
+  else servers.delete(thread)
+}
+
+function pairs(list: { name: string; value: string }[]) {
+  return Object.fromEntries(list.map(({ name, value }) => [name, value]))
+}
 
 function reader(thread: string, session: string, turn: Turn, fresh: boolean) {
   const cwd = hub.cwd(thread) ?? HEX_DIR
@@ -101,7 +125,10 @@ function prompt(thread: string, blocks: ContentBlock[], client: AgentContext): P
     const turn: Turn = { client, sent: Promise.resolve(), resolve, reject, ...(compact && { compaction: randomUUID() }) }
     turns.set(thread, turn)
     if (session) turn.reader = reader(thread, session, turn, false)
-    if (!compact) return hub.deliver(thread, name, { content: render(blocks), meta: { ts: new Date().toISOString() } })
+    if (!compact) {
+      const message = { content: render(blocks), meta: { ts: new Date().toISOString() } }
+      return servers.get(thread) === started.get(thread) ? hub.deliver(thread, name, message) : hub.refresh(thread, message)
+    }
     compaction(turn, thread, 'in_progress')
     hub.command(thread, '/compact')
   })
@@ -175,12 +202,14 @@ function serve(socket: Socket) {
     .onRequest('session/new', ({ params, client }) => {
       const thread = randomUUID()
       const folder = folderFor(params.cwd)
+      remember(thread, params.mcpServers)
       hub.open(thread, basename(folder ?? HEX_DIR), undefined, folder)
       advertise(client, thread)
       return { sessionId: thread }
     })
     .onRequest('session/resume', ({ params, client }) => {
-      advertise(client, known(params.sessionId))
+      remember(known(params.sessionId), params.mcpServers)
+      advertise(client, params.sessionId)
       return {}
     })
     .onRequest('session/prompt', ({ params, client }) => prompt(params.sessionId, params.prompt, client))

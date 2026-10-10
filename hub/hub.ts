@@ -21,7 +21,7 @@ const IDLE_STOP = 30 * 60_000
 const RELAUNCH = 30_000
 const PRIVATE = /_BOT_TOKEN$|^HEX_|^BUZZ_/
 
-export function startHub({ stateDir, channel, main, mainName = 'main', call, state, failed, idleStop = IDLE_STOP, relaunch = RELAUNCH, jobsDir = JOBS, hexDir = process.cwd(), launcher = 'claude' }: {
+export function startHub({ stateDir, channel, main, mainName = 'main', call, state, failed, args = () => [], idleStop = IDLE_STOP, relaunch = RELAUNCH, jobsDir = JOBS, hexDir = process.cwd(), launcher = 'claude' }: {
   stateDir: string
   channel: string
   main?: string
@@ -29,6 +29,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
   call: Call
   state: State
   failed: Failed
+  args?: (thread: string) => string[]
   idleStop?: number
   relaunch?: number
   jobsDir?: string
@@ -190,6 +191,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
         '--channels', channel,
         '--name', known.name,
         ...(fork ? ['--resume', fork, '--fork-session'] : known.session ? ['--resume', known.session] : []),
+        ...args(thread),
         '--settings', JSON.stringify({ enabledPlugins: { [plugin]: true }, env: bound }),
         ...(prompt ? [prompt] : []),
       ], { cwd: known.cwd ?? hexDir, env, stdio: ['ignore', 'pipe', 'pipe'] })
@@ -244,16 +246,32 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
   }
 
   // Claude Code runs a slash command like /compact only as a session's first prompt,
-  // so a running session stops and resumes with it. `claude stop` returns before the
-  // process exits, and resuming before then starts a copy, so it waits for the exit.
-  function command(thread: string, text: string) {
+  // and reads its launch arguments only at start, so a running session stops and
+  // resumes for either. `claude stop` returns before the process exits, and resuming
+  // before then starts a copy, so it waits for the exit.
+  function restart(thread: string, prompt?: string) {
     const known = threads[thread]!
-    if (!known.session) return launch(thread, known.name, text)
+    if (!known.session) return launch(thread, known.name, prompt)
+    agent(known.session, running => cycle(thread, running, prompt))
+  }
+
+  // Delivers a message to a fresh start of the thread's session, so it gets new launch
+  // arguments; a session busy with background work keeps running and takes it as it is.
+  function refresh(thread: string, message: Message) {
+    const known = threads[thread]!
+    if (!known.session) return deliver(thread, known.name, message)
     agent(known.session, running => {
-      if (!running) return launch(thread, known.name, text)
-      stop(thread)
-      execFile('pidwait', ['--pid', String(running.pid)], () => launch(thread, known.name, text))
+      if (running?.status === 'busy') return deliver(thread, known.name, message)
+      queued.set(thread, [...(queued.get(thread) ?? []), message])
+      cycle(thread, running)
     })
+  }
+
+  function cycle(thread: string, running?: Agent, prompt?: string) {
+    const name = threads[thread]!.name
+    if (!running) return launch(thread, name, prompt)
+    stop(thread)
+    execFile('pidwait', ['--pid', String(running.pid)], () => launch(thread, name, prompt))
   }
 
   function welcome(thread: string, session: string, socket: Socket) {
@@ -318,7 +336,8 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
 
   return {
     deliver,
-    command,
+    command: restart,
+    refresh,
     open: (thread: string, name: string, prompt?: string, cwd?: string) => launch(thread, name, prompt, undefined, cwd),
     fork: (thread: string, name: string, session: string, prompt: string, cwd?: string) => launch(thread, name, prompt, session, cwd),
     main,
