@@ -705,3 +705,16 @@ test('list_channels names the channels Hex is in, and marks direct messages', as
     `#ideas  (id: ${bot.forum})`,
   ].sort())
 })
+
+test('create_channel makes a channel Hex owns, adds the owner, and new_thread can open threads in it', async () => {
+  const bot = await startBot()
+  const { session } = await threadStarted(bot)
+  const created = (await session.call('create_channel', { name: '#research', about: 'papers', type: 'forum' })).text
+  const id = created.match(/id: ([\w-]+)/)[1]
+  expect(created).toBe(`created #research (id: ${id}); new_thread can open threads in it`)
+  expect(bot.published(9007)[0]!.tags).toEqual([['h', id], ['name', 'research'], ['visibility', 'open'], ['channel_type', 'forum'], ['about', 'papers'], bot.auth])
+  expect(bot.published(9000)[0]!.tags).toEqual([['h', id], ['p', owner], bot.auth])
+  expect((await session.call('list_channels', {})).text).toContain(`#research  (id: ${id})`)
+  await session.call('new_thread', { title: 'Reading list', prompt: 'gather them', channel: 'research' })
+  expect(await until(() => bot.relay.events.find(event => event.content === '**Reading list**'))).toMatchObject({ kind: 45001, tags: [['h', id], ['p', owner], bot.auth] })
+})

@@ -4,7 +4,7 @@ id: buzz-threads
 summary: Add a Buzz channel where every Buzz thread is its own Claude Code session through the thread hub, with Buzz's activity, memory and files panels.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: buzz-threads.patch
-patch_sha256: 383683cb4e861ead86535065041b0338881d14fbdae808148bf91df7e75cae30
+patch_sha256: fee4f6099ba4bd1fb2aad20b36853a64574c5e61fca8886954dd4768adec2c69
 ---
 
 ## Intent
@@ -22,7 +22,8 @@ halves as `discord-threads`:
   the same tools: `reply` (files go up through Blossom as `imeta`), `react`,
   `edit_message`, `fetch_messages`, `list_channels`, `download_attachment`,
   `rename_thread`, `close_thread`, `new_thread` and `handoff` to Telegram or
-  Discord, plus `search_messages`, `delete_message`, `canvas` and `presence`.
+  Discord, plus `search_messages`, `delete_message`, `canvas`, `presence` and
+  `create_channel` (a NIP-29 create-group Hex owns, with the owner added).
 
 Buzz works like Discord:
 

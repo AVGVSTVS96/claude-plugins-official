@@ -151,6 +151,20 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       inputSchema: { type: 'object', properties: {} },
     },
     {
+      name: 'create_channel',
+      description: 'Create a Buzz channel. You own it and the user is added to it, so it shows up for them; open threads in it with new_thread.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'Channel name, like "research" or "open source".' },
+          about: { type: 'string', description: 'One line on what the channel is for.' },
+          type: { type: 'string', enum: ['stream', 'forum'], description: 'stream (default): a chat like #general. forum: every thread is a post.' },
+          private: { type: 'boolean', description: 'Only members can see it. Default: open to the workspace.' },
+        },
+        required: ['name'],
+      },
+    },
+    {
       name: 'rename_thread',
       description: 'Name this thread: 1–2 words, like a chat name ("Desk anchors", "Hub tests"). Buzz threads have no titles, so the name is for your thread list and handoffs; a thread you opened with new_thread also shows it as its first message.',
       inputSchema: {

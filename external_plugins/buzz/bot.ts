@@ -434,6 +434,23 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
     return lines.join('\n') || '(none)'
   }
 
+  // NIP-29 create-group: Hex owns the channel it creates, and adds the owner so it shows up for them.
+  async function createChannel(args: Record<string, unknown>): Promise<string> {
+    const name = (args.name as string).trim().replace(/^#/, '')
+    if (!name) throw new Error('a channel needs a name')
+    const id = crypto.randomUUID()
+    const forum = args.type === 'forum'
+    await relay.publish({
+      kind: 9007,
+      content: '',
+      tags: [['h', id], ['name', name], ['visibility', args.private ? 'private' : 'open'], ['channel_type', forum ? 'forum' : 'stream'], ...(args.about ? [['about', args.about as string]] : [])],
+    })
+    await relay.publish({ kind: 9000, content: '', tags: [['h', id], ['p', owner]] })
+    channels.set(id, { name, dm: false, forum })
+    listen()
+    return `created #${name} (id: ${id}); new_thread can open threads in it`
+  }
+
   function react(id: string, emoji: string) {
     return relay.publish({ kind: 7, content: emoji, tags: [['e', id]] })
   }
@@ -500,6 +517,7 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
     if (tool === 'fetch_messages') return history(caller, args)
     if (tool === 'search_messages') return search(caller, args)
     if (tool === 'list_channels') return listChannels()
+    if (tool === 'create_channel') return createChannel(args)
     if (tool === 'presence') return whoIsOnline()
     if (tool === 'canvas') {
       const channel = args.channel ? readable(caller, channelNamed(args.channel as string)) : await channelOf(caller)
