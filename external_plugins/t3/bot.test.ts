@@ -187,9 +187,10 @@ test('a session gets T3\'s MCP servers, and starts again with them when they cha
   writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid: running.pid, status: 'idle' }]))
   await agent.request('session/resume', { sessionId, cwd: project, mcpServers: [t3Tools('two')] })
   agent.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'hi' }] }).catch(() => {})
-  await until(() => lines('launched').length === 2)
+  await until(() => lines('launched').some(line => line.includes('two'))).catch(() => {
+    throw new Error(`no start with the new servers: ${JSON.stringify({ launched: lines('launched'), claude: lines('claude') })}`)
+  })
   expect(lines('claude')).toContain(JSON.stringify(['stop', SESSION.slice(0, 8)]))
-  expect(lines('launched')[1]).toContain('two')
   expect(hex.inbound).toEqual([])
   const fresh = await session(sessionId)
   await until(() => fresh.inbound.length)

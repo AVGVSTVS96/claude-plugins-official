@@ -89,10 +89,10 @@ index 0000000000000000000000000000000000000000..c12bf015726ea411ac246ded94d2493c
 +socket.on('close', () => process.exit(0))
 diff --git a/external_plugins/t3/bot.test.ts b/external_plugins/t3/bot.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..ff7798628b40672c2e12d22b3c22882772a0acd1
+index 0000000000000000000000000000000000000000..5f0fbcfdae3621d2ea38c0ab5041b83ca9a1447e
 --- /dev/null
 +++ b/external_plugins/t3/bot.test.ts
-@@ -0,0 +1,253 @@
+@@ -0,0 +1,254 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { connect, type Socket } from 'net'
 +import { Readable, Writable } from 'stream'
@@ -282,9 +282,10 @@ index 0000000000000000000000000000000000000000..ff7798628b40672c2e12d22b3c228827
 +  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid: running.pid, status: 'idle' }]))
 +  await agent.request('session/resume', { sessionId, cwd: project, mcpServers: [t3Tools('two')] })
 +  agent.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'hi' }] }).catch(() => {})
-+  await until(() => lines('launched').length === 2)
++  await until(() => lines('launched').some(line => line.includes('two'))).catch(() => {
++    throw new Error(`no start with the new servers: ${JSON.stringify({ launched: lines('launched'), claude: lines('claude') })}`)
++  })
 +  expect(lines('claude')).toContain(JSON.stringify(['stop', SESSION.slice(0, 8)]))
-+  expect(lines('launched')[1]).toContain('two')
 +  expect(hex.inbound).toEqual([])
 +  const fresh = await session(sessionId)
 +  await until(() => fresh.inbound.length)
