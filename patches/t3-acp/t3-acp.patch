@@ -89,7 +89,7 @@ index 0000000000000000000000000000000000000000..c12bf015726ea411ac246ded94d2493c
 +socket.on('close', () => process.exit(0))
 diff --git a/external_plugins/t3/bot.test.ts b/external_plugins/t3/bot.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..375fe4e6701037805dde088c467cfdb3b71d27ed
+index 0000000000000000000000000000000000000000..837e360108d49cb0ac59280567b23d29177d9ab9
 --- /dev/null
 +++ b/external_plugins/t3/bot.test.ts
 @@ -0,0 +1,253 @@
@@ -278,7 +278,7 @@ index 0000000000000000000000000000000000000000..375fe4e6701037805dde088c467cfdb3
 +  writeFileSync(join(saved, `${SESSION}.jsonl`), '')
 +  const hex = await session(sessionId)
 +  await until(() => existsSync(join(dir, 'state', 'threads.json')) && readFileSync(join(dir, 'state', 'threads.json'), 'utf8').includes(SESSION))
-+  // Not this test's child, so it's reaped once killed and pidwait sees it go, as with a real session.
++  // Not this test's child, so it's reaped once killed and the hub sees it go, as with a real session.
 +  const pid = Number(Bun.spawnSync(['sh', '-c', 'sleep 60 >/dev/null 2>&1 & echo $!']).stdout.toString())
 +  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid, status: 'idle' }]))
 +  await agent.request('session/resume', { sessionId, cwd: project, mcpServers: [t3Tools('two')] })

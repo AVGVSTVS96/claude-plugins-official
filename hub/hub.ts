@@ -288,7 +288,18 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
     const name = threads[thread]!.name
     if (!running) return launch(thread, name, prompt)
     stop(thread)
-    execFile('pidwait', ['--pid', String(running.pid)], () => launch(thread, name, prompt))
+    exited(running.pid!, () => launch(thread, name, prompt))
+  }
+
+  // Node can't wait on a process it didn't start, and pidwait isn't on every system
+  // (macOS has none), so the process is checked until it's gone.
+  function exited(pid: number, then: () => void) {
+    try {
+      process.kill(pid, 0)
+      setTimeout(exited, 100, pid, then)
+    } catch {
+      then()
+    }
   }
 
   function welcome(thread: string, session: string, socket: Socket) {

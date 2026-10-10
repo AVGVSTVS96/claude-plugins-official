@@ -183,7 +183,7 @@ test('a session gets T3\'s MCP servers, and starts again with them when they cha
   writeFileSync(join(saved, `${SESSION}.jsonl`), '')
   const hex = await session(sessionId)
   await until(() => existsSync(join(dir, 'state', 'threads.json')) && readFileSync(join(dir, 'state', 'threads.json'), 'utf8').includes(SESSION))
-  // Not this test's child, so it's reaped once killed and pidwait sees it go, as with a real session.
+  // Not this test's child, so it's reaped once killed and the hub sees it go, as with a real session.
   const pid = Number(Bun.spawnSync(['sh', '-c', 'sleep 60 >/dev/null 2>&1 & echo $!']).stdout.toString())
   writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid, status: 'idle' }]))
   await agent.request('session/resume', { sessionId, cwd: project, mcpServers: [t3Tools('two')] })
