@@ -183,13 +183,12 @@ test('a session gets T3\'s MCP servers, and starts again with them when they cha
   writeFileSync(join(saved, `${SESSION}.jsonl`), '')
   const hex = await session(sessionId)
   await until(() => existsSync(join(dir, 'state', 'threads.json')) && readFileSync(join(dir, 'state', 'threads.json'), 'utf8').includes(SESSION))
-  const running = Bun.spawn(['sleep', '60'])
-  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid: running.pid, status: 'idle' }]))
+  // Not this test's child, so it's reaped once killed and pidwait sees it go, as with a real session.
+  const pid = Number(Bun.spawnSync(['sh', '-c', 'sleep 60 >/dev/null 2>&1 & echo $!']).stdout.toString())
+  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid, status: 'idle' }]))
   await agent.request('session/resume', { sessionId, cwd: project, mcpServers: [t3Tools('two')] })
   agent.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'hi' }] }).catch(() => {})
-  await until(() => lines('launched').some(line => line.includes('two')), 3000).catch(() => {
-    throw new Error(`no start with the new servers: ${JSON.stringify({ launched: lines('launched').map(line => line.slice(0, 80)), claude: lines('claude').slice(5), threads: readFileSync(join(dir, 'state', 'threads.json'), 'utf8'), agents: existsSync(join(dir, 'agents')) })}`)
-  })
+  await until(() => lines('launched').some(line => line.includes('two')))
   expect(lines('claude')).toContain(JSON.stringify(['stop', SESSION.slice(0, 8)]))
   expect(hex.inbound).toEqual([])
   const fresh = await session(sessionId)

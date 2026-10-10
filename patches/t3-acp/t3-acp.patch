@@ -89,10 +89,10 @@ index 0000000000000000000000000000000000000000..c12bf015726ea411ac246ded94d2493c
 +socket.on('close', () => process.exit(0))
 diff --git a/external_plugins/t3/bot.test.ts b/external_plugins/t3/bot.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..cc18e43b1c9c018ee2c5ca101b993d3eb68de549
+index 0000000000000000000000000000000000000000..375fe4e6701037805dde088c467cfdb3b71d27ed
 --- /dev/null
 +++ b/external_plugins/t3/bot.test.ts
-@@ -0,0 +1,254 @@
+@@ -0,0 +1,253 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { connect, type Socket } from 'net'
 +import { Readable, Writable } from 'stream'
@@ -278,13 +278,12 @@ index 0000000000000000000000000000000000000000..cc18e43b1c9c018ee2c5ca101b993d3e
 +  writeFileSync(join(saved, `${SESSION}.jsonl`), '')
 +  const hex = await session(sessionId)
 +  await until(() => existsSync(join(dir, 'state', 'threads.json')) && readFileSync(join(dir, 'state', 'threads.json'), 'utf8').includes(SESSION))
-+  const running = Bun.spawn(['sleep', '60'])
-+  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid: running.pid, status: 'idle' }]))
++  // Not this test's child, so it's reaped once killed and pidwait sees it go, as with a real session.
++  const pid = Number(Bun.spawnSync(['sh', '-c', 'sleep 60 >/dev/null 2>&1 & echo $!']).stdout.toString())
++  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid, status: 'idle' }]))
 +  await agent.request('session/resume', { sessionId, cwd: project, mcpServers: [t3Tools('two')] })
 +  agent.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'hi' }] }).catch(() => {})
-+  await until(() => lines('launched').some(line => line.includes('two')), 3000).catch(() => {
-+    throw new Error(`no start with the new servers: ${JSON.stringify({ launched: lines('launched').map(line => line.slice(0, 80)), claude: lines('claude').slice(5), threads: readFileSync(join(dir, 'state', 'threads.json'), 'utf8'), agents: existsSync(join(dir, 'agents')) })}`)
-+  })
++  await until(() => lines('launched').some(line => line.includes('two')))
 +  expect(lines('claude')).toContain(JSON.stringify(['stop', SESSION.slice(0, 8)]))
 +  expect(hex.inbound).toEqual([])
 +  const fresh = await session(sessionId)
