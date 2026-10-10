@@ -1,0 +1,6 @@
+{
+  "name": "voice",
+  "description": "Live voice calls for Claude Code: OpenAI's gpt-live-1 talks with you in real time and hands the real work to your Claude Code session.",
+  "version": "0.1.0",
+  "keywords": ["voice", "openai", "gpt-live", "channel", "mcp"]
+}

@@ -4427,6 +4427,12 @@
         "sha": "10573bac239b7062a476667eaa574d400335c70e"
       },
       "homepage": "https://github.com/amzn/selling-partner-agentic-toolkit"
+    },
+    {
+      "name": "voice",
+      "description": "Live voice calls: OpenAI gpt-live-1 talks with you in real time and hands the real work to your Claude Code session.",
+      "category": "productivity",
+      "source": "./external_plugins/voice"
     }
   ]
 }

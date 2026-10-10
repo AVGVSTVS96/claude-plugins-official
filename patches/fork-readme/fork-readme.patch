@@ -1,8 +1,8 @@
 diff --git a/README.md b/README.md
-index 43104e240ff500c762adebb0c31dc4b7ff7b50dd..c1d6d21e385c9e6225c01facfa6377c858b13969 100644
+index 43104e240ff500c762adebb0c31dc4b7ff7b50dd..07affbe72bf72d7bab2bb229ad9d4a7c1e512682 100644
 --- a/README.md
 +++ b/README.md
-@@ -1,3 +1,22 @@
+@@ -1,3 +1,24 @@
 +> [!NOTE]
 +> **This is an auto-patched fork of [claude-plugins-official](https://github.com/anthropics/claude-plugins-official).**
 +> It runs a personal assistant where every Telegram forum topic, Discord thread and Buzz
@@ -17,6 +17,8 @@ index 43104e240ff500c762adebb0c31dc4b7ff7b50dd..c1d6d21e385c9e6225c01facfa6377c8
 +>   ([discord-threads](patches/discord-threads/PATCH.md)).
 +> - [`external_plugins/buzz`](external_plugins/buzz/) is a new channel for
 +>   [Buzz](https://github.com/block/buzz) ([buzz-threads](patches/buzz-threads/PATCH.md)).
++> - [`external_plugins/voice`](external_plugins/voice/) is a live voice call: OpenAI's
++>   `gpt-live-1` talks, the Claude Code session does the work ([voice](patches/voice/PATCH.md)).
 +> - The marketplace is named `hex`, so plugins install as `telegram@hex`
 +>   ([hex-marketplace](patches/hex-marketplace/PATCH.md)).
 +>

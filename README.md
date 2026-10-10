@@ -12,6 +12,8 @@
 >   ([discord-threads](patches/discord-threads/PATCH.md)).
 > - [`external_plugins/buzz`](external_plugins/buzz/) is a new channel for
 >   [Buzz](https://github.com/block/buzz) ([buzz-threads](patches/buzz-threads/PATCH.md)).
+> - [`external_plugins/voice`](external_plugins/voice/) is a live voice call: OpenAI's
+>   `gpt-live-1` talks, the Claude Code session does the work ([voice](patches/voice/PATCH.md)).
 > - The marketplace is named `hex`, so plugins install as `telegram@hex`
 >   ([hex-marketplace](patches/hex-marketplace/PATCH.md)).
 >
