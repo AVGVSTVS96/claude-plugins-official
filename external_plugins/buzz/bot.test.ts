@@ -6,7 +6,7 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, chmodSync, existsS
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { generateSecretKey, getPublicKey, finalizeEvent, verifyEvent, type Event } from 'nostr-tools/pure'
-import { matchFilter, matchFilters, type Filter } from 'nostr-tools/filter'
+import { matchFilter, type Filter } from 'nostr-tools/filter'
 import { bytesToHex } from 'nostr-tools/utils'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { connectRelay } from './relay.ts'
@@ -14,18 +14,29 @@ import { connectRelay } from './relay.ts'
 type Peer = { challenge: string; pubkey?: string; subs: Map<string, Filter[]> }
 
 // A NIP-01/42 relay small enough to read: AUTH first, then REQ/EOSE/CLOSE and EVENT fan-out,
-// NIP-50 search as a substring match, and Buzz's NIP-98 /query channel window (NIP-CW).
+// NIP-50 search as a substring match, and Buzz's NIP-98 /query channel window (NIP-CW) and presence.
 function fakeRelay() {
   const events: Event[] = []
   const frames: unknown[][] = []
   const peers = new Set<ServerWebSocket<Peer>>()
   const downloads: string[] = []
+  const online = new Map<string, string>()
   const relayKey = generateSecretKey()
   const isReply = (event: Event) => event.tags.some(t => t[0] === 'e' && t[3] === 'reply')
 
+  // Buzz files a reaction or deletion under the channel of the event it names, h tag or not.
+  function channelOf(event: Event | undefined): string | undefined {
+    const target = event && [5, 7].includes(event.kind) ? events.find(stored => stored.id === event.tags.find(t => t[0] === 'e')?.[1]) : undefined
+    return event?.tags.find(t => t[0] === 'h')?.[1] ?? channelOf(target)
+  }
+
+  function matches({ '#h': channels, ...filter }: Filter, event: Event) {
+    return matchFilter(filter, event) && (!channels || channels.includes(channelOf(event)!))
+  }
+
   function stored(filters: Filter[]) {
     return filters.flatMap(filter => events
-      .filter(event => matchFilter(filter, event) && (!filter.search || event.content.toLowerCase().includes(filter.search.toLowerCase())))
+      .filter(event => matches(filter, event) && (!filter.search || event.content.toLowerCase().includes(filter.search.toLowerCase())))
       .sort((a, b) => b.created_at - a.created_at)
       .slice(0, filter.limit))
   }
@@ -37,6 +48,7 @@ function fakeRelay() {
     const signedFor = tag('u') === request.url && tag('method') === 'POST' && tag('payload') === createHash('sha256').update(body).digest('hex')
     if (!verifyEvent(auth) || auth.kind !== 27235 || !signedFor || JSON.parse(request.headers.get('x-auth-tag') ?? '[]')[1] !== owner) return new Response('bad auth', { status: 401 })
     const [filter] = JSON.parse(body)
+    if (filter.kinds[0] === 20001) return Response.json(filter.authors.filter((author: string) => online.has(author)).map((author: string) => signed(relayKey, 20001, online.get(author)!, [['p', author]])))
     const channel = filter['#h'][0]
     const rows = events
       .filter(event => matchFilter({ kinds: filter.kinds, '#h': [channel] }, event) && !isReply(event))
@@ -100,7 +112,7 @@ function fakeRelay() {
   function inject(event: Event) {
     events.push(event)
     for (const peer of peers) {
-      for (const [id, filters] of peer.data.subs) if (matchFilters(filters, event)) peer.send(JSON.stringify(['EVENT', id, event]))
+      for (const [id, filters] of peer.data.subs) if (filters.some(filter => matches(filter, event))) peer.send(JSON.stringify(['EVENT', id, event]))
     }
   }
   return {
@@ -108,6 +120,7 @@ function fakeRelay() {
     events,
     frames,
     downloads,
+    online,
     inject,
     drop: () => peers.forEach(peer => peer.terminate()),
     stop: () => server.stop(true),
@@ -186,7 +199,7 @@ afterEach(() => {
 
 // Runs bot.ts the way the hub service does, against its own fake relay, with
 // a fake `claude` that records its calls and a channel and a DM Hex is in.
-async function startBot() {
+async function startBot(prepare?: (setup: { state: string; relay: ReturnType<typeof fakeRelay>; channel: string; me: string; key: Uint8Array }) => void) {
   const dir = mkdtempSync(join(tmpdir(), 'buzz-'))
   const state = join(dir, 'state')
   mkdirSync(state)
@@ -211,15 +224,18 @@ exit 0
   const openSource = crypto.randomUUID()
   const secret = crypto.randomUUID()
   const dm = crypto.randomUUID()
+  const forum = crypto.randomUUID()
   const host = generateSecretKey()
   relay.inject(signed(key, 0, JSON.stringify({ name: 'Hex' })))
   relay.inject(signed(ownerKey, 0, JSON.stringify({ display_name: 'Bassim' })))
-  for (const id of [channel, openSource, dm]) relay.inject(signed(host, 39002, '', [['d', id], ['p', owner], ['p', me]]))
+  for (const id of [channel, openSource, dm, forum]) relay.inject(signed(host, 39002, '', [['d', id], ['p', owner], ['p', me]]))
   relay.inject(signed(host, 39002, '', [['d', secret], ['p', owner]]))
   relay.inject(signed(host, 39000, '', [['d', channel], ['name', 'general'], ['t', 'stream']]))
   relay.inject(signed(host, 39000, '', [['d', openSource], ['name', 'open-source'], ['t', 'stream']]))
   relay.inject(signed(host, 39000, '', [['d', secret], ['name', 'secret'], ['t', 'stream']]))
   relay.inject(signed(host, 39000, '', [['d', dm], ['name', 'dm'], ['hidden'], ['t', 'dm']]))
+  relay.inject(signed(host, 39000, '', [['d', forum], ['name', 'ideas'], ['t', 'forum']]))
+  prepare?.({ state, relay, channel, me, key })
 
   const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^(BUZZ_|HEX_|TELEGRAM_|DISCORD_)/.test(name)))
   const bot = Bun.spawn(['bun', join(import.meta.dir, 'bot.ts')], {
@@ -269,13 +285,14 @@ exit 0
     openSource,
     secret,
     dm,
+    forum,
     relay,
     published,
     calls,
     launches: () => calls().filter(args => args[0] === '--bg'),
     session,
-    say: (content: string, tags: string[][] = [], from = ownerKey, where = channel, at?: number) => {
-      const event = signed(from, 9, content, [['h', where], ...tags], at)
+    say: (content: string, tags: string[][] = [], from = ownerKey, where = channel, at?: number, kind = 9) => {
+      const event = signed(from, kind, content, [['h', where], ...tags], at)
       relay.inject(event)
       return event
     },
@@ -351,6 +368,67 @@ test('an edit reaches the thread as the edited message\'s new text', async () =>
   expect(inbound[2].meta.new_thread).toBeUndefined()
 })
 
+test('a bare tag on someone\'s message brings Hex into its thread, with that message as what the tag replies to', async () => {
+  const bot = await startBot()
+  const post = bot.say('gpt-live-1 can i use custom voices')
+  bot.say('@Hex', [['e', post.id, '', 'reply'], ['p', bot.me]])
+  const args = await until(() => bot.launches()[0])
+  expect(args[args.indexOf('--name') + 1]).toBe('gpt-live-1 can')
+  const [inbound] = await (await bot.session(post.id)).inbound(1)
+  expect(inbound.content).toBe('(tagged you)')
+  expect(inbound.meta).toMatchObject({ chat_id: post.id, new_thread: 'true', reply_to_message_id: post.id, reply_to_user: 'Bassim', reply_to_text: 'gpt-live-1 can i use custom voices' })
+})
+
+test('a reaction on a message in Hex\'s thread reaches it, and so does taking it back; one elsewhere doesn\'t', async () => {
+  const bot = await startBot()
+  const { session } = await threadStarted(bot)
+  const sent = (await session.call('reply', { text: 'on it' })).text.match(/id: (\w+)/)[1]
+  bot.relay.inject(signed(ownerKey, 7, '👍', [['e', bot.say('lunch anyone?').id]]))
+  const like = signed(ownerKey, 7, '👍', [['e', sent]])
+  bot.relay.inject(like)
+  bot.relay.inject(signed(ownerKey, 5, '', [['e', like.id]]))
+  const [, added, removed] = await session.inbound(3)
+  expect(added.content).toBe('(reaction: 👍)')
+  expect(added.meta).toMatchObject({ reaction: '👍', reaction_to_message_id: sent, reaction_to_user: 'me', reaction_to_text: 'on it', user: 'Bassim', channel: 'general' })
+  expect(removed.content).toBe('(reaction removed: 👍)')
+  expect(removed.meta).toMatchObject({ reaction: '👍', reaction_removed: 'true', reaction_to_message_id: sent, reaction_to_text: 'on it' })
+  await Bun.sleep(300)
+  expect((await session.inbound(3)).length).toBe(3)
+})
+
+test('a deleted message reaches its thread with what it said', async () => {
+  const bot = await startBot()
+  const { root, session } = await threadStarted(bot)
+  const typo = bot.say('the lfet one', [['e', root.id, '', 'reply']])
+  await session.inbound(2)
+  bot.relay.inject(signed(ownerKey, 5, '', [['h', bot.channel], ['e', typo.id]]))
+  const inbound = await session.inbound(3)
+  expect(inbound[2].content).toBe('(deleted a message)')
+  expect(inbound[2].meta).toMatchObject({ deleted: 'true', message_id: typo.id, deleted_text: 'the lfet one', chat_id: root.id })
+})
+
+test('after a restart Hex picks up what was sent while it was down, in order, and nothing twice', async () => {
+  const t = Math.floor(Date.now() / 1000) - 100
+  let root!: Event
+  const bot = await startBot(({ state, relay, channel, me }) => {
+    const at = (offset: number, content: string, tags: string[][]) => {
+      const event = signed(ownerKey, 9, content, [['h', channel], ...tags], t + offset)
+      relay.inject(event)
+      return event
+    }
+    root = at(0, '@Hex desk anchors are loose', [['p', me]])
+    writeFileSync(join(state, 'threads.json'), JSON.stringify({ [root.id]: { name: 'Desk anchors' } }))
+    writeFileSync(join(state, 'cursor.json'), JSON.stringify({ at: t, ids: [root.id] }))
+    at(9, 'three', [['e', root.id, '', 'reply']])
+    at(0, 'one', [['e', root.id, '', 'reply']])
+    at(5, 'two', [['e', root.id, '', 'reply']])
+  })
+  const session = await bot.session(root.id)
+  expect((await session.inbound(3)).map(line => line.content)).toEqual(['one', 'two', 'three'])
+  await Bun.sleep(300)
+  expect((await session.inbound(3)).length).toBe(3)
+})
+
 test('reply posts into the thread with NIP-10 markers, a p tag for the owner and the auth tag', async () => {
   const bot = await startBot()
   const { root, session } = await threadStarted(bot)
@@ -417,6 +495,97 @@ test('new_thread opens a thread in Buzz, starts its session with the prompt, and
   const args = await until(() => bot.launches()[1])
   expect(args[args.indexOf('--name') + 1]).toBe('Desk anchors')
   expect(args.at(-1)).toBe('find better anchors')
+})
+
+test('reply with buttons lists them numbered and reacts with each keycap; the first tap arrives as a button, the other keycaps come off, later taps are ignored', async () => {
+  const bot = await startBot()
+  const { session } = await threadStarted(bot)
+  expect((await session.call('reply', { text: 'pick one', buttons: Array.from({ length: 11 }, (_, i) => `${i}`) })).error).toBe('at most 10 buttons')
+  const id = (await session.call('reply', { text: 'Ship it?', buttons: ['Yes', 'No'] })).text.match(/id: (\w+)/)[1]
+  expect(bot.relay.events.find(event => event.id === id)!.content).toBe('Ship it?\n\n1️⃣ Yes\n2️⃣ No')
+  const keycaps = bot.published(7).filter(event => event.tags[0]![1] === id)
+  expect(keycaps.map(event => event.content)).toEqual(['1️⃣', '2️⃣'])
+  bot.relay.inject(signed(ownerKey, 7, '2\u20E3', [['e', id]]))
+  const [, tapped] = await session.inbound(2)
+  expect(tapped.content).toBe('No')
+  expect(tapped.meta).toMatchObject({ button: 'true', button_message_id: id, user: 'Bassim', channel: 'general' })
+  expect(await until(() => bot.published(5).find(event => event.tags[0]![1] === keycaps[0]!.id))).toBeTruthy()
+  expect(bot.published(5).some(event => event.tags[0]![1] === keycaps[1]!.id)).toBe(false)
+  bot.relay.inject(signed(ownerKey, 7, '1️⃣', [['e', id]]))
+  bot.relay.inject(signed(ownerKey, 7, '👍', [['e', id]]))
+  const inbound = await session.inbound(3)
+  expect(inbound[2].content).toBe('(reaction: 👍)')
+  await Bun.sleep(300)
+  expect((await session.inbound(3)).length).toBe(3)
+})
+
+test('a tap on buttons sent before a restart still arrives as a button', async () => {
+  const at = Math.floor(Date.now() / 1000) - 100
+  let question!: Event
+  let yes!: Event
+  const bot = await startBot(({ state, relay, channel, me, key }) => {
+    const root = signed(ownerKey, 9, '@Hex ship it?', [['h', channel], ['p', me]], at)
+    question = signed(key, 9, 'Ship it?\n\n1️⃣ Yes\n2️⃣ No', [['h', channel], ['e', root.id, '', 'reply']], at)
+    yes = signed(key, 7, '1️⃣', [['e', question.id]], at)
+    const no = signed(key, 7, '2️⃣', [['e', question.id]], at)
+    for (const event of [root, question, yes, no]) relay.inject(event)
+    writeFileSync(join(state, 'threads.json'), JSON.stringify({ [root.id]: { name: 'Ship it' } }))
+    writeFileSync(join(state, 'buttons.json'), JSON.stringify({ [question.id]: { thread: root.id, choices: [{ label: 'Yes', reaction: yes.id }, { label: 'No', reaction: no.id }] } }))
+  })
+  bot.relay.inject(signed(ownerKey, 7, '2️⃣', [['e', question.id]]))
+  const [tapped] = await (await bot.session(question.tags[1]![1]!)).inbound(1)
+  expect(tapped).toMatchObject({ content: 'No', meta: { button: 'true', button_message_id: question.id } })
+  expect(await until(() => bot.published(5).find(event => event.tags[0]![1] === yes.id))).toBeTruthy()
+})
+
+test('rename_thread renames a thread Hex opened in Buzz too, by editing its first message', async () => {
+  const bot = await startBot()
+  const { session } = await threadStarted(bot)
+  await session.call('rename_thread', { title: 'Loose anchors' })
+  expect(bot.published(40003)).toEqual([])
+  await session.call('new_thread', { title: 'Desk anchors', prompt: 'find better anchors' })
+  const root = await until(() => bot.published(9).find(event => event.content === '**Desk anchors**'))
+  const opened = await bot.session(root.id)
+  expect((await opened.call('rename_thread', { title: 'Desk mounts' })).text).toBe('renamed to "Desk mounts", and its first message in Buzz now says so')
+  expect(bot.published(40003).map(event => [event.content, event.tags])).toEqual([['**Desk mounts**', [['h', bot.channel], ['e', root.id], bot.auth]]])
+})
+
+test('delete_message and react with remove take back what Hex posted, and nothing of anyone else\'s', async () => {
+  const bot = await startBot()
+  const { root, session } = await threadStarted(bot)
+  const sent = (await session.call('reply', { text: 'on it' })).text.match(/id: (\w+)/)[1]
+  await session.call('react', { message_id: root.id, emoji: '✅' })
+  const check = bot.published(7).find(event => event.content === '✅')!
+  expect((await session.call('react', { message_id: root.id, emoji: '✅', remove: true })).text).toBe('reaction removed')
+  expect((await session.call('react', { message_id: root.id, emoji: '🎉', remove: true })).error).toBe('the bot hasn\'t reacted 🎉 to that message')
+  expect((await session.call('delete_message', { message_id: sent })).text).toBe('deleted')
+  expect((await session.call('delete_message', { message_id: root.id })).error).toBe('only the bot\'s own messages can be deleted')
+  const deletions = bot.published(5).map(event => event.tags).filter(tags => tags.some(t => t[1] === check.id || t[1] === sent))
+  expect(deletions).toEqual([[['e', check.id], bot.auth], [['h', bot.channel], ['e', sent], bot.auth]])
+})
+
+test('canvas reads the channel\'s canvas and saves new revisions ahead of the one it read', async () => {
+  const bot = await startBot()
+  const { session } = await threadStarted(bot)
+  expect((await session.call('canvas', {})).text).toBe('(this channel has no canvas yet)')
+  const first = (await session.call('canvas', { text: '# Plan' })).text.match(/revision: (\w+)/)[1]
+  expect((await session.call('canvas', {})).text).toBe(`# Plan\n\n(revision: ${first})`)
+  await session.call('canvas', { text: '# Plan\n- anchors', revision: first })
+  const [v1, v2] = bot.published(40100)
+  expect(v1!.tags).toEqual([['h', bot.channel], bot.auth])
+  expect(v2!.tags).toEqual([['h', bot.channel], ['expected-revision', first], bot.auth])
+  expect(v2!.created_at).toBeGreaterThan(v1!.created_at)
+  expect((await session.call('canvas', { channel: 'open-source' })).text).toBe('(this channel has no canvas yet)')
+  expect((await session.call('canvas', { channel: 'secret' })).error).toBe('Hex is in no channel named #secret')
+})
+
+test('presence says whether the owner is online, away or offline', async () => {
+  const bot = await startBot()
+  const { session } = await threadStarted(bot)
+  bot.relay.online.set(owner, 'away')
+  expect((await session.call('presence', {})).text).toBe('Bassim: away')
+  bot.relay.online.delete(owner)
+  expect((await session.call('presence', {})).text).toBe('Bassim: offline')
 })
 
 test('download_attachment saves a message\'s files to the inbox, fetched with Blossom auth', async () => {
@@ -500,6 +669,31 @@ test('search_messages finds words in Hex\'s channels, naming each hit\'s channel
   expect(scoped.text).not.toContain(reply.id)
 })
 
+test('a forum post that tags Hex is its own thread: comments on it reach the session, edits and deletes too, and replies post as comments', async () => {
+  const bot = await startBot()
+  const posted = (content: string, tags: string[][] = []) => bot.say(content, tags, ownerKey, bot.forum, undefined, 45001)
+  const comment = (content: string, tags: string[][] = []) => bot.say(content, tags, ownerKey, bot.forum, undefined, 45003)
+  posted('nobody asked hex here')
+  const post = posted('@Hex should we ship the relay PR', [['p', bot.me]])
+  const args = await until(() => bot.launches()[0])
+  expect(args[args.indexOf('--name') + 1]).toBe('should we')
+  const session = await bot.session(post.id)
+  const first = comment('the CI is green now', [['e', post.id, '', 'reply']])
+  bot.relay.inject(signed(ownerKey, 40003, 'the CI is finally green', [['h', bot.forum], ['e', first.id]]))
+  bot.relay.inject(signed(ownerKey, 5, '', [['h', bot.forum], ['e', first.id]]))
+  const inbound = await session.inbound(4)
+  expect(inbound.map(line => line.content)).toEqual(['should we ship the relay PR', 'the CI is green now', 'the CI is finally green', '(deleted a message)'])
+  expect(inbound[0].meta).toMatchObject({ chat_id: post.id, message_id: post.id, channel: 'ideas', new_thread: 'true' })
+  expect(inbound[2].meta).toMatchObject({ message_id: first.id, edited: 'true' })
+  expect(inbound[3].meta).toMatchObject({ deleted: 'true', message_id: first.id, deleted_text: 'the CI is finally green' })
+  const sent = (await session.call('reply', { text: 'ship it' })).text.match(/id: (\w+)/)[1]
+  expect(bot.relay.events.find(event => event.id === sent)).toMatchObject({ kind: 45003, tags: [['h', bot.forum], ['e', post.id, '', 'reply'], ['p', owner], bot.auth] })
+  await session.call('new_thread', { title: 'Release notes', prompt: 'draft them', channel: 'ideas' })
+  expect(await until(() => bot.relay.events.find(event => event.content === '**Release notes**'))).toMatchObject({ kind: 45001, tags: [['h', bot.forum], ['p', owner], bot.auth] })
+  await Bun.sleep(300)
+  expect(bot.launches().length).toBe(2)
+})
+
 test('list_channels names the channels Hex is in, and marks direct messages', async () => {
   const bot = await startBot()
   const { session } = await threadStarted(bot)
@@ -508,5 +702,6 @@ test('list_channels names the channels Hex is in, and marks direct messages', as
     `#general  (id: ${bot.channel})`,
     `#open-source  (id: ${bot.openSource})`,
     `dm  (id: ${bot.dm}, direct message)`,
+    `#ideas  (id: ${bot.forum})`,
   ].sort())
 })

@@ -102,6 +102,11 @@ function bash(id: string, tool: string, command: string, output: string) {
   line({ type: 'user', message: { role: 'user', content: [{ tool_use_id: tool, type: 'tool_result', content: output, is_error: false }] }, toolUseResult: { stdout: output, stderr: '', interrupted: false, isImage: false, noOutputExpected: false } })
 }
 
+// What Claude Code writes once a turn's Stop hooks have run.
+function stopHooks() {
+  line({ type: 'system', subtype: 'stop_hook_summary', hookCount: 1, hookInfos: [], hookErrors: [], preventedContinuation: false, stopReason: '', hasOutput: false, level: 'suggestion' })
+}
+
 function plaintexts() {
   return published.map(({ event }) => decrypt(event.content, key))
 }
@@ -142,6 +147,7 @@ test('a turn streams its new transcript lines as ACP session updates, then compl
   assistant('msg_01', { type: 'thinking', thinking: 'Check the clock.', signature: 'sig' })
   bash('msg_01', 'toolu_01', 'date', 'Tue Oct  6 12:00:00 UTC 2026')
   assistant('msg_02', { type: 'text', text: "It's noon." })
+  stopHooks()
   await until(() => updates().some(update => update.sessionUpdate === 'agent_message_chunk'))
   activity.idle(ROOT)
   await until(() => frames().some(frame => frame.kind === 'turn_completed'))
@@ -190,6 +196,34 @@ test('at most one relay event a second, with what piled up sent as one batch', a
   }
   const seqs = frames().map(frame => frame.seq)
   expect(seqs).toEqual([...new Set(seqs)].sort((a, b) => a - b))
+}, 15000)
+
+test('a turn reported over before its last step is written completes once Claude Code has written it', async () => {
+  activity.busy({ thread: ROOT, channel: CHANNEL, session: SESSION, triggers: [] })
+  assistant('msg_01', { type: 'text', text: 'working on it' })
+  await until(() => updates().length === 1)
+  activity.idle(ROOT)
+  await Bun.sleep(1100)
+  expect(frames().some(frame => frame.kind === 'turn_completed')).toBe(false)
+  assistant('msg_02', { type: 'text', text: 'all done' })
+  stopHooks()
+  await until(() => frames().some(frame => frame.kind === 'turn_completed'))
+  expect(frames().filter(frame => frame.kind === 'acp_read' || frame.kind === 'turn_completed').map(frame => frame.payload.params?.update.content.text ?? frame.kind))
+    .toEqual(['working on it', 'all done', 'turn_completed'])
+}, 15000)
+
+test('a turn whose session was stopped completes with what it wrote, and the next turn starts clean', async () => {
+  activity.busy({ thread: ROOT, channel: CHANNEL, session: SESSION, triggers: [] })
+  assistant('msg_01', { type: 'text', text: 'halfway' })
+  activity.stopped(ROOT)
+  activity.idle(ROOT)
+  await until(() => frames().some(frame => frame.kind === 'turn_completed'))
+  activity.busy({ thread: 'c'.repeat(64), channel: CHANNEL, session: SESSION, triggers: [] })
+  activity.idle('c'.repeat(64))
+  activity.busy({ thread: 'c'.repeat(64), channel: CHANNEL, session: SESSION, triggers: [] })
+  await until(() => frames().filter(frame => frame.kind === 'turn_started').length === 3)
+  expect(frames().map(frame => frame.kind).filter(kind => kind.startsWith('turn_'))).toEqual(['turn_started', 'turn_completed', 'turn_started', 'turn_completed', 'turn_started'])
+  expect(updates().map(update => update.content.text)).toEqual(['halfway'])
 }, 15000)
 
 test('session/new is sent once per session, with AGENTS.md and what it imports', async () => {
@@ -280,6 +314,7 @@ test('turn_liveness every 10 s while a turn is open, none after it completes', a
   await until(() => published.length)
   setSystemTime(new Date(Date.now() + 10_500))
   await until(() => frames().some(frame => frame.kind === 'turn_liveness'))
+  stopHooks()
   activity.idle(ROOT)
   setSystemTime(new Date(Date.now() + 10_500))
   await until(() => frames().some(frame => frame.kind === 'turn_completed'))

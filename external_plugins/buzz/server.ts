@@ -14,9 +14,11 @@ const mcp = new Server(
     instructions: [
       'The sender reads Buzz, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat. Nobody watches this terminal either, so once your reply is sent, end the turn instead of summarizing it here.',
       '',
-      'This session is one Buzz thread or direct message, the place for deeper work. Buzz renders Markdown, so answers can be longer and structured: headings, lists, and code blocks with a language. Its messages arrive as <channel source="buzz" chat_id="..." message_id="..." user="..." ts="...">, and everything you send with these tools lands back in that same thread. Buzz threads have no title, so if the tag has new_thread="true", name this thread for your own list and for handoffs: 1–2 words with rename_thread. If you were tagged into a thread that was already going, fetch_messages shows what came before. If the tag has attachment_count, the attachments attribute lists name/type/size — call download_attachment(message_id) to fetch them. If the tag has reply_to_message_id, the sender replied to that earlier message: reply_to_text is its text and reply_to_attachments lists its files (download_attachment with that id). edited="true" means the sender edited the message with that message_id and this is its new text. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply.',
+      'This session is one Buzz thread or direct message, the place for deeper work. Buzz renders Markdown, so answers can be longer and structured: headings, lists, and code blocks with a language. Its messages arrive as <channel source="buzz" chat_id="..." message_id="..." user="..." ts="...">, and everything you send with these tools lands back in that same thread. If the tag has new_thread="true", name this thread with rename_thread: 1–2 words. If you were tagged into a thread that was already going, reply_to_* is the message it hangs off ("(tagged you)" alone means: read that message) and fetch_messages shows the rest. In a forum channel each post is its own thread: comments on it arrive here, and your replies post as comments on it. If the tag has attachment_count, the attachments attribute lists name/type/size — call download_attachment(message_id) to fetch them. If the tag has reply_to_message_id, the sender replied to that earlier message: reply_to_text is its text and reply_to_attachments lists its files (download_attachment with that id). edited="true" means the sender edited the message with that message_id and this is its new text. A reaction arrives as "(reaction: 👍)", or "(reaction removed: 👍)" with reaction_removed="true", with reaction_to_message_id, reaction_to_user and reaction_to_text naming the message it is on. deleted="true" means the sender deleted the message with that message_id; deleted_text is what it said. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply.',
       '',
-      'reply accepts file paths (files: ["/abs/path.png"]) for attachments. Use react to add emoji reactions, and edit_message for interim progress updates. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',
+      'reply accepts file paths (files: ["/abs/path.png"]) for attachments, and buttons (up to 10 short labels) to offer choices the user taps: a tap arrives with button="true" and button_message_id, and the chosen label as its text. Use react to add emoji reactions (remove: true takes yours off), edit_message for interim progress updates, and delete_message to take back a message you sent. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',
+      '',
+      'Each channel has one shared canvas, a Markdown document the user opens from the channel\'s details: canvas() reads it with its revision, and canvas(text, revision) replaces it, refused if someone changed it since that revision. presence tells you whether the user is online, away or offline.',
       '',
       'new_thread opens another thread with its own fresh session and hands it your prompt. Use it for work the user will want to follow or talk to on its own. handoff moves this whole conversation to another app, such as telegram, when the user asks: you stop here and continue there with your memory.',
       '',
@@ -44,20 +46,37 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
             items: { type: 'string' },
             description: 'Absolute file paths to attach: images, MP4 video, PDFs or other files, but not audio. Max 100MB each.',
           },
+          buttons: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Choices the user can tap, at most 10, like ["Yes", "No"]. They show as a numbered list under the text.',
+          },
         },
         required: ['text'],
       },
     },
     {
       name: 'react',
-      description: 'Add an emoji reaction to a Buzz message.',
+      description: 'Add an emoji reaction to a Buzz message, or take yours off.',
       inputSchema: {
         type: 'object',
         properties: {
           message_id: { type: 'string' },
           emoji: { type: 'string' },
+          remove: { type: 'boolean', description: 'Take your reaction with this emoji off instead.' },
         },
         required: ['message_id', 'emoji'],
+      },
+    },
+    {
+      name: 'delete_message',
+      description: 'Delete a message the bot sent.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          message_id: { type: 'string' },
+        },
+        required: ['message_id'],
       },
     },
     {
@@ -110,13 +129,30 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: 'canvas',
+      description: 'Read this channel\'s canvas, or replace it by passing text. Reading returns its Markdown and revision.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          text: { type: 'string', description: 'The whole new canvas, in Markdown.' },
+          revision: { type: 'string', description: 'The revision you read: the save is refused if the canvas changed since.' },
+          channel: { type: 'string', description: 'Channel whose canvas to use instead of this one, by name or id.' },
+        },
+      },
+    },
+    {
+      name: 'presence',
+      description: 'Whether the user is online, away or offline in Buzz right now.',
+      inputSchema: { type: 'object', properties: {} },
+    },
+    {
       name: 'list_channels',
       description: 'List the Buzz channels you are in, with their IDs. Direct messages are marked.',
       inputSchema: { type: 'object', properties: {} },
     },
     {
       name: 'rename_thread',
-      description: 'Name this thread: 1–2 words, like a chat name ("Desk anchors", "Hub tests"). Buzz shows no thread titles, so the name is for your thread list and handoffs.',
+      description: 'Name this thread: 1–2 words, like a chat name ("Desk anchors", "Hub tests"). Buzz threads have no titles, so the name is for your thread list and handoffs; a thread you opened with new_thread also shows it as its first message.',
       inputSchema: {
         type: 'object',
         properties: {

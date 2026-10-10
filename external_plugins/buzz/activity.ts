@@ -18,8 +18,8 @@ type Frame = {
   startedAt?: string
   payload: unknown
 }
-type Transcript = { path: string; offset: number; rest: Buffer; since: number; tools: Record<string, any>; tasks: Map<any, any> }
-type Turn = { id: string; thread: string; channel: string; startedAt: string; beat: number; session?: string; transcript?: Transcript }
+type Transcript = { path: string; offset: number; rest: Buffer; since: number; tools: Record<string, any>; tasks: Map<any, any>; stopped: boolean }
+type Turn = { id: string; thread: string; channel: string; startedAt: string; beat: number; session?: string; transcript?: Transcript; ending?: boolean; cut?: boolean }
 type Target = { channel: string; thread?: string; session?: string }
 
 const KIND = 24200
@@ -78,7 +78,8 @@ export function startActivity({ relay, secretKey, owner, hexDir, cancel }: {
 
   function busy({ thread, channel, session, triggers }: { thread: string; channel: string; session?: string; triggers: string[] }) {
     const turn = turns.get(thread)
-    if (turn) {
+    if (turn?.ending) finish(turn)
+    else if (turn) {
       if (session && !turn.transcript) follow(turn, session, false)
       return
     }
@@ -93,7 +94,7 @@ export function startActivity({ relay, secretKey, owner, hexDir, cancel }: {
   function follow(turn: Turn, session: string, fresh: boolean) {
     turn.session = session
     const path = join(projects, `${session}.jsonl`)
-    turn.transcript = { path, offset: fresh ? sizeOf(path) : 0, rest: Buffer.alloc(0), since: Date.parse(turn.startedAt), tools: {}, tasks: new Map() }
+    turn.transcript = { path, offset: fresh ? sizeOf(path) : 0, rest: Buffer.alloc(0), since: Date.parse(turn.startedAt), tools: {}, tasks: new Map(), stopped: false }
     if (announced.has(session)) return
     announced.add(session)
     push('acp_write', { jsonrpc: '2.0', id: 0, method: 'session/new', params: { cwd: hexDir, mcpServers: [], systemPrompt: instructions() } }, turn)
@@ -132,8 +133,9 @@ export function startActivity({ relay, secretKey, owner, hexDir, cancel }: {
     } catch {
       return
     }
-    if ((entry.type !== 'assistant' && entry.type !== 'user') || entry.isSidechain) return
     if (!(Date.parse(entry.timestamp) >= turn.transcript!.since)) return
+    if (entry.type === 'system' && entry.subtype === 'stop_hook_summary') turn.transcript!.stopped = true
+    if ((entry.type !== 'assistant' && entry.type !== 'user') || entry.isSidechain) return
     if (entry.type === 'user' && (entry.isMeta || entry.origin)) return
     const content = entry.type === 'user' ? stripLocalCommandMetadata(entry.message?.content) : entry.message?.content
     if (content == null) return
@@ -149,11 +151,26 @@ export function startActivity({ relay, secretKey, owner, hexDir, cancel }: {
     for (const notification of notifications) push('acp_read', { jsonrpc: '2.0', method: 'session/update', params: notification }, turn)
   }
 
+  // The Stop hook reports a turn over before Claude Code has written its last
+  // steps, and Claude Code writes stop_hook_summary once the hooks are done, so
+  // the turn completes when that line is read. A session stopped from here runs
+  // no Stop hooks, so its turn completes with whatever it wrote.
   function idle(thread: string) {
     const turn = turns.get(thread)
     if (!turn) return
+    turn.ending = true
     read(turn)
-    turns.delete(thread)
+    if (turn.cut || !turn.transcript || turn.transcript.stopped) finish(turn)
+  }
+
+  function stopped(thread: string) {
+    const turn = turns.get(thread)
+    if (turn) turn.cut = true
+  }
+
+  function finish(turn: Turn) {
+    read(turn)
+    turns.delete(turn.thread)
     push('turn_completed', {}, turn)
   }
 
@@ -231,6 +248,10 @@ export function startActivity({ relay, secretKey, owner, hexDir, cancel }: {
   function tick() {
     for (const turn of turns.values()) {
       read(turn)
+      if (turn.ending && turn.transcript!.stopped) {
+        finish(turn)
+        continue
+      }
       if (Date.now() - turn.beat < LIVENESS) continue
       turn.beat = Date.now()
       push('turn_liveness', root(turn), turn)
@@ -276,6 +297,7 @@ export function startActivity({ relay, secretKey, owner, hexDir, cancel }: {
   return {
     busy,
     idle,
+    stopped,
     log,
     close() {
       clearInterval(timer)

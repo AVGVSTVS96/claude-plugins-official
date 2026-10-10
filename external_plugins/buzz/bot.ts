@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { readFileSync, writeFileSync, mkdirSync, statSync, realpathSync, chmodSync } from 'fs'
+import { readFileSync, writeFileSync, mkdirSync, statSync, realpathSync, chmodSync, renameSync } from 'fs'
 import { createHash } from 'crypto'
 import { homedir } from 'os'
 import { basename, join, sep } from 'path'
@@ -14,6 +14,8 @@ import { startMemory } from './memory.ts'
 const STATE_DIR = process.env.BUZZ_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'hex', 'buzz')
 const ACCESS_FILE = join(STATE_DIR, 'access.json')
 const ENV_FILE = join(STATE_DIR, '.env')
+const CURSOR_FILE = join(STATE_DIR, 'cursor.json')
+const BUTTONS_FILE = join(STATE_DIR, 'buttons.json')
 const INBOX_DIR = join(STATE_DIR, 'inbox')
 
 try {
@@ -68,8 +70,15 @@ function secretKeyOf(key: string): Uint8Array {
 // Buzz clients cap a message at 64 KiB, and a character takes at most 4 bytes.
 const MAX_CHUNK_LIMIT = 16 * 1024
 const MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024
-// Chat messages, Buzz's older message kind, and diffs: what a channel's history is made of.
-const MESSAGES = [9, 40002, 40008]
+// Chat messages, Buzz's older message kind, diffs, and forum posts and comments: what a channel's history is made of.
+const MESSAGES = [9, 40002, 40008, 45001, 45003]
+const POST = 45001
+const COMMENT = 45003
+// Messages, forum posts and comments, edits, reactions, and deletions (NIP-09, and NIP-29's admin delete): what reaches Hex live.
+const INBOUND = [9, POST, COMMENT, 40003, 7, 5, 9005]
+const CANVAS = 40100
+// Buzz has no buttons, so choices are numbered with these and tapped as reactions.
+const KEYCAPS = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟']
 
 // reply's files param takes any path, but channel state and .env files (keys)
 // are the things Claude has no reason to ever send.
@@ -125,6 +134,22 @@ function title(text: string): string {
   return title
 }
 
+function keep(path: string, value: unknown) {
+  writeFileSync(`${path}.tmp`, JSON.stringify(value) + '\n')
+  renameSync(`${path}.tmp`, path)
+}
+
+function load<T>(path: string, fallback: T): T {
+  try {
+    return JSON.parse(readFileSync(path, 'utf8'))
+  } catch {
+    return fallback
+  }
+}
+
+// Some clients send a keycap without its variation selector.
+const keycap = (emoji: string) => KEYCAPS.findIndex(choice => choice.replace(/\uFE0F/g, '') === emoji.replace(/\uFE0F/g, ''))
+
 function now() {
   return Math.floor(Date.now() / 1000)
 }
@@ -171,12 +196,17 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
   const me = relay.pubkey
   const start = now()
   const http = url.replace(/^ws/, 'http').replace(/\/$/, '')
-  const channels = new Map<string, { name: string; dm: boolean }>()
+  const channels = new Map<string, { name: string; dm: boolean; forum: boolean }>()
   const homes = new Map<string, string>()
   const names = new Map<string, Promise<string>>()
   const triggers = new Map<string, string[]>()
   const acks = new Map<string, string[]>()
   const typing = new Map<string, ReturnType<typeof setInterval>>()
+  // The relay hides deleted events, so a deletion is explained by what Hex saw before it.
+  const texts = new Map<string, { thread: string; text: string }>()
+  const reactions = new Map<string, { thread: string; emoji: string; meta: Record<string, string> }>()
+  // Messages Hex sent with buttons, its keycap reaction for each, and which one was tapped.
+  const buttons = load<Record<string, { thread: string; choices: { label: string; reaction?: string }[]; chosen?: number }>>(BUTTONS_FILE, {})
   const access = loadAccess()
   const panels = access.panels !== false
   const activity = panels ? startActivity({ relay, secretKey, owner, hexDir: process.env.HEX_DIR ?? process.cwd(), cancel }) : undefined
@@ -241,14 +271,17 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
     return parent && parent !== thread ? [['e', thread, '', 'root'], ['e', parent, '', 'reply']] : [['e', thread, '', 'reply']]
   }
 
+  // In a forum channel every thread is a post, and a reply in it is a comment.
   async function post(thread: string, content: string, extra: string[][] = [], parent?: string): Promise<Event> {
     const channel = await channelOf(thread)
-    return relay.publish({ kind: 9, content, tags: [['h', channel], ...threadTags(thread, parent), ['p', owner], ...extra] })
+    const sent = await relay.publish({ kind: channels.get(channel)?.forum ? COMMENT : 9, content, tags: [['h', channel], ...threadTags(thread, parent), ['p', owner], ...extra] })
+    texts.set(sent.id, { thread, text: content })
+    return sent
   }
 
   async function place(name: string, where?: string) {
     const channel = channelNamed(where ?? loadAccess().channel)
-    const root = await relay.publish({ kind: 9, content: `**${name}**`, tags: [['h', channel], ['p', owner]] })
+    const root = await relay.publish({ kind: channels.get(channel)!.forum ? POST : 9, content: `**${name}**`, tags: [['h', channel], ['p', owner]] })
     homes.set(root.id, channel)
     return { thread: root.id, link: link(channel, root.id) }
   }
@@ -365,6 +398,37 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
     })
   }
 
+  // Desktop shows an edit's attachments in place of the original's, so they carry over.
+  function edit(target: Event, text: string) {
+    const urls = filesOf(target).map(file => `](${file.url})`)
+    const media = target.content.split('\n').filter(line => urls.some(url => line.endsWith(url)))
+    const imeta = target.tags.filter(t => t[0] === 'imeta')
+    return relay.publish({ kind: 40003, content: [text, ...media].join('\n'), tags: [['h', tag(target, 'h')!], ['e', target.id], ...imeta] })
+  }
+
+  // A channel's canvas is its newest kind 40100 event; Desktop writes one a second
+  // past the head it read, so a new revision always sorts first.
+  async function canvas(channel: string, text?: string, revision?: string): Promise<string> {
+    const [head] = await relay.query([{ kinds: [CANVAS], '#h': [channel], limit: 1 }])
+    if (text === undefined) return head ? `${head.content}\n\n(revision: ${head.id})` : '(this channel has no canvas yet)'
+    const saved = await relay.publish({
+      kind: CANVAS,
+      content: text,
+      tags: [['h', channel], ...(revision ? [['expected-revision', revision]] : [])],
+      created_at: Math.max(now(), (head?.created_at ?? 0) + 1),
+    })
+    return `canvas saved (revision: ${saved.id})`
+  }
+
+  // The relay answers presence over /query only, one event per person who is
+  // online or away; anyone missing is offline, as Desktop reads it.
+  async function whoIsOnline(): Promise<string> {
+    const people = loadAccess().allowFrom ?? [owner]
+    const status = new Map((await bridge([{ kinds: [20001], authors: people }])).map(event => [tag(event, 'p') ?? event.pubkey, event.content]))
+    const lines = await Promise.all(people.map(async pubkey => `${await nameOf(pubkey)}: ${status.get(pubkey) ?? 'offline'}`))
+    return lines.join('\n')
+  }
+
   function listChannels(): string {
     const lines = [...channels].map(([id, channel]) => channel.dm ? `${channel.name}  (id: ${id}, direct message)` : `#${channel.name}  (id: ${id})`)
     return lines.join('\n') || '(none)'
@@ -417,8 +481,13 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
       (isChannel(busy) ? busy : homes.get(busy)) === channel && (!thread || busy === thread) && (!session || hub.session(busy) === session))
     if (matches.length === 0) return 'no_active_turn'
     if (matches.length > 1) return 'ambiguous_target'
-    hub.stop(matches[0]!)
+    stop(matches[0]!)
     return 'sent'
+  }
+
+  function stop(thread: string) {
+    activity?.stopped(thread)
+    hub.stop(thread)
   }
 
   async function call(caller: string, tool: string, args: Record<string, unknown>): Promise<string> {
@@ -431,10 +500,17 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
     if (tool === 'fetch_messages') return history(caller, args)
     if (tool === 'search_messages') return search(caller, args)
     if (tool === 'list_channels') return listChannels()
+    if (tool === 'presence') return whoIsOnline()
+    if (tool === 'canvas') {
+      const channel = args.channel ? readable(caller, channelNamed(args.channel as string)) : await channelOf(caller)
+      return canvas(channel, args.text as string | undefined, args.revision as string | undefined)
+    }
     const thread = args.thread ? hub.find(args.thread as string) : caller
     switch (tool) {
       case 'reply': {
-        const text = args.text as string
+        const choices = (args.buttons as string[] | undefined) ?? []
+        if (choices.length > KEYCAPS.length) throw new Error(`at most ${KEYCAPS.length} buttons`)
+        const text = [args.text as string, choices.map((label, i) => `${KEYCAPS[i]} ${label}`).join('\n')].filter(Boolean).join('\n\n')
         const reply_to = args.reply_to as string | undefined
         const files = (args.files as string[] | undefined) ?? []
 
@@ -462,22 +538,40 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
           throw new Error(`reply failed after ${sentIds.length} of ${chunks.length} chunk(s) sent: ${msg}`)
         }
 
+        if (choices.length > 0) {
+          const asked = (buttons[sentIds.at(-1)!] = { thread, choices: choices.map(label => ({ label })) })
+          keep(BUTTONS_FILE, buttons)
+          for (const [i, choice] of asked.choices.entries()) choice.reaction = (await react(sentIds.at(-1)!, KEYCAPS[i]!)).id
+          keep(BUTTONS_FILE, buttons)
+        }
+
         return sentIds.length === 1 ? `sent (id: ${sentIds[0]})` : `sent ${sentIds.length} parts (ids: ${sentIds.join(', ')})`
       }
       case 'react': {
-        await message(thread, args.message_id as string)
-        await react(args.message_id as string, args.emoji as string)
-        return 'reacted'
+        const target = await message(thread, args.message_id as string)
+        if (!args.remove) {
+          await react(target.id, args.emoji as string)
+          return 'reacted'
+        }
+        const mine = await relay.query([{ kinds: [7], authors: [me], '#e': [target.id], '#h': [tag(target, 'h')!] }])
+        const reaction = mine.find(event => event.content === args.emoji)
+        if (!reaction) throw new Error(`the bot hasn't reacted ${args.emoji} to that message`)
+        await relay.publish({ kind: 5, content: '', tags: [['e', reaction.id]] })
+        return 'reaction removed'
       }
       case 'edit_message': {
         const target = await message(thread, args.message_id as string)
         if (target.pubkey !== me) throw new Error('only the bot\'s own messages can be edited')
-        // Desktop shows an edit's attachments in place of the original's, so they carry over.
-        const urls = filesOf(target).map(file => `](${file.url})`)
-        const media = target.content.split('\n').filter(line => urls.some(url => line.endsWith(url)))
-        const imeta = target.tags.filter(t => t[0] === 'imeta')
-        const edited = await relay.publish({ kind: 40003, content: [args.text as string, ...media].join('\n'), tags: [['h', tag(target, 'h')!], ['e', target.id], ...imeta] })
+        const edited = await edit(target, args.text as string)
+        texts.set(target.id, { thread, text: args.text as string })
         return `edited (id: ${edited.id})`
+      }
+      case 'delete_message': {
+        const target = await message(thread, args.message_id as string)
+        if (target.pubkey !== me) throw new Error('only the bot\'s own messages can be deleted')
+        await relay.publish({ kind: 5, content: '', tags: [['h', tag(target, 'h')!], ['e', target.id]] })
+        texts.delete(target.id)
+        return 'deleted'
       }
       case 'download_attachment': {
         const msg = await message(thread, args.message_id as string)
@@ -493,7 +587,10 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
       case 'rename_thread': {
         const name = title(args.title as string)
         hub.rename(thread, name)
-        return `renamed to "${name}"`
+        const head = isChannel(thread) ? undefined : await message(thread, thread)
+        if (head?.pubkey !== me) return `renamed to "${name}"`
+        await edit(head, `**${name}**`)
+        return `renamed to "${name}", and its first message in Buzz now says so`
       }
       case 'close_thread': {
         if (isChannel(thread)) throw new Error('only threads can be closed')
@@ -535,18 +632,21 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
 
   // A tag in a channel starts a thread on that message, or joins the thread
   // it was sent in; inside a thread Hex knows, and in a DM, no tag is needed.
+  // Desktop's replies at any depth carry the top-level message as their root, so
+  // each top-level message is one thread and every reply under it reaches its session.
   function threadOf(event: Event, tagged: boolean): string | undefined {
-    const root = rootOf(event)
-    if (root && hub.name(root) !== undefined) return root
+    const head = rootOf(event) ?? event.id
+    if (hub.name(head) !== undefined) return head
     const channel = tag(event, 'h')!
     if (channels.get(channel)?.dm) return channel
-    if (tagged) return root ?? event.id
+    if (tagged) return head
   }
 
-  // A reply's reply marker is the thread head, unless it answers one message in particular.
-  async function replyMeta(event: Event, thread: string): Promise<Record<string, string>> {
+  // A reply's reply marker is the thread head, unless it answers one message in
+  // particular; the head is named too when the reply brings Hex into the thread.
+  async function replyMeta(event: Event, thread: string, joined: boolean): Promise<Record<string, string>> {
     const parent = marked(event, 'reply')
-    if (!parent || parent === thread) return {}
+    if (!parent || (parent === thread && !joined)) return {}
     const [replied] = await relay.query([{ kinds: MESSAGES, ids: [parent] }])
     if (!replied) return { reply_to_message_id: parent }
     const atts = listed(replied)
@@ -566,8 +666,76 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
     return original?.pubkey === event.pubkey ? original : undefined
   }
 
-  async function handleInbound(event: Event): Promise<void> {
+  async function about(event: Event, thread: string, channel = tag(event, 'h')): Promise<Record<string, string>> {
+    const where = channels.get(channel ?? '')
+    return {
+      chat_id: thread,
+      user: await nameOf(event.pubkey),
+      user_id: event.pubkey,
+      ts: iso(event.created_at),
+      ...(where && !where.dm ? { channel: where.name } : {}),
+    }
+  }
+
+  async function inbound(event: Event): Promise<void> {
     if (event.pubkey === me || !allowed(event.pubkey)) return
+    if (event.kind === 7) return handleReaction(event)
+    if (event.kind === 5 || event.kind === 9005) return handleDeletion(event)
+    return handleInbound(event)
+  }
+
+  // A reaction reaches the thread the message it's on belongs to, if Hex is in it.
+  // A keycap on a message with buttons is a tap instead, and only the first counts.
+  async function handleReaction(event: Event): Promise<void> {
+    const id = event.tags.findLast(t => t[0] === 'e')?.[1]
+    const asked = id ? buttons[id] : undefined
+    const index = keycap(event.content)
+    if (asked?.choices[index]) return asked.chosen === undefined ? tap(event, id!, index) : undefined
+    const [target] = id ? await relay.query([{ kinds: MESSAGES, ids: [id] }]) : []
+    const thread = target && threadOf(target, false)
+    if (!thread) return
+    const meta = {
+      reaction_to_message_id: target.id,
+      reaction_to_user: target.pubkey === me ? 'me' : await nameOf(target.pubkey),
+      ...(target.content ? { reaction_to_text: target.content } : {}),
+    }
+    reactions.set(event.id, { thread, emoji: event.content, meta })
+    hub.deliver(thread, hub.name(thread) ?? await nameOf(event.pubkey), {
+      content: `(reaction: ${event.content})`,
+      meta: { ...(await about(event, thread, tag(target, 'h'))), reaction: event.content, ...meta },
+    })
+  }
+
+  // The bot's other keycaps come off, so the one tapped stands out.
+  async function tap(event: Event, id: string, index: number): Promise<void> {
+    const asked = buttons[id]!
+    asked.chosen = index
+    keep(BUTTONS_FILE, buttons)
+    for (const [i, choice] of asked.choices.entries()) {
+      if (i !== index && choice.reaction) void relay.publish({ kind: 5, content: '', tags: [['e', choice.reaction]] }).catch(() => {})
+    }
+    const meta = await about(event, asked.thread, await channelOf(asked.thread))
+    hub.deliver(asked.thread, hub.name(asked.thread) ?? meta.user!, {
+      content: asked.choices[index]!.label,
+      meta: { ...meta, button: 'true', button_message_id: id },
+    })
+  }
+
+  async function handleDeletion(event: Event): Promise<void> {
+    const id = tag(event, 'e') ?? ''
+    const reaction = reactions.get(id)
+    const said = texts.get(id)
+    const thread = reaction?.thread ?? said?.thread
+    if (!thread) return
+    reactions.delete(id)
+    texts.delete(id)
+    const meta = await about(event, thread)
+    hub.deliver(thread, hub.name(thread) ?? meta.user!, reaction
+      ? { content: `(reaction removed: ${reaction.emoji})`, meta: { ...meta, reaction: reaction.emoji, reaction_removed: 'true', ...reaction.meta } }
+      : { content: '(deleted a message)', meta: { ...meta, deleted: 'true', message_id: id, ...(said?.text ? { deleted_text: said.text } : {}) } })
+  }
+
+  async function handleInbound(event: Event): Promise<void> {
     const original = await originalOf(event)
     if (!original) return
     const edited = original !== event
@@ -575,48 +743,66 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
     const thread = threadOf(original, tagged)
     if (!thread) return
     const channel = tag(original, 'h')!
-    const where = channels.get(channel)
+    const joined = !edited && !isChannel(thread) && hub.name(thread) === undefined
     if (!isChannel(thread)) homes.set(thread, channel)
     const text = await unmention(event.content)
 
     if (!edited && event.pubkey === owner && tagged && text === '!shutdown') return shutdown()
-    if (!edited && event.pubkey === owner && tagged && text === '!cancel') return hub.stop(thread)
+    if (!edited && event.pubkey === owner && tagged && text === '!cancel') return stop(thread)
 
     triggers.set(thread, [...(triggers.get(thread) ?? []), original.id])
+    texts.set(original.id, { thread, text: event.content })
     void ack(thread, original.id, '👀').catch(() => {})
 
     // Attachments are listed (name/type/size) but not downloaded: the model
     // calls download_attachment when it wants them. The listing goes in meta
     // only, since an in-content annotation is forgeable by the sender.
     const atts = listed(event)
-    const words = text.split(/\s+/).filter(word => word && !word.startsWith('@'))
+    const reply = await replyMeta(original, thread, joined)
+    const words = (text || reply.reply_to_text || '').split(/\s+/).filter(word => word && !word.startsWith('@'))
     const name = isChannel(thread) ? await nameOf(event.pubkey) : words.slice(0, 2).join(' ') || 'New thread'
 
+    // A bare tag on someone's message brings Hex in to read it: the message is reply_to_*.
     const message: Message = {
-      content: text || (atts.length > 0 ? '(attachment)' : ''),
+      content: text || (atts.length > 0 ? '(attachment)' : '(tagged you)'),
       meta: {
-        chat_id: thread,
+        ...(await about(event, thread, channel)),
         message_id: original.id,
-        user: await nameOf(event.pubkey),
-        user_id: event.pubkey,
-        ts: iso(event.created_at),
-        ...(where && !where.dm ? { channel: where.name } : {}),
-        ...(!edited && thread === event.id ? { new_thread: 'true' } : {}),
+        ...(joined ? { new_thread: 'true' } : {}),
         ...(atts.length > 0 ? { attachment_count: String(atts.length), attachments: atts.join('; ') } : {}),
-        ...(await replyMeta(original, thread)),
+        ...reply,
         ...(edited ? { edited: 'true' } : {}),
       },
     }
     hub.deliver(thread, name, message)
   }
 
+  // The last event handled, and every id handled in that second, so a restart
+  // picks up from there and nothing is delivered twice.
+  let cursor = load<{ at: number; ids: string[] }>(CURSOR_FILE, { at: start, ids: [] })
+
+  function handled(event: Event) {
+    if (event.created_at < cursor.at) return
+    cursor = event.created_at === cursor.at ? { at: cursor.at, ids: [...cursor.ids, event.id] } : { at: event.created_at, ids: [event.id] }
+    keep(CURSOR_FILE, cursor)
+  }
+
+  // Events are handled one at a time, in the order they came, so a thread's
+  // messages reach its session in order.
+  let queue = Promise.resolve()
+  let off = false
+
   // The relay only sends channel messages live to a subscription naming its
   // channels, so membership changes swap it for one over the new set.
   let unlisten = () => {}
   function listen() {
     const previous = unlisten
-    unlisten = channels.size === 0 ? () => {} : relay.subscribe([{ kinds: [9, 40003], '#h': [...channels.keys()], since: start }], event => {
-      handleInbound(event).catch(e => log(`handleInbound failed: ${e}`))
+    unlisten = channels.size === 0 ? () => {} : relay.subscribe([{ kinds: INBOUND, '#h': [...channels.keys()], since: cursor.at }], event => {
+      queue = queue.then(async () => {
+        if (off || (event.created_at === cursor.at && cursor.ids.includes(event.id))) return
+        await inbound(event).catch(e => log(`handleInbound failed: ${e}`))
+        handled(event)
+      }).catch(e => log(`couldn't save where Buzz left off: ${e}`))
     })
     previous()
   }
@@ -626,7 +812,8 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
     for (const id of ids) {
       const meta = metas.find(meta => tag(meta, 'd') === id)
       const dm = meta?.tags.some(t => (t[0] === 't' && t[1] === 'dm') || t[0] === 'hidden') ?? false
-      channels.set(id, { name: (meta && tag(meta, 'name')) ?? id, dm })
+      const forum = meta?.tags.some(t => t[0] === 't' && t[1] === 'forum') ?? false
+      channels.set(id, { name: (meta && tag(meta, 'name')) ?? id, dm, forum })
     }
     listen()
   }
@@ -654,6 +841,7 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
   // Buzz until the service restarts; the rest of the hub keeps running.
   async function shutdown() {
     log('shutting down')
+    off = true
     clearInterval(heartbeat)
     for (const timer of typing.values()) clearInterval(timer)
     typing.clear()

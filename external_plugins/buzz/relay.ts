@@ -19,7 +19,7 @@ const now = () => Math.floor(Date.now() / 1000)
 
 export function connectRelay({ url, secretKey, authTag }: { url: string; secretKey: Uint8Array; authTag: string[] }): Relay {
   const pubkey = getPublicKey(secretKey)
-  const subs = new Map<string, { filters: Filter[]; onEvent: (event: Event) => void }>()
+  const subs = new Map<string, { filters: Filter[]; onEvent: (event: Event) => void; stored?: Event[] }>()
   const seen = new Set<string>()
   const requests = new Map<string, Request>()
   let socket: WebSocket | undefined
@@ -27,7 +27,7 @@ export function connectRelay({ url, secretKey, authTag }: { url: string; secretK
   let ready = false
   let closed = false
   let attempt = 0
-  let alive = now()
+  let alive = 0
   let answered = true
   let next = 0
 
@@ -39,11 +39,21 @@ export function connectRelay({ url, secretKey, authTag }: { url: string; secretK
     return finalizeEvent({ created_at: now(), ...template, tags: [...template.tags, authTag] }, secretKey)
   }
 
-  // Subscriptions start, or resume after a drop, from shortly before the
-  // connection was last alive; an event seen once is never delivered again.
-  function req(id: string, filters: Filter[]) {
-    const since = alive - OVERLAP
+  // A subscription starts where its filters say and resumes after a drop from
+  // shortly before the connection was last alive. Stored events come newest
+  // first, so they're held until EOSE and delivered oldest first; an event seen
+  // once is never delivered again.
+  function req(id: string, filters: Filter[], since = 0) {
+    subs.get(id)!.stored = []
     send(['REQ', id, ...filters.map(filter => (filter.since === undefined ? filter : { ...filter, since: Math.max(filter.since, since) }))])
+  }
+
+  function flush(id: string) {
+    const sub = subs.get(id)
+    const stored = sub?.stored
+    if (!stored) return
+    sub.stored = undefined
+    for (const event of stored.sort((a, b) => a.created_at - b.created_at || a.id.localeCompare(b.id))) sub.onEvent(event)
   }
 
   function open() {
@@ -83,7 +93,7 @@ export function connectRelay({ url, secretKey, authTag }: { url: string; secretK
       }
       ready = true
       attempt = 0
-      for (const [sub, { filters }] of subs) req(sub, filters)
+      for (const [sub, { filters }] of subs) req(sub, filters, alive - OVERLAP)
       for (const request of requests.values()) send(request.message)
     }
     if (type === 'OK' && id !== auth) requests.get(id)?.done(rest[0] ? undefined : rest[1] || 'refused')
@@ -91,7 +101,8 @@ export function connectRelay({ url, secretKey, authTag }: { url: string; secretK
       const sub = subs.get(id)
       if (sub && !seen.has(rest[0].id)) {
         seen.add(rest[0].id)
-        sub.onEvent(rest[0])
+        if (sub.stored) sub.stored.push(rest[0])
+        else sub.onEvent(rest[0])
       }
       requests.get(id)?.events?.push(rest[0])
     }
@@ -99,9 +110,13 @@ export function connectRelay({ url, secretKey, authTag }: { url: string; secretK
       send(['CLOSE', id])
       requests.get(id)!.done()
     }
+    if (type === 'EOSE') flush(id)
     if (type === 'CLOSED') {
       if (requests.has(id)) requests.get(id)!.done(rest[0] || 'closed')
-      else if (subs.has(id)) process.stderr.write(`buzz hub: relay closed a subscription: ${rest[0]}\n`)
+      else if (subs.has(id)) {
+        flush(id)
+        process.stderr.write(`buzz hub: relay closed a subscription: ${rest[0]}\n`)
+      }
     }
     if (type === 'NOTICE') process.stderr.write(`buzz hub: relay notice: ${id}\n`)
   }
