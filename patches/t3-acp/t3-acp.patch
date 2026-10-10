@@ -89,7 +89,7 @@ index 0000000000000000000000000000000000000000..c12bf015726ea411ac246ded94d2493c
 +socket.on('close', () => process.exit(0))
 diff --git a/external_plugins/t3/bot.test.ts b/external_plugins/t3/bot.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..b322769610529a224b1c2ada577fad55a1541e75
+index 0000000000000000000000000000000000000000..ff7798628b40672c2e12d22b3c22882772a0acd1
 --- /dev/null
 +++ b/external_plugins/t3/bot.test.ts
 @@ -0,0 +1,253 @@
@@ -116,7 +116,7 @@ index 0000000000000000000000000000000000000000..b322769610529a224b1c2ada577fad55
 +  writeFileSync(join(dir, '.claude.json'), '{"projects":{}}')
 +  script('claude', `jq -cn '$ARGS.positional' --args -- "$@" >> "${dir}/claude"
 +[ "$1 $2" = "agents --json" ] && { cat "${dir}/agents" 2>/dev/null || echo '[]'; }
-+[ "$1" = stop ] && [ -f "${dir}/agents" ] && kill $(jq '.[0].pid' "${dir}/agents") && rm "${dir}/agents"
++[ "$1" = stop ] && [ -f "${dir}/agents" ] && pid=$(jq '.[0].pid' "${dir}/agents") && rm "${dir}/agents" && kill "$pid"
 +exit 0`)
 +  script('launch', `pwd >> "${dir}/cwd"
 +jq -cn '$ARGS.positional' --args -- "$@" >> "${dir}/launched"

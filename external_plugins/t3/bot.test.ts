@@ -21,7 +21,7 @@ beforeEach(async () => {
   writeFileSync(join(dir, '.claude.json'), '{"projects":{}}')
   script('claude', `jq -cn '$ARGS.positional' --args -- "$@" >> "${dir}/claude"
 [ "$1 $2" = "agents --json" ] && { cat "${dir}/agents" 2>/dev/null || echo '[]'; }
-[ "$1" = stop ] && [ -f "${dir}/agents" ] && kill $(jq '.[0].pid' "${dir}/agents") && rm "${dir}/agents"
+[ "$1" = stop ] && [ -f "${dir}/agents" ] && pid=$(jq '.[0].pid' "${dir}/agents") && rm "${dir}/agents" && kill "$pid"
 exit 0`)
   script('launch', `pwd >> "${dir}/cwd"
 jq -cn '$ARGS.positional' --args -- "$@" >> "${dir}/launched"
