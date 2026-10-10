@@ -4,7 +4,7 @@ id: telegram-topics
 summary: Rework the Telegram channel so every forum topic in a group is its own Claude Code session, through the thread hub.
 baseline: ac996c0dde7fb2a9f805cd5277ffc95ecd44a321
 patch_file: telegram-topics.patch
-patch_sha256: e17c74e5d5f956ee52be50f9b14a1a60106d0beb9cbae0eee939a5d9ec4e652e
+patch_sha256: 616be2447a434d001faf3768f855855622c49d4bafc7a04c421767e80135bee6
 ---
 
 ## Intent
@@ -44,6 +44,32 @@ On top of upstream:
 - A link's address is kept: Telegram puts it in the message's entities, so
   `[text](url)` goes back into the text.
 - Locations, venues and contacts arrive as text instead of being dropped.
+- Polls, dice and games arrive as text too.
+- A reaction by the user reaches the thread of the message it is on, added
+  or removed, with that message's author and text. Telegram's update names
+  neither the topic nor the text, so the hub keeps both for every message
+  it sends or receives, per thread, until the thread is forgotten; a
+  reaction on a forum message it never saw is dropped.
+- A reply to a message in another topic or chat (`external_reply`) fills
+  the same `reply_to_*` meta, with its text when the hub saw it.
+- A photo album arrives as one message with every file and the caption.
+  Telegram sends no event when an album is complete, so the hub waits a
+  second after its last item.
+- `reply` takes `format: "markdown"`, ordinary Markdown sent as Telegram's
+  rich message, so sessions never escape MarkdownV2; a code block cut
+  between chunks is closed and reopened.
+- `reply` takes `buttons`; a tap comes back as the label, and the message
+  keeps only the chosen button, disabled. `silent` sends without a
+  notification. Files need no text; short text rides as the first file's
+  caption, and photos over Telegram's 10MB photo cap go as documents.
+- `poll` sends a poll whose votes come back as messages; `delete_message`,
+  `pin`, `forward` into a topic by name, and `react` with `remove`.
+  `edit_message` changes a file's caption, or replaces the file.
+- `rename_thread` renames a topic or changes its icon in Telegram. Every
+  new topic gets a random icon from Telegram's topic icon set.
+- A new topic starts with the request that asked for it and the session's
+  replies since, forwarded, when a message from the user started the
+  caller's turn.
 
 ## Invariants
 
@@ -65,7 +91,7 @@ On top of upstream:
 
 ## Verification
 
-Both halves build and the hub tests pass. Run `scripts/verify`.
+Both halves build and the hub and Telegram tests pass. Run `scripts/verify`.
 
 ## Removal
 
