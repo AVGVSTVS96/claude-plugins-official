@@ -109,13 +109,15 @@ const prompt = { type: 'user', origin: { kind: 'channel' }, isMeta: true, messag
 const reply = { type: 'assistant', message: { id: 'm1', content: [{ type: 'text', text: 'hi from hex' }] } }
 const done = { type: 'system', subtype: 'turn_duration' }
 
-test('a new thread starts a hex session in its project, and a prompt streams the turn until the transcript ends it', async () => {
+test('a new thread starts its hex session in its project on the first prompt, which streams the turn until the transcript ends it', async () => {
   const { agent, updates } = await t3()
   const { sessionId } = await agent.request('session/new', { cwd: project, mcpServers: [] })
+  await Bun.sleep(100)
+  expect(lines('launched')).toEqual([])
+  const answer = agent.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'hi' }] })
   await until(() => lines('cwd').length)
   expect(lines('cwd')).toEqual([project])
   const hex = await session(sessionId)
-  const answer = agent.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'hi' }] })
   await until(() => hex.inbound.length)
   expect(hex.inbound[0]).toMatchObject({ type: 'inbound', content: 'hi' })
   hex.busy()
@@ -170,6 +172,7 @@ const t3Tools = (token: string) => ({ name: 't3-code', command: '/opt/t3code', a
 test('a session gets T3\'s MCP servers, and starts again with them when they change', async () => {
   const { agent } = await t3()
   const { sessionId } = await agent.request('session/new', { cwd: project, mcpServers: [t3Tools('one'), { type: 'http', name: 'docs', url: 'http://localhost:9/mcp', headers: [{ name: 'Authorization', value: 'Bearer x' }] }] })
+  const first = agent.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'hi' }] })
   await until(() => lines('launched').length)
   const launched = JSON.parse(lines('launched')[0]!)
   expect(JSON.parse(launched[launched.indexOf('--mcp-config') + 1])).toEqual({
@@ -183,17 +186,21 @@ test('a session gets T3\'s MCP servers, and starts again with them when they cha
   writeFileSync(join(saved, `${SESSION}.jsonl`), '')
   const hex = await session(sessionId)
   await until(() => existsSync(join(dir, 'state', 'threads.json')) && readFileSync(join(dir, 'state', 'threads.json'), 'utf8').includes(SESSION))
+  hex.busy()
+  await Bun.sleep(100)
+  hex.write(prompt, reply, done)
+  expect(await first).toEqual({ stopReason: 'end_turn' })
   // Not this test's child, so it's reaped once killed and the hub sees it go, as with a real session.
   const pid = Number(Bun.spawnSync(['sh', '-c', 'sleep 60 >/dev/null 2>&1 & echo $!']).stdout.toString())
   writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid, status: 'idle' }]))
   await agent.request('session/resume', { sessionId, cwd: project, mcpServers: [t3Tools('two')] })
-  agent.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'hi' }] }).catch(() => {})
+  agent.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'again' }] }).catch(() => {})
   await until(() => lines('launched').some(line => line.includes('two')))
   expect(lines('claude')).toContain(JSON.stringify(['stop', SESSION.slice(0, 8)]))
-  expect(hex.inbound).toEqual([])
+  expect(hex.inbound.map(message => message.content)).toEqual(['hi'])
   const fresh = await session(sessionId)
   await until(() => fresh.inbound.length)
-  expect(fresh.inbound[0]).toMatchObject({ type: 'inbound', content: 'hi' })
+  expect(fresh.inbound[0]).toMatchObject({ type: 'inbound', content: 'again' })
 })
 
 test('a known thread resumes and an unknown one is not found', async () => {
@@ -217,9 +224,12 @@ test('cancelling stops the session and answers the prompt as cancelled', async (
 
 test('a chat with no project works in hex\'s folder, and a project folder is trusted for good', async () => {
   const { agent } = await t3()
-  for (const cwd of [dir, join(dir, '.t3', 'scratch', 'chat'), project]) await agent.request('session/new', { cwd, mcpServers: [] })
+  for (const cwd of [dir, join(dir, '.t3', 'scratch', 'chat'), project]) {
+    const { sessionId } = await agent.request('session/new', { cwd, mcpServers: [] })
+    agent.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'hi' }] }).catch(() => {})
+  }
   await until(() => lines('cwd').length === 3)
-  expect(lines('cwd')).toEqual([join(dir, 'hex'), join(dir, 'hex'), project])
+  expect(lines('cwd').sort()).toEqual([join(dir, 'hex'), join(dir, 'hex'), project])
   expect(JSON.parse(readFileSync(join(dir, '.claude.json'), 'utf8')).projects).toEqual({ [project]: { hasTrustDialogAccepted: true } })
 })
 

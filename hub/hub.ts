@@ -92,11 +92,16 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
   function setState(thread: string, working: boolean) {
     state(thread, working)
     claim(thread)
-    clearTimeout(idle.get(thread))
-    idle.delete(thread)
     if (working) busy.add(thread)
     else busy.delete(thread)
-    if (working || thread === main || !live.has(thread)) return
+    rest(thread)
+  }
+
+  // A running session that isn't busy stops after a while; its next message resumes it.
+  function rest(thread: string) {
+    clearTimeout(idle.get(thread))
+    idle.delete(thread)
+    if (busy.has(thread) || thread === main || !live.has(thread)) return
     if (retiring.has(thread)) stop(thread)
     else idle.set(thread, setTimeout(() => stopIfIdle(thread), idleStop))
   }
@@ -170,10 +175,14 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
     socket.write(JSON.stringify(payload) + '\n')
   }
 
+  function register(thread: string, name: string, cwd?: string) {
+    return (threads[thread] ??= { name, ...(cwd && { cwd }) })
+  }
+
   function launch(thread: string, name: string, prompt?: string, fork?: string, cwd?: string) {
     if (launching.has(thread)) return
     retiring.delete(thread)
-    const known = threads[thread] ?? (threads[thread] = { name, ...(cwd && { cwd }) })
+    const known = register(thread, name, cwd)
     claim(thread)
     if (prompt || queued.has(thread)) setState(thread, true)
     launching.set(thread, undefined)
@@ -311,6 +320,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
     claim(thread)
     for (const message of queued.get(thread) ?? []) send(socket, { type: 'inbound', ...message })
     queued.delete(thread)
+    rest(thread)
   }
 
   // A session that dies before Claude saves its conversation can't be resumed, so the
@@ -380,6 +390,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
     deliver,
     command: restart,
     refresh,
+    register: (thread: string, name: string, cwd?: string) => void register(thread, name, cwd),
     open: (thread: string, name: string, prompt?: string, cwd?: string) => launch(thread, name, prompt, undefined, cwd),
     fork: (thread: string, name: string, session: string, prompt: string, cwd?: string) => launch(thread, name, prompt, session, cwd),
     main,

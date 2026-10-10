@@ -45,7 +45,7 @@ const hub = startHub({
   call: async (_, tool) => {
     throw new Error(`unknown tool: ${tool}`)
   },
-  // A new thread's session is only known once it says hello, before its first prompt.
+  // A new thread's session starts with its first prompt and is only known once it says hello.
   state: (thread, busy) => {
     const turn = turns.get(thread)
     const session = hub.session(thread)
@@ -203,7 +203,7 @@ function serve(socket: Socket) {
       const thread = randomUUID()
       const folder = folderFor(params.cwd)
       remember(thread, params.mcpServers)
-      hub.open(thread, basename(folder ?? HEX_DIR), undefined, folder)
+      hub.register(thread, basename(folder ?? HEX_DIR), folder)
       advertise(client, thread)
       return { sessionId: thread }
     })

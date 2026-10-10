@@ -249,6 +249,14 @@ test('an idle thread is stopped, and a busy one is not', async () => {
   expect(stop).toEqual(['stop', SESSION.slice(0, 8)])
 })
 
+test('a session that starts without a prompt is stopped once idle', async () => {
+  start({ idleStop: 50 })
+  hub.open('chat:8', 'OpenAI')
+  await launched()
+  await session('chat:8')
+  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
+})
+
 test('an idle thread whose session Claude still reports busy is not stopped until it goes idle again', async () => {
   start({ idleStop: 50, registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'busy' }] })
   const { send } = await session('chat:7')
