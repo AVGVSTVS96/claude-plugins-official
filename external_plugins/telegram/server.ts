@@ -178,10 +178,11 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         properties: {
           title: { type: 'string', description: 'Topic name the user sees in Telegram: 1–2 words, like a chat name ("OpenAI frontier", "Desk anchors").' },
           prompt: { type: 'string', description: 'Everything the new session needs to start the work: it shares none of your context.' },
+          about: { type: 'string', description: 'One line the user sees first in the new thread, saying what it is for and where it came from.' },
           app: { type: 'string', enum: ['telegram', 'discord', 'buzz'], description: 'Where to open it. Default: telegram.' },
           channel: { type: 'string', description: 'Discord or Buzz only: the channel to open it in, by name. Default: the server\'s first channel.' },
         },
-        required: ['title', 'prompt'],
+        required: ['title', 'prompt', 'about'],
       },
     },
     {

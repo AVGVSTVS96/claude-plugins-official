@@ -205,9 +205,10 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         properties: {
           title: { type: 'string', description: 'Thread name the user sees in Discord: 1–2 words, like a chat name ("OpenAI frontier", "Desk anchors").' },
           prompt: { type: 'string', description: 'Everything the new session needs to start the work: it shares none of your context.' },
+          about: { type: 'string', description: 'One line the user sees first in the new thread, saying what it is for and where it came from.' },
           channel: { type: 'string', description: 'Channel to open it in, by name. Defaults to this thread\'s channel.' },
         },
-        required: ['title', 'prompt'],
+        required: ['title', 'prompt', 'about'],
       },
     },
     {

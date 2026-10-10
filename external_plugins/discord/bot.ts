@@ -35,7 +35,7 @@ import {
 import { readFileSync, writeFileSync, mkdirSync, statSync, realpathSync, chmodSync } from 'fs'
 import { homedir } from 'os'
 import { basename, join, sep } from 'path'
-import { startHub, clients, move, type Message } from '../../hub/hub.ts'
+import { startHub, clients, move, tappable, type Message } from '../../hub/hub.ts'
 
 const STATE_DIR = process.env.DISCORD_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'hex', 'discord')
 const ACCESS_FILE = join(STATE_DIR, 'access.json')
@@ -283,8 +283,9 @@ function serve(token: string) {
 
   const link = (thread: string) => `https://discord.com/channels/${guild().id}/${thread}`
 
-  async function place(name: string, where?: string) {
+  async function place(name: string, where?: string, about?: string) {
     const thread = await (await textChannel(where)).threads.create({ name })
+    if (about) await thread.send(about)
     return { thread: thread.id, link: link(thread.id) }
   }
 
@@ -318,7 +319,7 @@ function serve(token: string) {
     if (tool === 'new_thread') {
       const name = title(args.title as string)
       const parent = (args.channel as string | undefined) ?? (await threadChannel(caller)).parent?.name
-      const { thread, link } = await place(name, parent)
+      const { thread, link } = await place(name, parent, args.about as string | undefined)
       hub.open(thread, name, args.prompt as string)
       return `started thread "${name}": ${link}`
     }
@@ -336,7 +337,7 @@ function serve(token: string) {
     const access = loadAccess()
     switch (tool) {
       case 'reply': {
-        const text = args.text as string
+        const text = tappable(args.text as string)
         const reply_to = args.reply_to as string | undefined
         const files = sendable((args.files as string[] | undefined) ?? [])
         const labels = args.buttons as string[] | undefined
@@ -382,7 +383,7 @@ function serve(token: string) {
         const msg = await message(ch, args.message_id as string)
         const files = args.files ? sendable(args.files as string[]) : undefined
         const edited = await msg.edit({
-          ...(args.text !== undefined ? { content: args.text as string } : {}),
+          ...(args.text !== undefined ? { content: tappable(args.text as string) } : {}),
           ...(files ? { files, attachments: [] } : {}),
         })
         return `edited (id: ${edited.id})`

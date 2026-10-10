@@ -4,7 +4,7 @@ import type { Chat, MessageEntity, MessageOrigin, ReactionTypeEmoji } from 'gram
 import { readFileSync, writeFileSync, mkdirSync, statSync, realpathSync, chmodSync } from 'fs'
 import { homedir } from 'os'
 import { basename, join, extname, sep } from 'path'
-import { startHub, clients, move, type Message } from '../../hub/hub.ts'
+import { startHub, clients, move, tappable, type Message } from '../../hub/hub.ts'
 
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'hex', 'telegram')
 const ACCESS_FILE = join(STATE_DIR, 'access.json')
@@ -231,13 +231,14 @@ async function iconOf(emoji: string): Promise<string> {
   return icon.custom_emoji_id!
 }
 
-async function place(name: string) {
+async function place(name: string, _where?: string, about?: string) {
   if (!MAIN) throw new Error('topics need HEX_MAIN_THREAD, the group they open in')
   const { chat_id } = target(MAIN)
   const icon = await icons().then(all => all[Math.floor(Math.random() * all.length)]?.custom_emoji_id, () => undefined)
   const topic = await bot.api.createForumTopic(chat_id, name, icon ? { icon_custom_emoji_id: icon } : {})
   const thread = `${chat_id}:${topic.message_thread_id}`
   topicNames.set(thread, name)
+  if (about) remember(thread, (await bot.api.sendMessage(chat_id, about, { message_thread_id: topic.message_thread_id })).message_id, { text: about, user: me() })
   return { thread, link: `https://t.me/c/${chat_id.replace(/^-100/, '')}/${topic.message_thread_id}` }
 }
 
@@ -260,7 +261,7 @@ async function call(caller: string, tool: string, args: Record<string, unknown>)
   const access = loadAccess()
   switch (tool) {
     case 'reply': {
-      const text = (args.text as string | undefined) ?? ''
+      const text = tappable((args.text as string | undefined) ?? '')
       const reply_to = args.reply_to != null ? Number(args.reply_to) : undefined
       const files = (args.files as string[] | undefined) ?? []
       const buttons = (args.buttons as string[] | undefined) ?? []
@@ -325,7 +326,7 @@ async function call(caller: string, tool: string, args: Record<string, unknown>)
     }
     case 'edit_message': {
       const id = Number(args.message_id)
-      const text = args.text as string | undefined
+      const text = args.text != null ? tappable(args.text as string) : undefined
       const file = args.file as string | undefined
       const parseMode = args.format === 'markdownv2' ? { parse_mode: 'MarkdownV2' as const } : {}
       if (file) {
@@ -406,7 +407,7 @@ async function call(caller: string, tool: string, args: Record<string, unknown>)
       const app = (args.app as string | undefined) ?? 'telegram'
       const there = app === 'telegram' ? { hub, place } : clients.get(app)
       if (!there) throw new Error(`${app} isn't connected`)
-      const opened = await there.place(name, args.channel as string | undefined)
+      const opened = await there.place(name, args.channel as string | undefined, args.about as string | undefined)
       if (app === 'telegram') await origin(caller, opened.thread).catch(err => process.stderr.write(`telegram hub: couldn't forward where "${name}" came from: ${err}\n`))
       there.hub.open(opened.thread, name, args.prompt as string)
       return `started thread "${name}" in ${app}: ${opened.link}`

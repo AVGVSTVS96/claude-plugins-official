@@ -4,7 +4,7 @@ id: buzz-threads
 summary: Add a Buzz channel where every Buzz thread is its own Claude Code session through the thread hub, with Buzz's activity, memory and files panels.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: buzz-threads.patch
-patch_sha256: fee4f6099ba4bd1fb2aad20b36853a64574c5e61fca8886954dd4768adec2c69
+patch_sha256: 56687af19e81c884acb9ff9490e01d80d5ce1ed215e3f18ec313496ac1045eb3
 ---
 
 ## Intent
@@ -75,7 +75,8 @@ Buzz works like Discord:
   in order, and nothing is delivered twice. A subscription's stored events
   are delivered oldest first.
 - Buzz threads have no title (Desktop's header just says "Thread"), so
-  `new_thread` posts the name as the thread's first message, and
+  `new_thread` posts the name, and its `about` line under it, as the thread's
+  first message, and
   `rename_thread` edits that message when Hex posted it.
 - Buzz has no buttons, so `reply`'s `buttons` (at most 10) end the message
   with the choices numbered 1️⃣ to 🔟 and Hex reacts with each keycap. The

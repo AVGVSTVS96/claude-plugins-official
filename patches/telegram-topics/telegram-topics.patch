@@ -561,17 +561,17 @@ index 0000000000000000000000000000000000000000..f365a8ef20cbe0aa742fc4218517fe70
 +})
 diff --git a/external_plugins/telegram/bot.ts b/external_plugins/telegram/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..52d8ca1057fbb319efa173cc787c5c1d295bf11f
+index 0000000000000000000000000000000000000000..f02601b730d0612a402936366d2aca0bbd0d60b8
 --- /dev/null
 +++ b/external_plugins/telegram/bot.ts
-@@ -0,0 +1,849 @@
+@@ -0,0 +1,850 @@
 +#!/usr/bin/env bun
 +import { Bot, GrammyError, InputFile, type Context } from 'grammy'
 +import type { Chat, MessageEntity, MessageOrigin, ReactionTypeEmoji } from 'grammy/types'
 +import { readFileSync, writeFileSync, mkdirSync, statSync, realpathSync, chmodSync } from 'fs'
 +import { homedir } from 'os'
 +import { basename, join, extname, sep } from 'path'
-+import { startHub, clients, move, type Message } from '../../hub/hub.ts'
++import { startHub, clients, move, tappable, type Message } from '../../hub/hub.ts'
 +
 +const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'hex', 'telegram')
 +const ACCESS_FILE = join(STATE_DIR, 'access.json')
@@ -798,13 +798,14 @@ index 0000000000000000000000000000000000000000..52d8ca1057fbb319efa173cc787c5c1d
 +  return icon.custom_emoji_id!
 +}
 +
-+async function place(name: string) {
++async function place(name: string, _where?: string, about?: string) {
 +  if (!MAIN) throw new Error('topics need HEX_MAIN_THREAD, the group they open in')
 +  const { chat_id } = target(MAIN)
 +  const icon = await icons().then(all => all[Math.floor(Math.random() * all.length)]?.custom_emoji_id, () => undefined)
 +  const topic = await bot.api.createForumTopic(chat_id, name, icon ? { icon_custom_emoji_id: icon } : {})
 +  const thread = `${chat_id}:${topic.message_thread_id}`
 +  topicNames.set(thread, name)
++  if (about) remember(thread, (await bot.api.sendMessage(chat_id, about, { message_thread_id: topic.message_thread_id })).message_id, { text: about, user: me() })
 +  return { thread, link: `https://t.me/c/${chat_id.replace(/^-100/, '')}/${topic.message_thread_id}` }
 +}
 +
@@ -827,7 +828,7 @@ index 0000000000000000000000000000000000000000..52d8ca1057fbb319efa173cc787c5c1d
 +  const access = loadAccess()
 +  switch (tool) {
 +    case 'reply': {
-+      const text = (args.text as string | undefined) ?? ''
++      const text = tappable((args.text as string | undefined) ?? '')
 +      const reply_to = args.reply_to != null ? Number(args.reply_to) : undefined
 +      const files = (args.files as string[] | undefined) ?? []
 +      const buttons = (args.buttons as string[] | undefined) ?? []
@@ -892,7 +893,7 @@ index 0000000000000000000000000000000000000000..52d8ca1057fbb319efa173cc787c5c1d
 +    }
 +    case 'edit_message': {
 +      const id = Number(args.message_id)
-+      const text = args.text as string | undefined
++      const text = args.text != null ? tappable(args.text as string) : undefined
 +      const file = args.file as string | undefined
 +      const parseMode = args.format === 'markdownv2' ? { parse_mode: 'MarkdownV2' as const } : {}
 +      if (file) {
@@ -973,7 +974,7 @@ index 0000000000000000000000000000000000000000..52d8ca1057fbb319efa173cc787c5c1d
 +      const app = (args.app as string | undefined) ?? 'telegram'
 +      const there = app === 'telegram' ? { hub, place } : clients.get(app)
 +      if (!there) throw new Error(`${app} isn't connected`)
-+      const opened = await there.place(name, args.channel as string | undefined)
++      const opened = await there.place(name, args.channel as string | undefined, args.about as string | undefined)
 +      if (app === 'telegram') await origin(caller, opened.thread).catch(err => process.stderr.write(`telegram hub: couldn't forward where "${name}" came from: ${err}\n`))
 +      there.hub.open(opened.thread, name, args.prompt as string)
 +      return `started thread "${name}" in ${app}: ${opened.link}`
@@ -1434,7 +1435,7 @@ index b80fcea0f4f395012586cf5fac3682270e7fb14f..a8d061bfa3c603151ab2491dc06af4fa
    "dependencies": {
      "@modelcontextprotocol/sdk": "^1.0.0",
 diff --git a/external_plugins/telegram/server.ts b/external_plugins/telegram/server.ts
-index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..79bc1a32cf3ef0470a127cd23b1d80e157b39228 100644
+index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..3c172c978ff2e39024b01188925c4ac9892c8d35 100644
 --- a/external_plugins/telegram/server.ts
 +++ b/external_plugins/telegram/server.ts
 @@ -1,467 +1,49 @@
@@ -1964,7 +1965,7 @@ index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..79bc1a32cf3ef0470a127cd23b1d80e1
        },
      },
      {
-@@ -506,540 +89,186 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
+@@ -506,540 +89,187 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
      },
      {
        name: 'edit_message',
@@ -2065,10 +2066,11 @@ index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..79bc1a32cf3ef0470a127cd23b1d80e1
 +        properties: {
 +          title: { type: 'string', description: 'Topic name the user sees in Telegram: 1–2 words, like a chat name ("OpenAI frontier", "Desk anchors").' },
 +          prompt: { type: 'string', description: 'Everything the new session needs to start the work: it shares none of your context.' },
++          about: { type: 'string', description: 'One line the user sees first in the new thread, saying what it is for and where it came from.' },
 +          app: { type: 'string', enum: ['telegram', 'discord', 'buzz'], description: 'Where to open it. Default: telegram.' },
 +          channel: { type: 'string', description: 'Discord or Buzz only: the channel to open it in, by name. Default: the server\'s first channel.' },
 +        },
-+        required: ['title', 'prompt'],
++        required: ['title', 'prompt', 'about'],
 +      },
 +    },
 +    {

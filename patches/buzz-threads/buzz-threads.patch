@@ -790,10 +790,10 @@ index 0000000000000000000000000000000000000000..e7f5fdf660dd123b4dd66c8d9946b647
 +}
 diff --git a/external_plugins/buzz/bot.test.ts b/external_plugins/buzz/bot.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..86575c8a5bc3e6ab4910a86de720946aa85ccf2d
+index 0000000000000000000000000000000000000000..f28be4ca3bbb0e070589741594e9477bda697754
 --- /dev/null
 +++ b/external_plugins/buzz/bot.test.ts
-@@ -0,0 +1,720 @@
+@@ -0,0 +1,727 @@
 +import { afterAll, afterEach, expect, test } from 'bun:test'
 +import type { ServerWebSocket, Subprocess } from 'bun'
 +import { connect, type Socket } from 'net'
@@ -1293,6 +1293,13 @@ index 0000000000000000000000000000000000000000..86575c8a5bc3e6ab4910a86de720946a
 +  expect(args.at(-1)).toBe('find better anchors')
 +})
 +
++test('a new thread opens with its about line under the title', async () => {
++  const bot = await startBot()
++  const { session } = await threadStarted(bot)
++  await session.call('new_thread', { title: 'Hub tests', prompt: 'fix them', about: 'From #general: the hub tests fail on main.' })
++  await until(() => bot.published(9).find(event => event.content === '**Hub tests**\nFrom #general: the hub tests fail on main.'))
++})
++
 +test('reply with buttons lists them numbered and reacts with each keycap; the first tap arrives as a button, the other keycaps come off, later taps are ignored', async () => {
 +  const bot = await startBot()
 +  const { session } = await threadStarted(bot)
@@ -1516,7 +1523,7 @@ index 0000000000000000000000000000000000000000..86575c8a5bc3e6ab4910a86de720946a
 +})
 diff --git a/external_plugins/buzz/bot.ts b/external_plugins/buzz/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..343fed7f572b9f10e58e0160782fc4710dec445c
+index 0000000000000000000000000000000000000000..31a4cd7419bcf6ceadb2391698dec121464bde7e
 --- /dev/null
 +++ b/external_plugins/buzz/bot.ts
 @@ -0,0 +1,875 @@
@@ -1528,7 +1535,7 @@ index 0000000000000000000000000000000000000000..343fed7f572b9f10e58e0160782fc471
 +import { finalizeEvent, type Event } from 'nostr-tools/pure'
 +import { decode } from 'nostr-tools/nip19'
 +import { hexToBytes } from 'nostr-tools/utils'
-+import { startHub, clients, move, type Message } from '../../hub/hub.ts'
++import { startHub, clients, move, tappable, type Message } from '../../hub/hub.ts'
 +import { connectRelay } from './relay.ts'
 +import { startActivity } from './activity.ts'
 +import { startMemory } from './memory.ts'
@@ -1801,11 +1808,11 @@ index 0000000000000000000000000000000000000000..343fed7f572b9f10e58e0160782fc471
 +    return sent
 +  }
 +
-+  async function place(name: string, where?: string) {
++  async function place(name: string, where?: string, about?: string) {
 +    const channel = channelNamed(where ?? loadAccess().channel)
-+    const root = await relay.publish({ kind: channels.get(channel)!.forum ? POST : 9, content: `**${name}**`, tags: [['h', channel], ['p', owner]] })
++    const root = await relay.publish({ kind: channels.get(channel)!.forum ? POST : 9, content: [`**${name}**`, about].filter(Boolean).join('\n'), tags: [['h', channel], ['p', owner]] })
 +    homes.set(root.id, channel)
-+    return { thread: root.id, link: link(channel, root.id) }
++    return { thread: root.id, link: tappable(link(channel, root.id)) }
 +  }
 +
 +  function blossom(action: 'upload' | 'get', sha256?: string) {
@@ -2032,9 +2039,9 @@ index 0000000000000000000000000000000000000000..343fed7f572b9f10e58e0160782fc471
 +  async function call(caller: string, tool: string, args: Record<string, unknown>): Promise<string> {
 +    if (tool === 'new_thread') {
 +      const name = title(args.title as string)
-+      const { thread, link } = await place(name, (args.channel as string | undefined) ?? await channelOf(caller))
++      const { thread } = await place(name, (args.channel as string | undefined) ?? await channelOf(caller), args.about as string | undefined)
 +      hub.open(thread, name, args.prompt as string)
-+      return `started thread "${name}": ${link}`
++      return `started thread "${name}": ${link(homes.get(thread)!, thread)}`
 +    }
 +    if (tool === 'fetch_messages') return history(caller, args)
 +    if (tool === 'search_messages') return search(caller, args)
@@ -3916,10 +3923,10 @@ index 0000000000000000000000000000000000000000..44eff7405c67b2f404d4fa71ba85c228
 +}
 diff --git a/external_plugins/buzz/server.ts b/external_plugins/buzz/server.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..7c6c2a9c4ec9c6f95b1f7882d39fe45a5a9bf8ba
+index 0000000000000000000000000000000000000000..ebc3579c96a9d1ec77bf96346c37d832230dc28e
 --- /dev/null
 +++ b/external_plugins/buzz/server.ts
-@@ -0,0 +1,287 @@
+@@ -0,0 +1,288 @@
 +#!/usr/bin/env bun
 +import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 +import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
@@ -4115,9 +4122,10 @@ index 0000000000000000000000000000000000000000..7c6c2a9c4ec9c6f95b1f7882d39fe45a
 +        properties: {
 +          title: { type: 'string', description: 'Thread name: 1–2 words, like a chat name ("OpenAI frontier", "Desk anchors"). It is the thread\'s first message in Buzz.' },
 +          prompt: { type: 'string', description: 'Everything the new session needs to start the work: it shares none of your context.' },
++          about: { type: 'string', description: 'One line the user sees first in the new thread, saying what it is for and where it came from.' },
 +          channel: { type: 'string', description: 'Channel to open it in, by name. Defaults to this thread\'s channel.' },
 +        },
-+        required: ['title', 'prompt'],
++        required: ['title', 'prompt', 'about'],
 +      },
 +    },
 +    {

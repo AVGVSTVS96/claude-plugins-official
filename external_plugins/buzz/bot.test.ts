@@ -497,6 +497,13 @@ test('new_thread opens a thread in Buzz, starts its session with the prompt, and
   expect(args.at(-1)).toBe('find better anchors')
 })
 
+test('a new thread opens with its about line under the title', async () => {
+  const bot = await startBot()
+  const { session } = await threadStarted(bot)
+  await session.call('new_thread', { title: 'Hub tests', prompt: 'fix them', about: 'From #general: the hub tests fail on main.' })
+  await until(() => bot.published(9).find(event => event.content === '**Hub tests**\nFrom #general: the hub tests fail on main.'))
+})
+
 test('reply with buttons lists them numbered and reacts with each keycap; the first tap arrives as a button, the other keycaps come off, later taps are ignored', async () => {
   const bot = await startBot()
   const { session } = await threadStarted(bot)

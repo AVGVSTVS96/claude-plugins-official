@@ -13,8 +13,13 @@ type Agent = { sessionId: string; pid?: number; status?: string }
 export type Hub = ReturnType<typeof startHub>
 
 // Every client running in this process, so a thread can move between them.
-// place() opens an empty thread on the client and returns its id and a link to it.
-export const clients = new Map<string, { hub: Hub; place: (name: string, where?: string) => Promise<{ thread: string; link: string }> }>()
+// place() opens a thread on the client, led by its about line if given, and returns its id and a link to it.
+export const clients = new Map<string, { hub: Hub; place: (name: string, where?: string, about?: string) => Promise<{ thread: string; link: string }> }>()
+
+// Chat apps only link web addresses, so a buzz:// link goes through a page on hex's site that opens it.
+export function tappable(text: string): string {
+  return text.replace(/buzz:\/\/[^\s)>\]\\]*[^\s)>\]\\.,;:!?'"]/g, url => `https://hex-sand.vercel.app/open.html#${encodeURIComponent(url)}`)
+}
 
 const JOBS = join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'jobs')
 const IDLE_STOP = 30 * 60_000

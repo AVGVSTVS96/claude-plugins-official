@@ -718,10 +718,10 @@ index 0000000000000000000000000000000000000000..af693f25307bd37d955712e458d48f24
 +})
 diff --git a/external_plugins/discord/bot.ts b/external_plugins/discord/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..17d143c842d455cfe2b59b99950862925b7e78e4
+index 0000000000000000000000000000000000000000..0a4902c0e53ca2c5ea712ce072ef55cca33d14b7
 --- /dev/null
 +++ b/external_plugins/discord/bot.ts
-@@ -0,0 +1,683 @@
+@@ -0,0 +1,684 @@
 +#!/usr/bin/env bun
 +import {
 +  Client,
@@ -759,7 +759,7 @@ index 0000000000000000000000000000000000000000..17d143c842d455cfe2b59b9995086292
 +import { readFileSync, writeFileSync, mkdirSync, statSync, realpathSync, chmodSync } from 'fs'
 +import { homedir } from 'os'
 +import { basename, join, sep } from 'path'
-+import { startHub, clients, move, type Message } from '../../hub/hub.ts'
++import { startHub, clients, move, tappable, type Message } from '../../hub/hub.ts'
 +
 +const STATE_DIR = process.env.DISCORD_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'hex', 'discord')
 +const ACCESS_FILE = join(STATE_DIR, 'access.json')
@@ -1007,8 +1007,9 @@ index 0000000000000000000000000000000000000000..17d143c842d455cfe2b59b9995086292
 +
 +  const link = (thread: string) => `https://discord.com/channels/${guild().id}/${thread}`
 +
-+  async function place(name: string, where?: string) {
++  async function place(name: string, where?: string, about?: string) {
 +    const thread = await (await textChannel(where)).threads.create({ name })
++    if (about) await thread.send(about)
 +    return { thread: thread.id, link: link(thread.id) }
 +  }
 +
@@ -1042,7 +1043,7 @@ index 0000000000000000000000000000000000000000..17d143c842d455cfe2b59b9995086292
 +    if (tool === 'new_thread') {
 +      const name = title(args.title as string)
 +      const parent = (args.channel as string | undefined) ?? (await threadChannel(caller)).parent?.name
-+      const { thread, link } = await place(name, parent)
++      const { thread, link } = await place(name, parent, args.about as string | undefined)
 +      hub.open(thread, name, args.prompt as string)
 +      return `started thread "${name}": ${link}`
 +    }
@@ -1060,7 +1061,7 @@ index 0000000000000000000000000000000000000000..17d143c842d455cfe2b59b9995086292
 +    const access = loadAccess()
 +    switch (tool) {
 +      case 'reply': {
-+        const text = args.text as string
++        const text = tappable(args.text as string)
 +        const reply_to = args.reply_to as string | undefined
 +        const files = sendable((args.files as string[] | undefined) ?? [])
 +        const labels = args.buttons as string[] | undefined
@@ -1106,7 +1107,7 @@ index 0000000000000000000000000000000000000000..17d143c842d455cfe2b59b9995086292
 +        const msg = await message(ch, args.message_id as string)
 +        const files = args.files ? sendable(args.files as string[]) : undefined
 +        const edited = await msg.edit({
-+          ...(args.text !== undefined ? { content: args.text as string } : {}),
++          ...(args.text !== undefined ? { content: tappable(args.text as string) } : {}),
 +          ...(files ? { files, attachments: [] } : {}),
 +        })
 +        return `edited (id: ${edited.id})`
@@ -1425,7 +1426,7 @@ index eac89c3befd8ebb90758a9acdf7f400de8c9f298..87aff60aefe5d5610abfa8d4e6e2b719
    "dependencies": {
      "@modelcontextprotocol/sdk": "^1.0.0",
 diff --git a/external_plugins/discord/server.ts b/external_plugins/discord/server.ts
-index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..f6ac88e5d100a9ca276613ce911f5ae1eefda190 100644
+index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..096d1576d8dd08788f8448ba8d75c7f12c50a459 100644
 --- a/external_plugins/discord/server.ts
 +++ b/external_plugins/discord/server.ts
 @@ -1,533 +1,40 @@
@@ -1974,7 +1975,7 @@ index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..f6ac88e5d100a9ca276613ce911f5ae1
            reply_to: {
              type: 'string',
              description: 'Message ID to thread under. Use message_id from the inbound <channel> block, or an id from fetch_messages.',
-@@ -537,364 +44,256 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
+@@ -537,364 +44,257 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
              items: { type: 'string' },
              description: 'Absolute file paths to attach (images, logs, etc). Max 10 files, 25MB each.',
            },
@@ -2157,9 +2158,10 @@ index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..f6ac88e5d100a9ca276613ce911f5ae1
 +        properties: {
 +          title: { type: 'string', description: 'Thread name the user sees in Discord: 1–2 words, like a chat name ("OpenAI frontier", "Desk anchors").' },
 +          prompt: { type: 'string', description: 'Everything the new session needs to start the work: it shares none of your context.' },
++          about: { type: 'string', description: 'One line the user sees first in the new thread, saying what it is for and where it came from.' },
 +          channel: { type: 'string', description: 'Channel to open it in, by name. Defaults to this thread\'s channel.' },
 +        },
-+        required: ['title', 'prompt'],
++        required: ['title', 'prompt', 'about'],
 +      },
 +    },
 +    {

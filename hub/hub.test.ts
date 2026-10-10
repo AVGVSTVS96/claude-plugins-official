@@ -3,7 +3,7 @@ import { connect, type Socket } from 'net'
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, chmodSync, existsSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { startHub, type Message } from './hub.ts'
+import { startHub, tappable, type Message } from './hub.ts'
 
 const CHANNEL = 'plugin:telegram@hex'
 const SESSION = '0a1b2c3d-0000-4000-8000-000000000000'
@@ -512,4 +512,13 @@ test('a fork resumes a copy of the session without checking agents or clearing i
   expect(args.at(-1)).toBe('carry on')
   await Bun.sleep(50)
   expect(calls().map(args => args[0])).toEqual(['--bg'])
+})
+
+test('a buzz:// link becomes a web link that opens it, in plain text and in Markdown', () => {
+  const link = 'buzz://message?channel=c-1&id=abc'
+  const web = `https://hex-sand.vercel.app/open.html#${encodeURIComponent(link)}`
+  expect(tappable(`see ${link}.`)).toBe(`see ${web}.`)
+  expect(tappable(`open ${link}?`)).toBe(`open ${web}?`)
+  expect(tappable(`[the thread](${link})`)).toBe(`[the thread](${web})`)
+  expect(tappable('no links here')).toBe('no links here')
 })

@@ -1,15 +1,15 @@
 diff --git a/hub/hub.test.ts b/hub/hub.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..1257648bd4555b08dc2b421a2ed751a04b4c19cd
+index 0000000000000000000000000000000000000000..83a3427b3c3804a003053df707cfe688478160ce
 --- /dev/null
 +++ b/hub/hub.test.ts
-@@ -0,0 +1,515 @@
+@@ -0,0 +1,524 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { connect, type Socket } from 'net'
 +import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, chmodSync, existsSync } from 'fs'
 +import { tmpdir } from 'os'
 +import { join } from 'path'
-+import { startHub, type Message } from './hub.ts'
++import { startHub, tappable, type Message } from './hub.ts'
 +
 +const CHANNEL = 'plugin:telegram@hex'
 +const SESSION = '0a1b2c3d-0000-4000-8000-000000000000'
@@ -519,12 +519,21 @@ index 0000000000000000000000000000000000000000..1257648bd4555b08dc2b421a2ed751a0
 +  await Bun.sleep(50)
 +  expect(calls().map(args => args[0])).toEqual(['--bg'])
 +})
++
++test('a buzz:// link becomes a web link that opens it, in plain text and in Markdown', () => {
++  const link = 'buzz://message?channel=c-1&id=abc'
++  const web = `https://hex-sand.vercel.app/open.html#${encodeURIComponent(link)}`
++  expect(tappable(`see ${link}.`)).toBe(`see ${web}.`)
++  expect(tappable(`open ${link}?`)).toBe(`open ${web}?`)
++  expect(tappable(`[the thread](${link})`)).toBe(`[the thread](${web})`)
++  expect(tappable('no links here')).toBe('no links here')
++})
 diff --git a/hub/hub.ts b/hub/hub.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..02950eaf70e55d4b6d86ac72ee90feff98d1ab58
+index 0000000000000000000000000000000000000000..8a31a8a326304452c261add6dbf635ec986d9786
 --- /dev/null
 +++ b/hub/hub.ts
-@@ -0,0 +1,373 @@
+@@ -0,0 +1,378 @@
 +import { createServer, type Socket } from 'net'
 +import { execFile, spawn } from 'child_process'
 +import { readFileSync, writeFileSync, renameSync, rmSync, watch, type FSWatcher } from 'fs'
@@ -540,8 +549,13 @@ index 0000000000000000000000000000000000000000..02950eaf70e55d4b6d86ac72ee90feff
 +export type Hub = ReturnType<typeof startHub>
 +
 +// Every client running in this process, so a thread can move between them.
-+// place() opens an empty thread on the client and returns its id and a link to it.
-+export const clients = new Map<string, { hub: Hub; place: (name: string, where?: string) => Promise<{ thread: string; link: string }> }>()
++// place() opens a thread on the client, led by its about line if given, and returns its id and a link to it.
++export const clients = new Map<string, { hub: Hub; place: (name: string, where?: string, about?: string) => Promise<{ thread: string; link: string }> }>()
++
++// Chat apps only link web addresses, so a buzz:// link goes through a page on hex's site that opens it.
++export function tappable(text: string): string {
++  return text.replace(/buzz:\/\/[^\s)>\]\\]*[^\s)>\]\\.,;:!?'"]/g, url => `https://hex-sand.vercel.app/open.html#${encodeURIComponent(url)}`)
++}
 +
 +const JOBS = join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'jobs')
 +const IDLE_STOP = 30 * 60_000

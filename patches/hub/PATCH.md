@@ -4,7 +4,7 @@ id: hub
 summary: Add a client-agnostic hub that gives every chat thread its own Claude Code session and moves threads between clients.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: hub.patch
-patch_sha256: bdb6125eb81e60610d95744ac3f03d23b57d9eafe416038e4f049ec5de961b5d
+patch_sha256: fd95641f918e07acb5be5f95ce823b4c3dd6afccf62027a5d284353b34e354cb
 ---
 
 ## Intent
@@ -39,13 +39,16 @@ message to a fresh start of a thread's session so it picks up new ones (a sessio
 busy with background work keeps running and takes it as it is). Each session's
 settings enable only its client's plugin.
 
+`tappable` turns `buzz://` links into web links through `open.html` on hex's
+site, since chat apps only link web addresses.
+
 The main thread is always running: the hub starts it (or resumes it) when it
 starts, never stops it for being idle, and starts it again when its session
 has been gone for 30 seconds.
 
 `hub/serve.ts` is the service: it runs every client (Telegram, Discord,
-Buzz, T3 Code) in one process. Each chat client registers in `clients` with a `place` that opens an
-empty thread, which lets `move` hand a thread to another client: its session
+Buzz, T3 Code) in one process. Each chat client registers in `clients` with a `place` that opens a
+thread, led by a line saying what it's for when one is given, which lets `move` hand a thread to another client: its session
 stops once its turn ends (`release`) and resumes there with its memory
 (`adopt`). The main thread never leaves, so a copy of it continues there
 instead (`fork`, `--fork-session`).

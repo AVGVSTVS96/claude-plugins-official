@@ -6,7 +6,7 @@ import { basename, join, sep } from 'path'
 import { finalizeEvent, type Event } from 'nostr-tools/pure'
 import { decode } from 'nostr-tools/nip19'
 import { hexToBytes } from 'nostr-tools/utils'
-import { startHub, clients, move, type Message } from '../../hub/hub.ts'
+import { startHub, clients, move, tappable, type Message } from '../../hub/hub.ts'
 import { connectRelay } from './relay.ts'
 import { startActivity } from './activity.ts'
 import { startMemory } from './memory.ts'
@@ -279,11 +279,11 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
     return sent
   }
 
-  async function place(name: string, where?: string) {
+  async function place(name: string, where?: string, about?: string) {
     const channel = channelNamed(where ?? loadAccess().channel)
-    const root = await relay.publish({ kind: channels.get(channel)!.forum ? POST : 9, content: `**${name}**`, tags: [['h', channel], ['p', owner]] })
+    const root = await relay.publish({ kind: channels.get(channel)!.forum ? POST : 9, content: [`**${name}**`, about].filter(Boolean).join('\n'), tags: [['h', channel], ['p', owner]] })
     homes.set(root.id, channel)
-    return { thread: root.id, link: link(channel, root.id) }
+    return { thread: root.id, link: tappable(link(channel, root.id)) }
   }
 
   function blossom(action: 'upload' | 'get', sha256?: string) {
@@ -510,9 +510,9 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
   async function call(caller: string, tool: string, args: Record<string, unknown>): Promise<string> {
     if (tool === 'new_thread') {
       const name = title(args.title as string)
-      const { thread, link } = await place(name, (args.channel as string | undefined) ?? await channelOf(caller))
+      const { thread } = await place(name, (args.channel as string | undefined) ?? await channelOf(caller), args.about as string | undefined)
       hub.open(thread, name, args.prompt as string)
-      return `started thread "${name}": ${link}`
+      return `started thread "${name}": ${link(homes.get(thread)!, thread)}`
     }
     if (tool === 'fetch_messages') return history(caller, args)
     if (tool === 'search_messages') return search(caller, args)
