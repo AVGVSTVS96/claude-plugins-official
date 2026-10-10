@@ -307,12 +307,12 @@ async function threadStarted(bot: Awaited<ReturnType<typeof startBot>>) {
   return { root, session }
 }
 
-test('Hex goes online, and a tag in a channel starts a thread on that message, named by its first words', async () => {
+test('Hex goes online, and a tag in a channel starts a thread on that message, named by its first word', async () => {
   const bot = await startBot()
   expect((await until(() => bot.published(20001)[0])).content).toBe('online')
   const root = bot.say('@Hex desk anchors are loose', [['p', bot.me]])
   const args = await until(() => bot.launches()[0])
-  expect(args.slice(0, 5)).toEqual(['--bg', '--channels', 'plugin:buzz@hex', '--name', 'desk anchors'])
+  expect(args.slice(0, 5)).toEqual(['--bg', '--channels', 'plugin:buzz@hex', '--name', 'desk'])
   const [inbound] = await (await bot.session(root.id)).inbound(1)
   expect(inbound.content).toBe('desk anchors are loose')
   expect(inbound.meta).toMatchObject({ chat_id: root.id, message_id: root.id, user: 'Bassim', user_id: owner, channel: 'general', new_thread: 'true' })
@@ -373,7 +373,7 @@ test('a bare tag on someone\'s message brings Hex into its thread, with that mes
   const post = bot.say('gpt-live-1 can i use custom voices')
   bot.say('@Hex', [['e', post.id, '', 'reply'], ['p', bot.me]])
   const args = await until(() => bot.launches()[0])
-  expect(args[args.indexOf('--name') + 1]).toBe('gpt-live-1 can')
+  expect(args[args.indexOf('--name') + 1]).toBe('gpt-live-1')
   const [inbound] = await (await bot.session(post.id)).inbound(1)
   expect(inbound.content).toBe('(tagged you)')
   expect(inbound.meta).toMatchObject({ chat_id: post.id, new_thread: 'true', reply_to_message_id: post.id, reply_to_user: 'Bassim', reply_to_text: 'gpt-live-1 can i use custom voices' })
@@ -417,7 +417,7 @@ test('after a restart Hex picks up what was sent while it was down, in order, an
       return event
     }
     root = at(0, '@Hex desk anchors are loose', [['p', me]])
-    writeFileSync(join(state, 'threads.json'), JSON.stringify({ [root.id]: { name: 'Desk anchors' } }))
+    writeFileSync(join(state, 'threads.json'), JSON.stringify({ [root.id]: { name: 'Anchors' } }))
     writeFileSync(join(state, 'cursor.json'), JSON.stringify({ at: t, ids: [root.id] }))
     at(9, 'three', [['e', root.id, '', 'reply']])
     at(0, 'one', [['e', root.id, '', 'reply']])
@@ -488,20 +488,20 @@ test('!shutdown from the owner takes Hex offline, and nothing reaches it after',
 test('new_thread opens a thread in Buzz, starts its session with the prompt, and links to it', async () => {
   const bot = await startBot()
   const { session } = await threadStarted(bot)
-  const result = await session.call('new_thread', { title: 'Desk anchors', prompt: 'find better anchors' })
-  const root = await until(() => bot.published(9).find(event => event.content === '**Desk anchors**'))
+  const result = await session.call('new_thread', { title: 'Anchors', prompt: 'find better anchors' })
+  const root = await until(() => bot.published(9).find(event => event.content === '**Anchors**'))
   expect(root.tags).toEqual([['h', bot.channel], ['p', owner], bot.auth])
-  expect(result.text).toBe(`started thread "Desk anchors": buzz://message?channel=${bot.channel}&id=${root.id}`)
+  expect(result.text).toBe(`started thread "Anchors": buzz://message?channel=${bot.channel}&id=${root.id}`)
   const args = await until(() => bot.launches()[1])
-  expect(args[args.indexOf('--name') + 1]).toBe('Desk anchors')
+  expect(args[args.indexOf('--name') + 1]).toBe('Anchors')
   expect(args.at(-1)).toBe('find better anchors')
 })
 
 test('a new thread opens with its about line under the title', async () => {
   const bot = await startBot()
   const { session } = await threadStarted(bot)
-  await session.call('new_thread', { title: 'Hub tests', prompt: 'fix them', about: 'From #general: the hub tests fail on main.' })
-  await until(() => bot.published(9).find(event => event.content === '**Hub tests**\nFrom #general: the hub tests fail on main.'))
+  await session.call('new_thread', { title: 'Tests', prompt: 'fix them', about: 'From #general: the hub tests fail on main.' })
+  await until(() => bot.published(9).find(event => event.content === '**Tests**\nFrom #general: the hub tests fail on main.'))
 })
 
 test('reply with buttons lists them numbered and reacts with each keycap; the first tap arrives as a button, the other keycaps come off, later taps are ignored', async () => {
@@ -548,13 +548,13 @@ test('a tap on buttons sent before a restart still arrives as a button', async (
 test('rename_thread renames a thread Hex opened in Buzz too, by editing its first message', async () => {
   const bot = await startBot()
   const { session } = await threadStarted(bot)
-  await session.call('rename_thread', { title: 'Loose anchors' })
+  await session.call('rename_thread', { title: 'Loose' })
   expect(bot.published(40003)).toEqual([])
-  await session.call('new_thread', { title: 'Desk anchors', prompt: 'find better anchors' })
-  const root = await until(() => bot.published(9).find(event => event.content === '**Desk anchors**'))
+  await session.call('new_thread', { title: 'Anchors', prompt: 'find better anchors' })
+  const root = await until(() => bot.published(9).find(event => event.content === '**Anchors**'))
   const opened = await bot.session(root.id)
-  expect((await opened.call('rename_thread', { title: 'Desk mounts' })).text).toBe('renamed to "Desk mounts", and its first message in Buzz now says so')
-  expect(bot.published(40003).map(event => [event.content, event.tags])).toEqual([['**Desk mounts**', [['h', bot.channel], ['e', root.id], bot.auth]]])
+  expect((await opened.call('rename_thread', { title: 'Mounts' })).text).toBe('renamed to "Mounts", and its first message in Buzz now says so')
+  expect(bot.published(40003).map(event => [event.content, event.tags])).toEqual([['**Mounts**', [['h', bot.channel], ['e', root.id], bot.auth]]])
 })
 
 test('delete_message and react with remove take back what Hex posted, and nothing of anyone else\'s', async () => {
@@ -683,7 +683,7 @@ test('a forum post that tags Hex is its own thread: comments on it reach the ses
   posted('nobody asked hex here')
   const post = posted('@Hex should we ship the relay PR', [['p', bot.me]])
   const args = await until(() => bot.launches()[0])
-  expect(args[args.indexOf('--name') + 1]).toBe('should we')
+  expect(args[args.indexOf('--name') + 1]).toBe('should')
   const session = await bot.session(post.id)
   const first = comment('the CI is green now', [['e', post.id, '', 'reply']])
   bot.relay.inject(signed(ownerKey, 40003, 'the CI is finally green', [['h', bot.forum], ['e', first.id]]))
@@ -695,8 +695,8 @@ test('a forum post that tags Hex is its own thread: comments on it reach the ses
   expect(inbound[3].meta).toMatchObject({ deleted: 'true', message_id: first.id, deleted_text: 'the CI is finally green' })
   const sent = (await session.call('reply', { text: 'ship it' })).text.match(/id: (\w+)/)[1]
   expect(bot.relay.events.find(event => event.id === sent)).toMatchObject({ kind: 45003, tags: [['h', bot.forum], ['e', post.id, '', 'reply'], ['p', owner], bot.auth] })
-  await session.call('new_thread', { title: 'Release notes', prompt: 'draft them', channel: 'ideas' })
-  expect(await until(() => bot.relay.events.find(event => event.content === '**Release notes**'))).toMatchObject({ kind: 45001, tags: [['h', bot.forum], ['p', owner], bot.auth] })
+  await session.call('new_thread', { title: 'Notes', prompt: 'draft them', channel: 'ideas' })
+  expect(await until(() => bot.relay.events.find(event => event.content === '**Notes**'))).toMatchObject({ kind: 45001, tags: [['h', bot.forum], ['p', owner], bot.auth] })
   await Bun.sleep(300)
   expect(bot.launches().length).toBe(2)
 })
@@ -722,6 +722,6 @@ test('create_channel makes a channel Hex owns, adds the owner, and new_thread ca
   expect(bot.published(9007)[0]!.tags).toEqual([['h', id], ['name', 'research'], ['visibility', 'open'], ['channel_type', 'forum'], ['about', 'papers'], bot.auth])
   expect(bot.published(9000)[0]!.tags).toEqual([['h', id], ['p', owner], bot.auth])
   expect((await session.call('list_channels', {})).text).toContain(`#research  (id: ${id})`)
-  await session.call('new_thread', { title: 'Reading list', prompt: 'gather them', channel: 'research' })
-  expect(await until(() => bot.relay.events.find(event => event.content === '**Reading list**'))).toMatchObject({ kind: 45001, tags: [['h', id], ['p', owner], bot.auth] })
+  await session.call('new_thread', { title: 'Reading', prompt: 'gather them', channel: 'research' })
+  expect(await until(() => bot.relay.events.find(event => event.content === '**Reading**'))).toMatchObject({ kind: 45001, tags: [['h', id], ['p', owner], bot.auth] })
 })

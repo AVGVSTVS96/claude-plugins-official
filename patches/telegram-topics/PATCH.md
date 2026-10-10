@@ -4,7 +4,7 @@ id: telegram-topics
 summary: Rework the Telegram channel so every forum topic in a group is its own Claude Code session, through the thread hub.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: telegram-topics.patch
-patch_sha256: ae16c2247a63dd68a6a58ae1517377e0621c14883b847837cc9e595893713eb1
+patch_sha256: d06e86c6e4b70bcf16f2362537fafaf9ac853cd1e479e555a22586523fce202e
 ---
 
 ## Intent
@@ -24,7 +24,8 @@ On top of upstream:
 
 - `new_thread(title, prompt, about)` opens a topic with a fresh session, or a
   Discord or Buzz thread with `app: "discord"` or `app: "buzz"`. Titles are
-  1–2 words, enforced. `about` is the first line the user sees in it.
+  one word, enforced by the hub's `title`.
+  `about` is the first line the user sees in it.
 - `reply` and `edit_message` turn `buzz://` links into web links (hub
   `tappable`), since Telegram only links web addresses.
 - `handoff(to: "discord" | "buzz")` moves a topic's session to a new thread
@@ -34,7 +35,8 @@ On top of upstream:
   that fails because its topic is gone forgets it too.
 - `reply` can post into another topic by name.
 - The typing indicator follows the session's real busy state.
-- DMs to the bot are forwarded into the main thread (`HEX_MAIN_THREAD`).
+- A DM to the bot is its own thread: one session named `DM`, separate
+  from General, and its replies go back to the DM.
 - A session that fails to start says why, in its topic.
 - `reply` refuses to attach channel state or any `.env` file.
 - General is the hub's main thread, named after `HEX_NAME`.

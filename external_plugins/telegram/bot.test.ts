@@ -217,13 +217,14 @@ test('new_thread opens a topic with a random icon, forwarding the request and th
   await until(() => calls.find(c => c.method === 'sendChatAction'))
   const sent = await call('reply', { text: 'on it' })
   const replyId = Number(sent.text.match(/id: (\d+)/)[1])
-  expect((await call('new_thread', { title: 'Desk anchors', prompt: 'research desk anchors' })).text).toMatch(/^started thread "Desk anchors" in telegram/)
+  expect((await call('new_thread', { title: 'Desk', prompt: 'research desk anchors' })).text).toMatch(/^started thread "Desk" in telegram/)
   expect((await called('createForumTopic')).icon_custom_emoji_id).toMatch(/^(111|222)$/)
   expect(await called('forwardMessages')).toMatchObject({ chat_id: String(FORUM), from_chat_id: String(FORUM), message_ids: [asked.message_id, replyId], message_thread_id: 9 })
   session({ type: 'state', thread: DESK, busy: false })
 
   await call('rename_thread', { title: 'Anchors', icon: '❤' })
   expect(await called('editForumTopic')).toMatchObject({ message_thread_id: 5, name: 'Anchors', icon_custom_emoji_id: '222' })
+  expect((await call('rename_thread', { title: 'Desk anchors' })).error).toBe('title must be one word, got "Desk anchors"')
   expect((await call('rename_thread', { icon: '🦄' })).error).toBe('Telegram has no topic icon 🦄; pick one of 🔥 ❤️')
 })
 
@@ -266,4 +267,30 @@ test('the got-it reaction lands on each message when access.json sets one', asyn
   await update({ message: seen })
   expect(await called('setMessageReaction', p => p.message_id === seen.message_id)).toMatchObject({ reaction: [{ type: 'emoji', emoji: '👀' }] })
   writeFileSync(join(state, 'access.json'), JSON.stringify({ allowFrom: [String(OWNER)] }))
+})
+
+test('a DM is its own thread: it reaches the DM session, not the group, and replies go back to the DM', async () => {
+  const dm = connect(join(state, 'hub.sock'))
+  const lines: any[] = []
+  let buffer = ''
+  dm.setEncoding('utf8')
+  dm.on('data', (chunk: string) => {
+    buffer += chunk
+    const parts = buffer.split('\n')
+    buffer = parts.pop()!
+    lines.push(...parts.map(line => JSON.parse(line)))
+  })
+  await new Promise(resolve => dm.on('connect', resolve))
+  dm.write(JSON.stringify({ type: 'hello', thread: String(OWNER), session: '0a1b2c3d-0000-4000-8000-0000000000dm' }) + '\n')
+  const forwards = calls.filter(c => c.method === 'forwardMessage').length
+
+  await update({ message: { message_id: ++nextMessage, date: 1760000000, chat: { id: OWNER, type: 'private', first_name: 'Bassim' }, from: owner, text: 'quick one' } })
+  const got = await until(() => lines.find(line => line.type === 'inbound' && line.content === 'quick one'))
+  expect(got.meta.chat_id).toBe(String(OWNER))
+  expect(calls.filter(c => c.method === 'forwardMessage').length).toBe(forwards)
+
+  dm.write(JSON.stringify({ type: 'call', id: 1, tool: 'reply', args: { text: 'on it, from the DM' } }) + '\n')
+  await until(() => lines.find(line => line.type === 'result' && line.id === 1))
+  expect(await called('sendMessage', p => p.text === 'on it, from the DM')).toMatchObject({ chat_id: String(OWNER) })
+  dm.destroy()
 })

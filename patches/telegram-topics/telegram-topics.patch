@@ -286,10 +286,10 @@ index d72dbc1a759e601dd0188cc7a8c3b58edc04373c..3ecbd0bfb8cc26bae0b85f8a1a1c44e8
 +The bot token lives in `~/.claude/channels/hex/telegram/.env` as `TELEGRAM_BOT_TOKEN=…`, and `access.json` there holds `allowFrom`, the Telegram user ids allowed to talk to it.
 diff --git a/external_plugins/telegram/bot.test.ts b/external_plugins/telegram/bot.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..f365a8ef20cbe0aa742fc4218517fe7044d12c25
+index 0000000000000000000000000000000000000000..0df78dac9f21fe59ca9c4ca44c1c2eaa4fc3430c
 --- /dev/null
 +++ b/external_plugins/telegram/bot.test.ts
-@@ -0,0 +1,269 @@
+@@ -0,0 +1,296 @@
 +import { beforeAll, expect, mock, test } from 'bun:test'
 +import { connect } from 'net'
 +import { mkdtempSync, writeFileSync } from 'fs'
@@ -509,13 +509,14 @@ index 0000000000000000000000000000000000000000..f365a8ef20cbe0aa742fc4218517fe70
 +  await until(() => calls.find(c => c.method === 'sendChatAction'))
 +  const sent = await call('reply', { text: 'on it' })
 +  const replyId = Number(sent.text.match(/id: (\d+)/)[1])
-+  expect((await call('new_thread', { title: 'Desk anchors', prompt: 'research desk anchors' })).text).toMatch(/^started thread "Desk anchors" in telegram/)
++  expect((await call('new_thread', { title: 'Desk', prompt: 'research desk anchors' })).text).toMatch(/^started thread "Desk" in telegram/)
 +  expect((await called('createForumTopic')).icon_custom_emoji_id).toMatch(/^(111|222)$/)
 +  expect(await called('forwardMessages')).toMatchObject({ chat_id: String(FORUM), from_chat_id: String(FORUM), message_ids: [asked.message_id, replyId], message_thread_id: 9 })
 +  session({ type: 'state', thread: DESK, busy: false })
 +
 +  await call('rename_thread', { title: 'Anchors', icon: '❤' })
 +  expect(await called('editForumTopic')).toMatchObject({ message_thread_id: 5, name: 'Anchors', icon_custom_emoji_id: '222' })
++  expect((await call('rename_thread', { title: 'Desk anchors' })).error).toBe('title must be one word, got "Desk anchors"')
 +  expect((await call('rename_thread', { icon: '🦄' })).error).toBe('Telegram has no topic icon 🦄; pick one of 🔥 ❤️')
 +})
 +
@@ -559,19 +560,45 @@ index 0000000000000000000000000000000000000000..f365a8ef20cbe0aa742fc4218517fe70
 +  expect(await called('setMessageReaction', p => p.message_id === seen.message_id)).toMatchObject({ reaction: [{ type: 'emoji', emoji: '👀' }] })
 +  writeFileSync(join(state, 'access.json'), JSON.stringify({ allowFrom: [String(OWNER)] }))
 +})
++
++test('a DM is its own thread: it reaches the DM session, not the group, and replies go back to the DM', async () => {
++  const dm = connect(join(state, 'hub.sock'))
++  const lines: any[] = []
++  let buffer = ''
++  dm.setEncoding('utf8')
++  dm.on('data', (chunk: string) => {
++    buffer += chunk
++    const parts = buffer.split('\n')
++    buffer = parts.pop()!
++    lines.push(...parts.map(line => JSON.parse(line)))
++  })
++  await new Promise(resolve => dm.on('connect', resolve))
++  dm.write(JSON.stringify({ type: 'hello', thread: String(OWNER), session: '0a1b2c3d-0000-4000-8000-0000000000dm' }) + '\n')
++  const forwards = calls.filter(c => c.method === 'forwardMessage').length
++
++  await update({ message: { message_id: ++nextMessage, date: 1760000000, chat: { id: OWNER, type: 'private', first_name: 'Bassim' }, from: owner, text: 'quick one' } })
++  const got = await until(() => lines.find(line => line.type === 'inbound' && line.content === 'quick one'))
++  expect(got.meta.chat_id).toBe(String(OWNER))
++  expect(calls.filter(c => c.method === 'forwardMessage').length).toBe(forwards)
++
++  dm.write(JSON.stringify({ type: 'call', id: 1, tool: 'reply', args: { text: 'on it, from the DM' } }) + '\n')
++  await until(() => lines.find(line => line.type === 'result' && line.id === 1))
++  expect(await called('sendMessage', p => p.text === 'on it, from the DM')).toMatchObject({ chat_id: String(OWNER) })
++  dm.destroy()
++})
 diff --git a/external_plugins/telegram/bot.ts b/external_plugins/telegram/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..f02601b730d0612a402936366d2aca0bbd0d60b8
+index 0000000000000000000000000000000000000000..dff33c4368b84114bcc3ef6a5b3d08c5ccc4ba68
 --- /dev/null
 +++ b/external_plugins/telegram/bot.ts
-@@ -0,0 +1,850 @@
+@@ -0,0 +1,835 @@
 +#!/usr/bin/env bun
 +import { Bot, GrammyError, InputFile, type Context } from 'grammy'
 +import type { Chat, MessageEntity, MessageOrigin, ReactionTypeEmoji } from 'grammy/types'
 +import { readFileSync, writeFileSync, mkdirSync, statSync, realpathSync, chmodSync } from 'fs'
 +import { homedir } from 'os'
 +import { basename, join, extname, sep } from 'path'
-+import { startHub, clients, move, tappable, type Message } from '../../hub/hub.ts'
++import { startHub, clients, move, tappable, title, type Message } from '../../hub/hub.ts'
 +
 +const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'hex', 'telegram')
 +const ACCESS_FILE = join(STATE_DIR, 'access.json')
@@ -735,7 +762,7 @@ index 0000000000000000000000000000000000000000..f02601b730d0612a402936366d2aca0b
 +function nameOf(ctx: Context, thread: string): string {
 +  const created = ctx.msg?.reply_to_message?.forum_topic_created
 +  if (created) topicNames.set(thread, created.name)
-+  return topicNames.get(thread) ?? (thread.includes(':') ? `topic ${thread.split(':')[1]}` : 'main')
++  return topicNames.get(thread) ?? (thread.includes(':') ? `topic ${thread.split(':')[1]}` : ctx.chat?.type === 'private' ? 'DM' : 'main')
 +}
 +
 +async function download(file_id: string, uniqueId: string): Promise<string> {
@@ -777,12 +804,6 @@ index 0000000000000000000000000000000000000000..f02601b730d0612a402936366d2aca0b
 +  if (!busy) return
 +  sendTyping(thread)
 +  typing.set(thread, setInterval(() => sendTyping(thread), 4000))
-+}
-+
-+function title(text: string): string {
-+  const title = text.trim()
-+  if (!title || title.split(/\s+/).length > 2) throw new Error(`title must be 1–2 words, got "${title}"`)
-+  return title
 +}
 +
 +async function icons() {
@@ -981,7 +1002,7 @@ index 0000000000000000000000000000000000000000..f02601b730d0612a402936366d2aca0b
 +    }
 +    case 'handoff': {
 +      const to = args.to as string
-+      const name = title((args.title as string | undefined) ?? topicNames.get(thread) ?? '')
++      const name = args.title != null ? title(args.title as string) : topicNames.get(thread) ?? title('')
 +      const link = await move(hub, thread, to, name, args.channel as string | undefined)
 +      if (thread === MAIN) {
 +        await bot.api.sendMessage(chat_id, `Continued in ${to}: ${link}`, extra)
@@ -1178,10 +1199,10 @@ index 0000000000000000000000000000000000000000..f02601b730d0612a402936366d2aca0b
 +  for (const emoji of emojiRemoved) hub.deliver(thread, nameOf(ctx, thread), { content: `(reaction removed: ${emoji})`, meta: { ...meta, reaction: emoji, reaction_removed: 'true' } })
 +})
 +
-+// Outside a forum a chat is one thread; a forum's topic, or a DM relayed into
-+// the main thread under a new id, is only known from messages the hub has seen.
++// Outside a forum a chat, a DM included, is one thread; a forum's topic is only
++// known from messages the hub has seen.
 +function plainThread(chat: Chat): string | undefined {
-+  if (!('is_forum' in chat && chat.is_forum) && !(chat.type === 'private' && MAIN)) return String(chat.id)
++  if (!('is_forum' in chat && chat.is_forum)) return String(chat.id)
 +}
 +
 +bot.on('callback_query:data', async ctx => {
@@ -1246,14 +1267,6 @@ index 0000000000000000000000000000000000000000..f02601b730d0612a402936366d2aca0b
 +// or forge a second meta entry.
 +function safeName(s: string | undefined): string | undefined {
 +  return s?.replace(/[<>\[\]\r\n;]/g, '_')
-+}
-+
-+async function placeOf(ctx: Context): Promise<{ thread: string; msgId?: number }> {
-+  const msgId = ctx.msg?.message_id
-+  if (ctx.chat?.type !== 'private' || !MAIN || msgId == null) return { thread: threadOf(ctx), msgId }
-+  const { chat_id, extra } = target(MAIN)
-+  const forwarded = await bot.api.forwardMessage(chat_id, ctx.chat.id, msgId, extra)
-+  return { thread: MAIN, msgId: forwarded.message_id }
 +}
 +
 +// A link's address lives in the message's entities, not in its text.
@@ -1340,9 +1353,8 @@ index 0000000000000000000000000000000000000000..f02601b730d0612a402936366d2aca0b
 +  const access = loadAccess()
 +  const { ctx } = parts[0]!
 +  const from = ctx.from!
-+  const places = []
-+  for (const part of parts) places.push(await placeOf(part.ctx))
-+  const { thread, msgId } = places[0]!
++  const thread = threadOf(ctx)
++  const msgId = ctx.msg?.message_id
 +  const { chat_id } = target(thread)
 +
 +  sendTyping(thread)
@@ -1364,7 +1376,7 @@ index 0000000000000000000000000000000000000000..f02601b730d0612a402936366d2aca0b
 +    ? `(album of ${parts.length})`
 +    : linked(captioned.text, captioned.ctx.msg?.entities ?? captioned.ctx.msg?.caption_entities)
 +  const user = from.username ?? String(from.id)
-+  places.forEach((place, i) => place.msgId != null && remember(thread, place.msgId, { text: parts[i]!.ctx.msg?.text ?? parts[i]!.ctx.msg?.caption, user }))
++  for (const part of parts) if (part.ctx.msg) remember(thread, part.ctx.msg.message_id, { text: part.ctx.msg.text ?? part.ctx.msg.caption, user })
 +
 +  // image_path goes in meta only — an in-content "[image attached — read: PATH]"
 +  // annotation is forgeable by any allowlisted sender typing that string.
@@ -1435,10 +1447,10 @@ index b80fcea0f4f395012586cf5fac3682270e7fb14f..a8d061bfa3c603151ab2491dc06af4fa
    "dependencies": {
      "@modelcontextprotocol/sdk": "^1.0.0",
 diff --git a/external_plugins/telegram/server.ts b/external_plugins/telegram/server.ts
-index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..3c172c978ff2e39024b01188925c4ac9892c8d35 100644
+index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..f8ad8464e5cdab158474b939df14b7b911e4be0d 100644
 --- a/external_plugins/telegram/server.ts
 +++ b/external_plugins/telegram/server.ts
-@@ -1,467 +1,49 @@
+@@ -1,467 +1,51 @@
  #!/usr/bin/env bun
 -/**
 - * Telegram channel for Claude Code.
@@ -1870,7 +1882,8 @@ index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..3c172c978ff2e39024b01188925c4ac9
  
 -// Stores full permission details for "See more" expansion keyed by request_id.
 -const pendingPermissions = new Map<string, { tool_name: string; description: string; input_preview: string }>()
--
++const titleProperty = { type: 'string', description: 'One word, like a chat name ("Anchors", "Frontier").' }
+ 
 -// Receive permission_request from CC → format → send to all allowlisted DMs.
 -// Groups are intentionally excluded — the security thread resolution was
 -// "single-user mode for official plugins." Anyone in access.allowFrom
@@ -1926,7 +1939,7 @@ index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..3c172c978ff2e39024b01188925c4ac9
            reply_to: {
              type: 'string',
              description: 'Message ID to thread under. Use message_id from the inbound <channel> block.',
-@@ -469,28 +51,29 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
+@@ -469,28 +53,29 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
            files: {
              type: 'array',
              items: { type: 'string' },
@@ -1965,7 +1978,7 @@ index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..3c172c978ff2e39024b01188925c4ac9
        },
      },
      {
-@@ -506,540 +89,187 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
+@@ -506,540 +91,187 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
      },
      {
        name: 'edit_message',
@@ -2008,7 +2021,8 @@ index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..3c172c978ff2e39024b01188925c4ac9
 +        properties: {
 +          message_id: { type: 'string' },
 +          unpin: { type: 'boolean' },
-+        },
+         },
+-        required: ['chat_id', 'message_id', 'text'],
 +        required: ['message_id'],
 +      },
 +    },
@@ -2043,7 +2057,7 @@ index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..3c172c978ff2e39024b01188925c4ac9
 +      inputSchema: {
 +        type: 'object',
 +        properties: {
-+          title: { type: 'string', description: '1–2 words, like a chat name ("Desk anchors", "Hub tests").' },
++          title: titleProperty,
 +          icon: { type: 'string', description: 'An emoji from Telegram\'s topic icon set, e.g. 🔥.' },
 +        },
 +      },
@@ -2064,7 +2078,7 @@ index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..3c172c978ff2e39024b01188925c4ac9
 +      inputSchema: {
 +        type: 'object',
 +        properties: {
-+          title: { type: 'string', description: 'Topic name the user sees in Telegram: 1–2 words, like a chat name ("OpenAI frontier", "Desk anchors").' },
++          title: titleProperty,
 +          prompt: { type: 'string', description: 'Everything the new session needs to start the work: it shares none of your context.' },
 +          about: { type: 'string', description: 'One line the user sees first in the new thread, saying what it is for and where it came from.' },
 +          app: { type: 'string', enum: ['telegram', 'discord', 'buzz'], description: 'Where to open it. Default: telegram.' },
@@ -2075,15 +2089,14 @@ index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..3c172c978ff2e39024b01188925c4ac9
 +    },
 +    {
 +      name: 'handoff',
-+      description: 'Move this conversation to Discord or Buzz when the user asks. It opens a thread there, and this session stops here once the turn ends and resumes there with its full memory. From General, a copy continues there and you stay.',
++      description: 'Move this conversation to Discord or Buzz when the user asks. It opens a thread there, and this session stops here once the turn ends and resumes there with its full memory. From General, a copy continues there and you stay. The title defaults to this topic\'s name, and is required from General.',
 +      inputSchema: {
 +        type: 'object',
 +        properties: {
 +          to: { type: 'string', enum: ['discord', 'buzz'] },
-+          title: { type: 'string', description: 'Thread name there, 1–2 words. Defaults to this topic\'s name; required from General.' },
++          title: titleProperty,
 +          channel: { type: 'string', description: 'Channel to open it in, by name. Default: the server\'s first channel.' },
-         },
--        required: ['chat_id', 'message_id', 'text'],
++        },
 +        required: ['to'],
        },
      },
@@ -2228,9 +2241,10 @@ index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..3c172c978ff2e39024b01188925c4ac9
 -      content: [{ type: 'text', text: `${req.params.name} failed: ${msg}` }],
 -      isError: true,
 -    }
--  }
--})
--
++    return { content: [{ type: 'text', text: `${req.params.name} failed: ${msg}` }], isError: true }
+   }
+ })
+ 
 -await mcp.connect(new StdioServerTransport())
 -
 -// When Claude Code closes the MCP connection, stdin gets EOF. Without this
@@ -2309,12 +2323,11 @@ index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..3c172c978ff2e39024b01188925c4ac9
 -      )
 -      return
 -    }
-+    return { content: [{ type: 'text', text: `${req.params.name} failed: ${msg}` }], isError: true }
-   }
+-  }
 -
 -  await ctx.reply(`Not paired. Send me a message to get a pairing code.`)
- })
- 
+-})
+-
 -// Inline-button handler for permission requests. Callback data is
 -// `perm:allow:<id>`, `perm:deny:<id>`, or `perm:more:<id>`.
 -// Security mirrors the text-reply path: allowFrom must contain the sender.
@@ -2477,7 +2490,12 @@ index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..3c172c978ff2e39024b01188925c4ac9
 -    size: video.file_size,
 -    mime: video.mime_type,
 -    name: safeName(video.file_name),
--  })
++  socket.on('close', () => {
++    if (hub === socket) hub = undefined
++    for (const waiter of pending.values()) waiter.reject(new Error('the Telegram hub disconnected'))
++    pending.clear()
++    setTimeout(connectHub, 2000)
+   })
 -})
 -
 -bot.on('message:video_note', async ctx => {
@@ -2496,12 +2514,7 @@ index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..3c172c978ff2e39024b01188925c4ac9
 -    kind: 'sticker',
 -    file_id: sticker.file_id,
 -    size: sticker.file_size,
-+  socket.on('close', () => {
-+    if (hub === socket) hub = undefined
-+    for (const waiter of pending.values()) waiter.reject(new Error('the Telegram hub disconnected'))
-+    pending.clear()
-+    setTimeout(connectHub, 2000)
-   })
+-  })
 -})
 -
 -type AttachmentMeta = {
@@ -2518,8 +2531,10 @@ index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..3c172c978ff2e39024b01188925c4ac9
 -// or forge a second meta entry.
 -function safeName(s: string | undefined): string | undefined {
 -  return s?.replace(/[<>\[\]\r\n;]/g, '_')
--}
--
++mcp.oninitialized = () => {
++  if (THREAD && SOCKET) connectHub()
+ }
+ 
 -async function handleInbound(
 -  ctx: Context,
 -  text: string,
@@ -2606,10 +2621,8 @@ index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..3c172c978ff2e39024b01188925c4ac9
 -  }).catch(err => {
 -    process.stderr.write(`telegram channel: failed to deliver inbound to Claude: ${err}\n`)
 -  })
-+mcp.oninitialized = () => {
-+  if (THREAD && SOCKET) connectHub()
- }
- 
+-}
+-
 -// Without this, any throw in a message handler stops polling permanently
 -// (grammy's default error handler calls bot.stop() and rethrows).
 -bot.catch(err => {

@@ -530,10 +530,10 @@ index 0000000000000000000000000000000000000000..83a3427b3c3804a003053df707cfe688
 +})
 diff --git a/hub/hub.ts b/hub/hub.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..8a31a8a326304452c261add6dbf635ec986d9786
+index 0000000000000000000000000000000000000000..8b2604e0e19113939810b03cfea68431edb94702
 --- /dev/null
 +++ b/hub/hub.ts
-@@ -0,0 +1,378 @@
+@@ -0,0 +1,384 @@
 +import { createServer, type Socket } from 'net'
 +import { execFile, spawn } from 'child_process'
 +import { readFileSync, writeFileSync, renameSync, rmSync, watch, type FSWatcher } from 'fs'
@@ -561,6 +561,12 @@ index 0000000000000000000000000000000000000000..8a31a8a326304452c261add6dbf635ec
 +const IDLE_STOP = 30 * 60_000
 +const RELAUNCH = 30_000
 +const PRIVATE = /_BOT_TOKEN$|^HEX_|^BUZZ_/
++
++export function title(text: string): string {
++  const title = text.trim()
++  if (!/^[^\s_-]+$/.test(title)) throw new Error(`title must be one word, got "${title}"`)
++  return title
++}
 +
 +export function startHub({ stateDir, channel, main, mainName = 'main', call, state, failed, args = () => [], idleStop = IDLE_STOP, relaunch = RELAUNCH, jobsDir = JOBS, hexDir = process.cwd(), launcher = 'claude' }: {
 +  stateDir: string

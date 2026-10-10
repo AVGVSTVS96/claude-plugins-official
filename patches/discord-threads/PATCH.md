@@ -4,7 +4,7 @@ id: discord-threads
 summary: Rework the Discord channel so every thread in a server is its own Claude Code session, Claude-tag style, through the thread hub.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: discord-threads.patch
-patch_sha256: 2869422ed6288bb7694b18a6fb254916519e85d845165ffec0bb8dcdb860911d
+patch_sha256: 5b5bb851c6bc3431e85132c6f0320e1746a08031c60464e02c0281329cf58a69
 ---
 
 ## Intent
@@ -25,7 +25,7 @@ Discord is the place for deeper work, Claude-tag style:
 
 - Tagging the bot in a text channel starts a thread on that message, with a
   fresh session. Inside a thread every message reaches its session, no tag
-  needed. The session renames a new thread to 1–2 words (`rename_thread`).
+  needed. The session renames a new thread to one word (`rename_thread`).
 - Answers can be longer and structured: the instructions say so, the
   chunker splits on paragraphs by default, and a code block cut across
   messages is closed and reopened so both halves render.
@@ -47,6 +47,9 @@ Discord is the place for deeper work, Claude-tag style:
   message search, and says when Discord is still indexing.
 - Announcement channels work like text channels: a tag starts a thread,
   and they can be read, searched and posted into.
+- A DM to the bot is its own conversation: one session named `DM`,
+  separate from every thread. Thread-only tools (`rename_thread`,
+  `close_thread`) say a DM is not a thread.
 - Forum posts get sessions like any thread. A new post carries its title as
   `post_title` instead of asking for a rename.
 - The typing indicator follows the session's real busy state.
@@ -86,7 +89,7 @@ Discord is the place for deeper work, Claude-tag style:
 4. Without `DISCORD_BOT_TOKEN`, Discord stays off and the rest of the hub
    service runs.
 5. Deliberately dropped from upstream, never ported back: pairing and
-   `/discord:access` (single user; `access.json` holds `allowFrom`), DMs,
+   `/discord:access` (single user; `access.json` holds `allowFrom`),
    the per-channel opt-in, and permission relay.
 6. Keep upstream's wording and structure wherever code is shared, so heals
    stay small.
@@ -97,7 +100,8 @@ Both halves build and the hub tests pass. `bun test external_plugins/discord`
 runs the tools and gateway events against a fake Discord client: channel
 paging, thread drill-in, search, the channel named on arrival, refusal of
 hidden channels, DMs and other servers, reactions, deletes, button taps,
-stickers, polls, forum posts and announcement channels. Run `scripts/verify`.
+stickers, polls, forum posts, announcement channels, and a DM as its own
+session. Run `scripts/verify`.
 
 ## Removal
 
