@@ -178,7 +178,11 @@ test('a session gets T3\'s MCP servers, and starts again with them when they cha
       docs: { type: 'http', url: 'http://localhost:9/mcp', headers: { Authorization: 'Bearer x' } },
     },
   })
+  const saved = join(dir, 'config', 'projects', project.replace(/[^a-zA-Z0-9]/g, '-'))
+  mkdirSync(saved, { recursive: true })
+  writeFileSync(join(saved, `${SESSION}.jsonl`), '')
   const hex = await session(sessionId)
+  await until(() => existsSync(join(dir, 'state', 'threads.json')) && readFileSync(join(dir, 'state', 'threads.json'), 'utf8').includes(SESSION))
   const running = Bun.spawn(['sleep', '60'])
   writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid: running.pid, status: 'idle' }]))
   await agent.request('session/resume', { sessionId, cwd: project, mcpServers: [t3Tools('two')] })

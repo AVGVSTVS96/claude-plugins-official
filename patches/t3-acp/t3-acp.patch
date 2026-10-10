@@ -89,10 +89,10 @@ index 0000000000000000000000000000000000000000..c12bf015726ea411ac246ded94d2493c
 +socket.on('close', () => process.exit(0))
 diff --git a/external_plugins/t3/bot.test.ts b/external_plugins/t3/bot.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..513e0d4a9f32ef4e8337df6db503351a8afce40a
+index 0000000000000000000000000000000000000000..b322769610529a224b1c2ada577fad55a1541e75
 --- /dev/null
 +++ b/external_plugins/t3/bot.test.ts
-@@ -0,0 +1,249 @@
+@@ -0,0 +1,253 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { connect, type Socket } from 'net'
 +import { Readable, Writable } from 'stream'
@@ -273,7 +273,11 @@ index 0000000000000000000000000000000000000000..513e0d4a9f32ef4e8337df6db503351a
 +      docs: { type: 'http', url: 'http://localhost:9/mcp', headers: { Authorization: 'Bearer x' } },
 +    },
 +  })
++  const saved = join(dir, 'config', 'projects', project.replace(/[^a-zA-Z0-9]/g, '-'))
++  mkdirSync(saved, { recursive: true })
++  writeFileSync(join(saved, `${SESSION}.jsonl`), '')
 +  const hex = await session(sessionId)
++  await until(() => existsSync(join(dir, 'state', 'threads.json')) && readFileSync(join(dir, 'state', 'threads.json'), 'utf8').includes(SESSION))
 +  const running = Bun.spawn(['sleep', '60'])
 +  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid: running.pid, status: 'idle' }]))
 +  await agent.request('session/resume', { sessionId, cwd: project, mcpServers: [t3Tools('two')] })
