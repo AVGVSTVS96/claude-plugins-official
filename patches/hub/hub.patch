@@ -1,9 +1,9 @@
 diff --git a/hub/hub.test.ts b/hub/hub.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..83a3427b3c3804a003053df707cfe688478160ce
+index 0000000000000000000000000000000000000000..595b662093ba7c8e208b95f03d036a4ee98c0d12
 --- /dev/null
 +++ b/hub/hub.test.ts
-@@ -0,0 +1,524 @@
+@@ -0,0 +1,557 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { connect, type Socket } from 'net'
 +import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, chmodSync, existsSync } from 'fs'
@@ -56,6 +56,7 @@ index 0000000000000000000000000000000000000000..83a3427b3c3804a003053df707cfe688
 +    failed: (thread, reason) => void failedSeen.push([thread, reason]),
 +    jobsDir: join(dir, 'jobs'),
 +    hexDir: join(dir, 'hex'),
++    projectsDir: join(dir, 'projects'),
 +    idleStop: options.idleStop,
 +    relaunch: options.relaunch,
 +    launcher: options.launcher,
@@ -97,6 +98,12 @@ index 0000000000000000000000000000000000000000..83a3427b3c3804a003053df707cfe688
 +  return { socket, received, send: (payload: object) => socket.write(JSON.stringify(payload) + '\n') }
 +}
 +
++function saved(id = SESSION, folder = join(dir, 'hex')) {
++  const project = join(dir, 'projects', folder.replace(/[^a-zA-Z0-9]/g, '-'))
++  mkdirSync(project, { recursive: true })
++  writeFileSync(join(project, `${id}.jsonl`), '{}\n')
++}
++
 +function settingsOf(args: string[]) {
 +  return JSON.parse(args[args.indexOf('--settings') + 1]!)
 +}
@@ -127,6 +134,7 @@ index 0000000000000000000000000000000000000000..83a3427b3c3804a003053df707cfe688
 +  start()
 +  hub.deliver('chat:7', 'Desk anchors', message)
 +  await launched()
++  saved()
 +  const { received } = await session('chat:7')
 +  await until(() => received.length)
 +  expect(received).toEqual([{ type: 'inbound', ...message }])
@@ -186,6 +194,29 @@ index 0000000000000000000000000000000000000000..83a3427b3c3804a003053df707cfe688
 +  expect(args[args.indexOf('--resume') + 1]).toBe(SESSION)
 +})
 +
++test('a session that dies before its conversation is saved leaves the thread on its last saved one', async () => {
++  const OLD = SESSION
++  const NEW = '4460ed71-0000-4000-8000-000000000000'
++  saved(OLD)
++  start({ main: 'chat', registry: { chat: { name: 'hex', session: OLD } }, agents: [], relaunch: 50 })
++  await launched()
++  const { socket } = await session('chat', NEW)
++  await Bun.sleep(50)
++  expect(registry().chat.session).toBe(OLD)
++  socket.destroy()
++  await until(() => calls().filter(args => args[0] === '--bg').length === 2)
++  const args = calls().filter(args => args[0] === '--bg')[1]!
++  expect(args[args.indexOf('--resume') + 1]).toBe(OLD)
++  const back = await session('chat', OLD)
++  back.socket.destroy()
++  await until(() => calls().filter(args => args[0] === '--bg').length === 3)
++  const next = await session('chat', NEW)
++  saved(NEW)
++  next.send({ type: 'state', thread: 'chat', busy: false })
++  await until(() => registry().chat.session === NEW)
++  hub.stop('chat')
++  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', NEW.slice(0, 8)])
++})
 +
 +test('tool calls act on the calling session\'s own thread', async () => {
 +  start()
@@ -427,6 +458,7 @@ index 0000000000000000000000000000000000000000..83a3427b3c3804a003053df707cfe688
 +  start({ launcher, agents: [] })
 +  hub.open('t3:1', 'project', undefined, project)
 +  await launched()
++  saved(SESSION, project)
 +  const { socket } = await session('t3:1')
 +  await until(() => existsSync(join(dir, 'threads.json')) && registry()['t3:1'])
 +  expect(registry()['t3:1']).toEqual({ name: 'project', cwd: project, session: SESSION })
@@ -442,6 +474,7 @@ index 0000000000000000000000000000000000000000..83a3427b3c3804a003053df707cfe688
 +  start()
 +  hub.open('chat:7', 'Desk anchors', 'go')
 +  await launched()
++  saved()
 +  await session('chat:7')
 +  await until(() => existsSync(join(dir, 'threads.json')) && registry()['chat:7'])
 +  expect(registry()['chat:7']).toEqual({ name: 'Desk anchors', session: SESSION })
@@ -530,13 +563,13 @@ index 0000000000000000000000000000000000000000..83a3427b3c3804a003053df707cfe688
 +})
 diff --git a/hub/hub.ts b/hub/hub.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..8b2604e0e19113939810b03cfea68431edb94702
+index 0000000000000000000000000000000000000000..8a6fe21b1c1688a0fc3320268e06648da760d773
 --- /dev/null
 +++ b/hub/hub.ts
-@@ -0,0 +1,384 @@
+@@ -0,0 +1,404 @@
 +import { createServer, type Socket } from 'net'
 +import { execFile, spawn } from 'child_process'
-+import { readFileSync, writeFileSync, renameSync, rmSync, watch, type FSWatcher } from 'fs'
++import { existsSync, readFileSync, writeFileSync, renameSync, rmSync, watch, type FSWatcher } from 'fs'
 +import { homedir } from 'os'
 +import { join } from 'path'
 +
@@ -557,7 +590,8 @@ index 0000000000000000000000000000000000000000..8b2604e0e19113939810b03cfea68431
 +  return text.replace(/buzz:\/\/[^\s)>\]\\]*[^\s)>\]\\.,;:!?'"]/g, url => `https://hex-sand.vercel.app/open.html#${encodeURIComponent(url)}`)
 +}
 +
-+const JOBS = join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'jobs')
++const CLAUDE = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude')
++const JOBS = join(CLAUDE, 'jobs')
 +const IDLE_STOP = 30 * 60_000
 +const RELAUNCH = 30_000
 +const PRIVATE = /_BOT_TOKEN$|^HEX_|^BUZZ_/
@@ -568,7 +602,7 @@ index 0000000000000000000000000000000000000000..8b2604e0e19113939810b03cfea68431
 +  return title
 +}
 +
-+export function startHub({ stateDir, channel, main, mainName = 'main', call, state, failed, args = () => [], idleStop = IDLE_STOP, relaunch = RELAUNCH, jobsDir = JOBS, hexDir = process.cwd(), launcher = 'claude' }: {
++export function startHub({ stateDir, channel, main, mainName = 'main', call, state, failed, args = () => [], idleStop = IDLE_STOP, relaunch = RELAUNCH, jobsDir = JOBS, hexDir = process.cwd(), projectsDir = join(CLAUDE, 'projects'), launcher = 'claude' }: {
 +  stateDir: string
 +  channel: string
 +  main?: string
@@ -581,6 +615,7 @@ index 0000000000000000000000000000000000000000..8b2604e0e19113939810b03cfea68431
 +  relaunch?: number
 +  jobsDir?: string
 +  hexDir?: string
++  projectsDir?: string
 +  launcher?: string
 +}) {
 +  const registry = join(stateDir, 'threads.json')
@@ -593,6 +628,7 @@ index 0000000000000000000000000000000000000000..8b2604e0e19113939810b03cfea68431
 +  const busy = new Set<string>()
 +  const retiring = new Set<string>()
 +  const leaving = new Map<string, (session: string) => void>()
++  const unsaved = new Map<string, string>()
 +  const plugin = channel.replace(/^plugin:/, '')
 +  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !PRIVATE.test(name)))
 +  let closed = false
@@ -624,6 +660,7 @@ index 0000000000000000000000000000000000000000..8b2604e0e19113939810b03cfea68431
 +
 +  function setState(thread: string, working: boolean) {
 +    state(thread, working)
++    claim(thread)
 +    clearTimeout(idle.get(thread))
 +    idle.delete(thread)
 +    if (working) busy.add(thread)
@@ -637,7 +674,7 @@ index 0000000000000000000000000000000000000000..8b2604e0e19113939810b03cfea68431
 +  // so Claude's own status decides; a busy session reports idle again when it's done.
 +  function stopIfIdle(thread: string) {
 +    idle.delete(thread)
-+    const session = threads[thread]?.session
++    const session = current(thread)
 +    if (!session) return
 +    agent(session, running => {
 +      if (!busy.has(thread) && running?.status !== 'busy') stop(thread)
@@ -647,7 +684,7 @@ index 0000000000000000000000000000000000000000..8b2604e0e19113939810b03cfea68431
 +  function stop(thread: string) {
 +    idle.delete(thread)
 +    retiring.delete(thread)
-+    const session = threads[thread]?.session
++    const session = current(thread)
 +    if (session) execFile('claude', ['stop', session.slice(0, 8)], () => {})
 +  }
 +
@@ -706,6 +743,7 @@ index 0000000000000000000000000000000000000000..8b2604e0e19113939810b03cfea68431
 +    if (launching.has(thread)) return
 +    retiring.delete(thread)
 +    const known = threads[thread] ?? (threads[thread] = { name, ...(cwd && { cwd }) })
++    claim(thread)
 +    if (prompt || queued.has(thread)) setState(thread, true)
 +    launching.set(thread, undefined)
 +    if (fork) return start(known, thread, prompt, fork)
@@ -797,17 +835,18 @@ index 0000000000000000000000000000000000000000..8b2604e0e19113939810b03cfea68431
 +  // resumes for either. `claude stop` returns before the process exits, and resuming
 +  // before then starts a copy, so it waits for the exit.
 +  function restart(thread: string, prompt?: string) {
-+    const known = threads[thread]!
-+    if (!known.session) return launch(thread, known.name, prompt)
-+    agent(known.session, running => cycle(thread, running, prompt))
++    const session = current(thread)
++    if (!session) return launch(thread, threads[thread]!.name, prompt)
++    agent(session, running => cycle(thread, running, prompt))
 +  }
 +
 +  // Delivers a message to a fresh start of the thread's session, so it gets new launch
 +  // arguments; a session busy with background work keeps running and takes it as it is.
 +  function refresh(thread: string, message: Message) {
 +    const known = threads[thread]!
-+    if (!known.session) return deliver(thread, known.name, message)
-+    agent(known.session, running => {
++    const session = current(thread)
++    if (!session) return deliver(thread, known.name, message)
++    agent(session, running => {
 +      if (running?.status === 'busy') return deliver(thread, known.name, message)
 +      queued.set(thread, [...(queued.get(thread) ?? []), message])
 +      cycle(thread, running)
@@ -825,12 +864,26 @@ index 0000000000000000000000000000000000000000..8b2604e0e19113939810b03cfea68431
 +    live.set(thread, socket)
 +    settle(thread)
 +    const known = threads[thread] ?? (threads[thread] = { name: thread })
-+    if (session && known.session !== session) {
-+      known.session = session
-+      save()
-+    }
++    if (session && known.session !== session) unsaved.set(thread, session)
++    else unsaved.delete(thread)
++    claim(thread)
 +    for (const message of queued.get(thread) ?? []) send(socket, { type: 'inbound', ...message })
 +    queued.delete(thread)
++  }
++
++  // A session that dies before Claude saves its conversation can't be resumed, so the
++  // thread keeps its last saved session until the new one has a conversation on disk.
++  function claim(thread: string) {
++    const session = unsaved.get(thread)
++    const known = threads[thread]
++    if (!session || !known || !existsSync(join(projectsDir, (known.cwd ?? hexDir).replace(/[^a-zA-Z0-9]/g, '-'), `${session}.jsonl`))) return
++    unsaved.delete(thread)
++    known.session = session
++    save()
++  }
++
++  function current(thread: string) {
++    return unsaved.get(thread) ?? threads[thread]?.session
 +  }
 +
 +  rmSync(socketPath, { force: true })
@@ -888,7 +941,7 @@ index 0000000000000000000000000000000000000000..8b2604e0e19113939810b03cfea68431
 +    open: (thread: string, name: string, prompt?: string, cwd?: string) => launch(thread, name, prompt, undefined, cwd),
 +    fork: (thread: string, name: string, session: string, prompt: string, cwd?: string) => launch(thread, name, prompt, session, cwd),
 +    main,
-+    session: (thread: string) => threads[thread]?.session,
++    session: current,
 +    name: (thread: string) => threads[thread]?.name,
 +    cwd: (thread: string) => threads[thread]?.cwd,
 +    stop,

@@ -89,10 +89,10 @@ index 0000000000000000000000000000000000000000..c12bf015726ea411ac246ded94d2493c
 +socket.on('close', () => process.exit(0))
 diff --git a/external_plugins/t3/bot.test.ts b/external_plugins/t3/bot.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..7121f539e1c14c6b7fb9f7240387c2107ea1903a
+index 0000000000000000000000000000000000000000..513e0d4a9f32ef4e8337df6db503351a8afce40a
 --- /dev/null
 +++ b/external_plugins/t3/bot.test.ts
-@@ -0,0 +1,248 @@
+@@ -0,0 +1,249 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { connect, type Socket } from 'net'
 +import { Readable, Writable } from 'stream'
@@ -231,6 +231,7 @@ index 0000000000000000000000000000000000000000..7121f539e1c14c6b7fb9f7240387c210
 +  const { agent, updates } = await t3()
 +  const { sessionId } = await agent.request('session/new', { cwd: project, mcpServers: [] })
 +  const hex = await session(sessionId)
++  hex.write(prompt, reply, done)
 +  const running = Bun.spawn(['sleep', '60'])
 +  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid: running.pid, status: 'idle' }]))
 +  await until(() => updates.length)

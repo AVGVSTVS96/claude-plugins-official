@@ -1,6 +1,6 @@
 import { createServer, type Socket } from 'net'
 import { execFile, spawn } from 'child_process'
-import { readFileSync, writeFileSync, renameSync, rmSync, watch, type FSWatcher } from 'fs'
+import { existsSync, readFileSync, writeFileSync, renameSync, rmSync, watch, type FSWatcher } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 
@@ -21,7 +21,8 @@ export function tappable(text: string): string {
   return text.replace(/buzz:\/\/[^\s)>\]\\]*[^\s)>\]\\.,;:!?'"]/g, url => `https://hex-sand.vercel.app/open.html#${encodeURIComponent(url)}`)
 }
 
-const JOBS = join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'jobs')
+const CLAUDE = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude')
+const JOBS = join(CLAUDE, 'jobs')
 const IDLE_STOP = 30 * 60_000
 const RELAUNCH = 30_000
 const PRIVATE = /_BOT_TOKEN$|^HEX_|^BUZZ_/
@@ -32,7 +33,7 @@ export function title(text: string): string {
   return title
 }
 
-export function startHub({ stateDir, channel, main, mainName = 'main', call, state, failed, args = () => [], idleStop = IDLE_STOP, relaunch = RELAUNCH, jobsDir = JOBS, hexDir = process.cwd(), launcher = 'claude' }: {
+export function startHub({ stateDir, channel, main, mainName = 'main', call, state, failed, args = () => [], idleStop = IDLE_STOP, relaunch = RELAUNCH, jobsDir = JOBS, hexDir = process.cwd(), projectsDir = join(CLAUDE, 'projects'), launcher = 'claude' }: {
   stateDir: string
   channel: string
   main?: string
@@ -45,6 +46,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
   relaunch?: number
   jobsDir?: string
   hexDir?: string
+  projectsDir?: string
   launcher?: string
 }) {
   const registry = join(stateDir, 'threads.json')
@@ -57,6 +59,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
   const busy = new Set<string>()
   const retiring = new Set<string>()
   const leaving = new Map<string, (session: string) => void>()
+  const unsaved = new Map<string, string>()
   const plugin = channel.replace(/^plugin:/, '')
   const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !PRIVATE.test(name)))
   let closed = false
@@ -88,6 +91,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
 
   function setState(thread: string, working: boolean) {
     state(thread, working)
+    claim(thread)
     clearTimeout(idle.get(thread))
     idle.delete(thread)
     if (working) busy.add(thread)
@@ -101,7 +105,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
   // so Claude's own status decides; a busy session reports idle again when it's done.
   function stopIfIdle(thread: string) {
     idle.delete(thread)
-    const session = threads[thread]?.session
+    const session = current(thread)
     if (!session) return
     agent(session, running => {
       if (!busy.has(thread) && running?.status !== 'busy') stop(thread)
@@ -111,7 +115,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
   function stop(thread: string) {
     idle.delete(thread)
     retiring.delete(thread)
-    const session = threads[thread]?.session
+    const session = current(thread)
     if (session) execFile('claude', ['stop', session.slice(0, 8)], () => {})
   }
 
@@ -170,6 +174,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
     if (launching.has(thread)) return
     retiring.delete(thread)
     const known = threads[thread] ?? (threads[thread] = { name, ...(cwd && { cwd }) })
+    claim(thread)
     if (prompt || queued.has(thread)) setState(thread, true)
     launching.set(thread, undefined)
     if (fork) return start(known, thread, prompt, fork)
@@ -261,17 +266,18 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
   // resumes for either. `claude stop` returns before the process exits, and resuming
   // before then starts a copy, so it waits for the exit.
   function restart(thread: string, prompt?: string) {
-    const known = threads[thread]!
-    if (!known.session) return launch(thread, known.name, prompt)
-    agent(known.session, running => cycle(thread, running, prompt))
+    const session = current(thread)
+    if (!session) return launch(thread, threads[thread]!.name, prompt)
+    agent(session, running => cycle(thread, running, prompt))
   }
 
   // Delivers a message to a fresh start of the thread's session, so it gets new launch
   // arguments; a session busy with background work keeps running and takes it as it is.
   function refresh(thread: string, message: Message) {
     const known = threads[thread]!
-    if (!known.session) return deliver(thread, known.name, message)
-    agent(known.session, running => {
+    const session = current(thread)
+    if (!session) return deliver(thread, known.name, message)
+    agent(session, running => {
       if (running?.status === 'busy') return deliver(thread, known.name, message)
       queued.set(thread, [...(queued.get(thread) ?? []), message])
       cycle(thread, running)
@@ -289,12 +295,26 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
     live.set(thread, socket)
     settle(thread)
     const known = threads[thread] ?? (threads[thread] = { name: thread })
-    if (session && known.session !== session) {
-      known.session = session
-      save()
-    }
+    if (session && known.session !== session) unsaved.set(thread, session)
+    else unsaved.delete(thread)
+    claim(thread)
     for (const message of queued.get(thread) ?? []) send(socket, { type: 'inbound', ...message })
     queued.delete(thread)
+  }
+
+  // A session that dies before Claude saves its conversation can't be resumed, so the
+  // thread keeps its last saved session until the new one has a conversation on disk.
+  function claim(thread: string) {
+    const session = unsaved.get(thread)
+    const known = threads[thread]
+    if (!session || !known || !existsSync(join(projectsDir, (known.cwd ?? hexDir).replace(/[^a-zA-Z0-9]/g, '-'), `${session}.jsonl`))) return
+    unsaved.delete(thread)
+    known.session = session
+    save()
+  }
+
+  function current(thread: string) {
+    return unsaved.get(thread) ?? threads[thread]?.session
   }
 
   rmSync(socketPath, { force: true })
@@ -352,7 +372,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
     open: (thread: string, name: string, prompt?: string, cwd?: string) => launch(thread, name, prompt, undefined, cwd),
     fork: (thread: string, name: string, session: string, prompt: string, cwd?: string) => launch(thread, name, prompt, session, cwd),
     main,
-    session: (thread: string) => threads[thread]?.session,
+    session: current,
     name: (thread: string) => threads[thread]?.name,
     cwd: (thread: string) => threads[thread]?.cwd,
     stop,

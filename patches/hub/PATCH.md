@@ -4,7 +4,7 @@ id: hub
 summary: Add a client-agnostic hub that gives every chat thread its own Claude Code session and moves threads between clients.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: hub.patch
-patch_sha256: 2afc7633443fc0cf5eee577d2ac8c24446893128eacb99921bfc6997c132352f
+patch_sha256: 8c473f0d5d5b3ca3390bf9f7061f967cb69aa4acffd88a4bba46831be93b09a3
 ---
 
 ## Intent
@@ -75,6 +75,9 @@ instead (`fork`, `--fork-session`).
    dropped, an unreadable `threads.json` is moved aside rather than
    overwritten, a malformed entry in it is dropped, and a launcher that
    can't run fails that start. None of them stop the service.
+8. A thread takes a new session id only once Claude has saved that session's
+   conversation, so a session that dies before then never leaves its thread
+   resuming an id Claude can't find; it resumes its last saved one instead.
 
 ## Verification
 

@@ -136,6 +136,7 @@ test('/compact stops a running session, resumes it with the command once it has 
   const { agent, updates } = await t3()
   const { sessionId } = await agent.request('session/new', { cwd: project, mcpServers: [] })
   const hex = await session(sessionId)
+  hex.write(prompt, reply, done)
   const running = Bun.spawn(['sleep', '60'])
   writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid: running.pid, status: 'idle' }]))
   await until(() => updates.length)

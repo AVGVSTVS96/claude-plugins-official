@@ -50,6 +50,7 @@ function start(options: { main?: string; idleStop?: number; relaunch?: number; l
     failed: (thread, reason) => void failedSeen.push([thread, reason]),
     jobsDir: join(dir, 'jobs'),
     hexDir: join(dir, 'hex'),
+    projectsDir: join(dir, 'projects'),
     idleStop: options.idleStop,
     relaunch: options.relaunch,
     launcher: options.launcher,
@@ -91,6 +92,12 @@ async function session(thread: string, id = SESSION) {
   return { socket, received, send: (payload: object) => socket.write(JSON.stringify(payload) + '\n') }
 }
 
+function saved(id = SESSION, folder = join(dir, 'hex')) {
+  const project = join(dir, 'projects', folder.replace(/[^a-zA-Z0-9]/g, '-'))
+  mkdirSync(project, { recursive: true })
+  writeFileSync(join(project, `${id}.jsonl`), '{}\n')
+}
+
 function settingsOf(args: string[]) {
   return JSON.parse(args[args.indexOf('--settings') + 1]!)
 }
@@ -121,6 +128,7 @@ test('queued messages reach the session when it says hello, and its id is kept',
   start()
   hub.deliver('chat:7', 'Desk anchors', message)
   await launched()
+  saved()
   const { received } = await session('chat:7')
   await until(() => received.length)
   expect(received).toEqual([{ type: 'inbound', ...message }])
@@ -180,6 +188,29 @@ test('a main thread whose session is gone is resumed again, and is never stopped
   expect(args[args.indexOf('--resume') + 1]).toBe(SESSION)
 })
 
+test('a session that dies before its conversation is saved leaves the thread on its last saved one', async () => {
+  const OLD = SESSION
+  const NEW = '4460ed71-0000-4000-8000-000000000000'
+  saved(OLD)
+  start({ main: 'chat', registry: { chat: { name: 'hex', session: OLD } }, agents: [], relaunch: 50 })
+  await launched()
+  const { socket } = await session('chat', NEW)
+  await Bun.sleep(50)
+  expect(registry().chat.session).toBe(OLD)
+  socket.destroy()
+  await until(() => calls().filter(args => args[0] === '--bg').length === 2)
+  const args = calls().filter(args => args[0] === '--bg')[1]!
+  expect(args[args.indexOf('--resume') + 1]).toBe(OLD)
+  const back = await session('chat', OLD)
+  back.socket.destroy()
+  await until(() => calls().filter(args => args[0] === '--bg').length === 3)
+  const next = await session('chat', NEW)
+  saved(NEW)
+  next.send({ type: 'state', thread: 'chat', busy: false })
+  await until(() => registry().chat.session === NEW)
+  hub.stop('chat')
+  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', NEW.slice(0, 8)])
+})
 
 test('tool calls act on the calling session\'s own thread', async () => {
   start()
@@ -421,6 +452,7 @@ exec claude "$@"
   start({ launcher, agents: [] })
   hub.open('t3:1', 'project', undefined, project)
   await launched()
+  saved(SESSION, project)
   const { socket } = await session('t3:1')
   await until(() => existsSync(join(dir, 'threads.json')) && registry()['t3:1'])
   expect(registry()['t3:1']).toEqual({ name: 'project', cwd: project, session: SESSION })
@@ -436,6 +468,7 @@ test('a thread in the hex folder keeps no folder of its own', async () => {
   start()
   hub.open('chat:7', 'Desk anchors', 'go')
   await launched()
+  saved()
   await session('chat:7')
   await until(() => existsSync(join(dir, 'threads.json')) && registry()['chat:7'])
   expect(registry()['chat:7']).toEqual({ name: 'Desk anchors', session: SESSION })
