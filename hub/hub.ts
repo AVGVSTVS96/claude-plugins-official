@@ -276,6 +276,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
       if (request.type === 'hello') welcome(thread = request.thread, request.session, socket)
       if (request.type === 'state') setState(request.thread, request.busy)
       if (request.type === 'open') launch(request.thread, request.name, request.prompt)
+      if (request.type === 'inbound') deliver(request.thread, threads[request.thread]?.name ?? request.thread, { content: request.content, meta: request.meta })
       if (request.type === 'call') {
         call(thread, request.tool, request.args ?? {}).then(
           text => send(socket, { type: 'result', id: request.id, text }),

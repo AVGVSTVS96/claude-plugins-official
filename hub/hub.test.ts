@@ -269,6 +269,16 @@ test('a local open request starts a session for an existing topic with its promp
   expect(settingsOf(args).env.HEX_THREAD).toBe('chat:5')
 })
 
+test('a local inbound request reaches the thread like a message from the app', async () => {
+  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42 }] })
+  const { received } = await session('chat:7')
+  connect(join(dir, 'hub.sock')).on('connect', function () {
+    this.end(JSON.stringify({ type: 'inbound', thread: 'chat:7', ...message }) + '\n')
+  })
+  await until(() => received.length)
+  expect(received).toEqual([{ type: 'inbound', ...message }])
+})
+
 test('a session that fails to start is reported with its reason, and the next message retries', async () => {
   start()
   hub.deliver('chat:7', 'Desk anchors', message)

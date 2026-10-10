@@ -1,9 +1,9 @@
 diff --git a/hub/hub.test.ts b/hub/hub.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..4a048e4e2e1235ab8586343bd47b76c5476a8b13
+index 0000000000000000000000000000000000000000..59ee1fc6d603cb1bddd46e25c27b690250431bbf
 --- /dev/null
 +++ b/hub/hub.test.ts
-@@ -0,0 +1,465 @@
+@@ -0,0 +1,475 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { connect, type Socket } from 'net'
 +import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, chmodSync, existsSync } from 'fs'
@@ -275,6 +275,16 @@ index 0000000000000000000000000000000000000000..4a048e4e2e1235ab8586343bd47b76c5
 +  expect(settingsOf(args).env.HEX_THREAD).toBe('chat:5')
 +})
 +
++test('a local inbound request reaches the thread like a message from the app', async () => {
++  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42 }] })
++  const { received } = await session('chat:7')
++  connect(join(dir, 'hub.sock')).on('connect', function () {
++    this.end(JSON.stringify({ type: 'inbound', thread: 'chat:7', ...message }) + '\n')
++  })
++  await until(() => received.length)
++  expect(received).toEqual([{ type: 'inbound', ...message }])
++})
++
 +test('a session that fails to start is reported with its reason, and the next message retries', async () => {
 +  start()
 +  hub.deliver('chat:7', 'Desk anchors', message)
@@ -471,10 +481,10 @@ index 0000000000000000000000000000000000000000..4a048e4e2e1235ab8586343bd47b76c5
 +})
 diff --git a/hub/hub.ts b/hub/hub.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..fda6eb075764292a15b93499e77797ea30a678ab
+index 0000000000000000000000000000000000000000..5557b2230d79b9344ed243d65938df2a0831ee49
 --- /dev/null
 +++ b/hub/hub.ts
-@@ -0,0 +1,337 @@
+@@ -0,0 +1,338 @@
 +import { createServer, type Socket } from 'net'
 +import { execFile, spawn } from 'child_process'
 +import { readFileSync, writeFileSync, renameSync, rmSync, watch, type FSWatcher } from 'fs'
@@ -753,6 +763,7 @@ index 0000000000000000000000000000000000000000..fda6eb075764292a15b93499e77797ea
 +      if (request.type === 'hello') welcome(thread = request.thread, request.session, socket)
 +      if (request.type === 'state') setState(request.thread, request.busy)
 +      if (request.type === 'open') launch(request.thread, request.name, request.prompt)
++      if (request.type === 'inbound') deliver(request.thread, threads[request.thread]?.name ?? request.thread, { content: request.content, meta: request.meta })
 +      if (request.type === 'call') {
 +        call(thread, request.tool, request.args ?? {}).then(
 +          text => send(socket, { type: 'result', id: request.id, text }),
