@@ -2,7 +2,7 @@
 format: patch-md/v0.1
 id: fork-readme
 summary: Open the README with a note that says what this fork is, what its patches do, and how it stays current.
-baseline: ac996c0dde7fb2a9f805cd5277ffc95ecd44a321
+baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: fork-readme.patch
 patch_sha256: 7c894b8271e9649da5a1fc8c5e6363efc582d9ef681d1645a47cdbe17fc7ae55
 ---
