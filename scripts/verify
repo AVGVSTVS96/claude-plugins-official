@@ -12,6 +12,8 @@ for plugin in telegram discord buzz t3; do
   bun install --cwd "external_plugins/$plugin" --silent
   bun build "external_plugins/$plugin/bot.ts" "external_plugins/$plugin/server.ts" --target bun --outdir "$out/$plugin" >/dev/null
 done
-bun test hub external_plugins/buzz external_plugins/discord external_plugins/telegram external_plugins/t3
+bun install --cwd external_plugins/voice --silent
+bun build external_plugins/voice/server.ts --target bun --outdir "$out/voice" >/dev/null
+bun test hub external_plugins/buzz external_plugins/discord external_plugins/telegram external_plugins/t3 external_plugins/voice
 bun build external_plugins/buzz/provider.ts --target bun --outdir "$out/provider" >/dev/null
 bun build hub/serve.ts --target bun --outdir "$out/hub" >/dev/null

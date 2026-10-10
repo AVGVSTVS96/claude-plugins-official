@@ -1,10 +1,10 @@
 ---
 format: patch-md/v0.1
 id: hex-marketplace
-summary: Name the marketplace hex, so it installs beside the official one and its plugins load as telegram@hex, and list the Buzz channel.
+summary: Name the marketplace hex, so it installs beside the official one and its plugins load as telegram@hex, and list the Buzz and voice channels.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: hex-marketplace.patch
-patch_sha256: 3a38cba0e785acf7a5e5440f6312a783113def7fe74c7b72ac945239bc26ae7a
+patch_sha256: 5d5e2e3dcf1ec253d624ce7c1f6597c57e1e058571287622bdbad182146134a2
 ---
 
 ## Intent
@@ -16,11 +16,12 @@ the official marketplace without a name clash, and its plugins load as
 (`allowedChannelPlugins`).
 
 List `buzz`, the Buzz channel this fork adds in `external_plugins/buzz`
-(`buzz-threads`), so it installs as `buzz@hex`.
+(`buzz-threads`), so it installs as `buzz@hex`, and `voice`, the voice call
+channel in `external_plugins/voice` (`voice`), as `voice@hex`.
 
 ## Invariants
 
-1. Change only the marketplace `name` and add the `buzz` entry. Upstream's
+1. Change only the marketplace `name` and add the `buzz` and `voice` entries. Upstream's
    plugin entries stay as they are.
 
 ## Verification

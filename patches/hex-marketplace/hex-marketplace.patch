@@ -1,5 +1,5 @@
 diff --git a/.claude-plugin/marketplace.json b/.claude-plugin/marketplace.json
-index d8bba09e616760344040ac9abc0e0d11764287c6..aad0141c2af57deb1b9e2b6a12706d18b8554684 100644
+index d8bba09e616760344040ac9abc0e0d11764287c6..2505424524e74e34d697605c33a4e09695fdda18 100644
 --- a/.claude-plugin/marketplace.json
 +++ b/.claude-plugin/marketplace.json
 @@ -1,6 +1,6 @@
@@ -29,3 +29,16 @@ index d8bba09e616760344040ac9abc0e0d11764287c6..aad0141c2af57deb1b9e2b6a12706d18
      {
        "name": "canva",
        "description": "Create, edit, review, resize, and brand-check Canva designs with the Canva MCP server.",
+@@ -4421,6 +4433,12 @@
+         "sha": "10573bac239b7062a476667eaa574d400335c70e"
+       },
+       "homepage": "https://github.com/amzn/selling-partner-agentic-toolkit"
++    },
++    {
++      "name": "voice",
++      "description": "Live voice calls: OpenAI gpt-live-1 talks with you in real time and hands the real work to your Claude Code session.",
++      "category": "productivity",
++      "source": "./external_plugins/voice"
+     }
+   ]
+ }

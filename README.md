@@ -15,6 +15,8 @@
 > - [`external_plugins/t3`](external_plugins/t3/) serves hex to
 >   [T3 Code](https://github.com/pingdotgg/t3code) as an ACP agent, each T3 thread
 >   a session in its own project ([t3-acp](patches/t3-acp/PATCH.md)).
+> - [`external_plugins/voice`](external_plugins/voice/) is a live voice call: OpenAI's
+>   `gpt-live-1` talks, the Claude Code session does the work ([voice](patches/voice/PATCH.md)).
 > - The marketplace is named `hex`, so plugins install as `telegram@hex`
 >   ([hex-marketplace](patches/hex-marketplace/PATCH.md)).
 >

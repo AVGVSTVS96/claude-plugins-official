@@ -4,7 +4,7 @@ id: fork-readme
 summary: Open the README with a note that says what this fork is, what its patches do, and how it stays current.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: fork-readme.patch
-patch_sha256: b7cdafdba715af36610a8e7a0906718484e3d2bfa92ef30e587d783e3b07ce6b
+patch_sha256: f270d221aa4038bf3061ba5b985c3a6760922ea2c780196e11fc6015703c77d2
 ---
 
 ## Intent
