@@ -4,7 +4,7 @@ id: discord-threads
 summary: Rework the Discord channel so every thread in a server is its own Claude Code session, Claude-tag style, through the thread hub.
 baseline: ac996c0dde7fb2a9f805cd5277ffc95ecd44a321
 patch_file: discord-threads.patch
-patch_sha256: 31f119b77a18698ed230ca528bb853eecebcc6c88528565f50ef30f2c6bf0f6f
+patch_sha256: 510d9f9906bf4b785c46ce5a641239478fc744701e2ef6ce6e3dc51182b01dd3
 ---
 
 ## Intent
@@ -40,8 +40,14 @@ Discord is the place for deeper work, Claude-tag style:
   channel's top-level messages, each with its thread's reply count and last
   reply, and `fetch_messages({thread})` reads any thread by its starter
   message id or name. `before` pages back, and `list_channels` lists the
-  text channels the bot can read. Only text channels and threads in the
-  bot's server that it can see are read, never a DM. Bots can't search.
+  text and announcement channels the bot can read. Only those channels and
+  threads in the bot's server that it can see are read, never a DM.
+  `search_messages` searches the whole server through Discord's guild
+  message search, and says when Discord is still indexing.
+- Announcement channels work like text channels: a tag starts a thread,
+  and they can be read, searched and posted into.
+- Forum posts get sessions like any thread. A new post carries its title as
+  `post_title` instead of asking for a rename.
 - The typing indicator follows the session's real busy state.
 - A session that fails to start says why, in its thread.
 - `reply` refuses to attach channel state or any `.env` file.
@@ -51,6 +57,20 @@ Discord is the place for deeper work, Claude-tag style:
   author, text and attachments.
 - An edit reaches the session again, marked `edited`. A forward carries the
   forwarded message's text and attachments, marked `forwarded`.
+- Stickers arrive with their names and image URLs, and polls with their
+  question and options.
+- The sender's reactions, added or removed, and deleted messages reach a
+  thread that already has a session, as `reaction_*` and `deleted` meta.
+  Discord doesn't say who deleted a message, so the bot's own
+  `delete_message` calls are the only deletes not reported.
+- `reply` can be `silent` and carry `buttons`; a tap comes back as a
+  message with the button's label, and the buttons lock on the choice.
+- `delete_message`, `react` with `remove`, `pin`/unpin, `forward` (native
+  Discord forwarding into a thread or channel), `poll`, and `edit_message`
+  with new files.
+- Tools that take a message id find a thread's starter message in the
+  channel it hangs off, so `download_attachment` gets the screenshot a tag
+  started the thread from.
 
 ## Invariants
 
@@ -71,9 +91,10 @@ Discord is the place for deeper work, Claude-tag style:
 ## Verification
 
 Both halves build and the hub tests pass. `bun test external_plugins/discord`
-runs the reading tools against a fake Discord client: channel paging, thread
-drill-in, the channel named on arrival, and refusal of hidden channels, DMs
-and other servers. Run `scripts/verify`.
+runs the tools and gateway events against a fake Discord client: channel
+paging, thread drill-in, search, the channel named on arrival, refusal of
+hidden channels, DMs and other servers, reactions, deletes, button taps,
+stickers, polls, forum posts and announcement channels. Run `scripts/verify`.
 
 ## Removal
 

@@ -14,13 +14,13 @@ const mcp = new Server(
     instructions: [
       'The sender reads Discord, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat. Nobody watches this terminal either, so once your reply is sent, end the turn instead of summarizing it here.',
       '',
-      'This session is one Discord thread, the place for deeper work. Discord renders Markdown, so answers can be longer and structured: headings, lists, and code blocks with a language. Its messages arrive as <channel source="discord" chat_id="..." message_id="..." user="..." ts="...">, and everything you send with these tools lands back in that same thread. If the tag has new_thread="true", this thread was just opened from that message and named after its first words: give it a fitting 1–2 word name with rename_thread first. If the tag has attachment_count, the attachments attribute lists name/type/size — call download_attachment(message_id) to fetch them. If the tag has reply_to_message_id, the sender replied to that earlier message: reply_to_text is its text and reply_to_attachments lists its files (download_attachment with that id). edited="true" means the sender edited the message with that message_id and this is its new text; forwarded="true" means it is a message they forwarded. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply.',
+      'This session is one Discord thread, the place for deeper work. Discord renders Markdown, so answers can be longer and structured: headings, lists, and code blocks with a language. Its messages arrive as <channel source="discord" chat_id="..." message_id="..." user="..." ts="...">, and everything you send with these tools lands back in that same thread. If the tag has new_thread="true", this thread was just opened from that message and named after its first words: give it a fitting 1–2 word name with rename_thread first. If the tag has attachment_count, the attachments attribute lists name/type/size — call download_attachment(message_id) to fetch them. If the tag has reply_to_message_id, the sender replied to that earlier message: reply_to_text is its text and reply_to_attachments lists its files (download_attachment with that id). edited="true" means the sender edited the message with that message_id and this is its new text; forwarded="true" means it is a message they forwarded. stickers lists sent stickers with their image URLs; poll is a poll question, with poll_options and poll_multiple when several answers are allowed. post_title is the title of a new forum post. A reaction arrives as "(reaction: 👍)" with reaction, reaction_to_message_id, reaction_to_user and reaction_to_text, plus reaction_removed="true" when taken off. deleted="true" means the message with that message_id was deleted, with deleted_text when known. button="true" means the sender tapped the button with this label on button_message_id. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply.',
       '',
-      'reply accepts file paths (files: ["/abs/path.png"]) for attachments. Use react to add emoji reactions, and edit_message for interim progress updates. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',
+      'reply accepts file paths (files: ["/abs/path.png"]) for attachments, silent: true to skip the notification, and buttons: ["Yes", "No"] for tappable choices. Use react to add emoji reactions, and edit_message for interim progress updates or to swap a sent file. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',
       '',
       'new_thread opens another thread with its own fresh session and hands it your prompt. Use it for work the user will want to follow or talk to on its own. handoff moves this whole conversation to another app, such as telegram, when the user asks: you stop here and continue there with your memory.',
       '',
-      "fetch_messages pulls real Discord history, from this thread by default. The tag's channel attribute names the channel this thread is in: fetch_messages(channel) reads that channel's top-level messages, a message with a thread shows its reply count, and fetch_messages(thread: that message's id) reads the thread. When the user refers to earlier work or talk in the channel, read it rather than saying you can't see it. Discord's search API isn't available to bots — if the user asks you to find an old message, page back with before or ask them roughly when it was.",
+      "fetch_messages pulls real Discord history, from this thread by default. The tag's channel attribute names the channel this thread is in: fetch_messages(channel) reads that channel's top-level messages, a message with a thread shows its reply count, and fetch_messages(thread: that message's id) reads the thread. When the user refers to earlier work or talk in the channel, read it rather than saying you can't see it. To find an old message anywhere in the server, use search_messages.",
     ].join('\n'),
   },
 )
@@ -29,7 +29,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
       name: 'reply',
-      description: 'Reply in this Discord thread, or post in another one by name. Optionally pass reply_to (message_id) for threading, and files (absolute paths) to attach images or other files.',
+      description: 'Reply in this Discord thread, or post in another one by name. Optionally pass reply_to (message_id) for threading, files (absolute paths) to attach images or other files, silent to send without a notification, and buttons for tappable choices.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -44,32 +44,93 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
             items: { type: 'string' },
             description: 'Absolute file paths to attach (images, logs, etc). Max 10 files, 25MB each.',
           },
+          silent: { type: 'boolean', description: 'Send without a push notification.' },
+          buttons: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Button labels shown under the message (max 25, 80 chars each). A tap comes back as a message with button="true", and the buttons then lock showing the choice.',
+          },
         },
         required: ['text'],
       },
     },
     {
       name: 'react',
-      description: 'Add an emoji reaction to a Discord message. Unicode emoji work directly; custom emoji need the <:name:id> form.',
+      description: 'Add an emoji reaction to a Discord message, or take the bot\'s own off with remove. Unicode emoji work directly; custom emoji need the <:name:id> form.',
       inputSchema: {
         type: 'object',
         properties: {
           message_id: { type: 'string' },
           emoji: { type: 'string' },
+          remove: { type: 'boolean', description: 'Remove the bot\'s reaction instead of adding it.' },
         },
         required: ['message_id', 'emoji'],
       },
     },
     {
       name: 'edit_message',
-      description: 'Edit a message the bot previously sent. Useful for interim progress updates. Edits don\'t trigger push notifications — send a new reply when a long task completes so the user\'s device pings.',
+      description: 'Edit a message the bot previously sent: its text, its files, or both. Useful for interim progress updates. Edits don\'t trigger push notifications — send a new reply when a long task completes so the user\'s device pings.',
       inputSchema: {
         type: 'object',
         properties: {
           message_id: { type: 'string' },
           text: { type: 'string' },
+          files: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Absolute file paths that replace the message\'s attachments.',
+          },
         },
-        required: ['message_id', 'text'],
+        required: ['message_id'],
+      },
+    },
+    {
+      name: 'delete_message',
+      description: 'Delete a message the bot sent.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          message_id: { type: 'string' },
+        },
+        required: ['message_id'],
+      },
+    },
+    {
+      name: 'pin',
+      description: 'Pin a message in this thread, or unpin it.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          message_id: { type: 'string' },
+          unpin: { type: 'boolean' },
+        },
+        required: ['message_id'],
+      },
+    },
+    {
+      name: 'forward',
+      description: 'Forward a message from this thread into another thread or a channel, as a Discord forward.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          message_id: { type: 'string' },
+          thread: { type: 'string', description: 'Thread to forward into, by name.' },
+          channel: { type: 'string', description: 'Channel to forward into instead, by name or id.' },
+        },
+        required: ['message_id'],
+      },
+    },
+    {
+      name: 'poll',
+      description: 'Post a Discord poll in this thread. It runs for 24 hours.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          question: { type: 'string', description: 'Max 300 characters.' },
+          options: { type: 'array', items: { type: 'string' }, description: '1–10 answers, 55 characters each.' },
+          multiple: { type: 'boolean', description: 'Allow picking more than one answer.' },
+        },
+        required: ['question', 'options'],
       },
     },
     {
@@ -85,7 +146,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'fetch_messages',
-      description: "Fetch recent messages from this thread, or from a channel or another thread. Returns oldest-first with message IDs. In a channel, a message that has a thread shows its reply count and last reply; pass its id as thread to read the thread. Discord's search API isn't exposed to bots, so this is the only way to look back.",
+      description: 'Fetch recent messages from this thread, or from a channel or another thread. Returns oldest-first with message IDs. In a channel, a message that has a thread shows its reply count and last reply; pass its id as thread to read the thread.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -94,6 +155,20 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           before: { type: 'string', description: 'Message ID: only messages older than it. Pass the oldest ID you have to page back.' },
           limit: { type: 'number', description: 'Max messages (default 20, Discord caps at 100).' },
         },
+      },
+    },
+    {
+      name: 'search_messages',
+      description: 'Search messages across the Discord server by their text, newest first, with where each one is. Page with offset.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string' },
+          channel: { type: 'string', description: 'Only search this channel, by name or id.' },
+          limit: { type: 'number', description: 'Max results (default and cap 25).' },
+          offset: { type: 'number', description: 'Skip this many results, to page on.' },
+        },
+        required: ['query'],
       },
     },
     {
