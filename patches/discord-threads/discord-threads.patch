@@ -290,10 +290,10 @@ index ad04f6fa437bfa013f72f71de2b460f3eedeeeee..ba2d961c0f87a99cc5f532545276a240
 +The bot token lives in `~/.claude/channels/hex/discord/.env` as `DISCORD_BOT_TOKEN=…`, and `access.json` there holds `allowFrom`, the Discord user ids allowed to talk to it. The bot needs the Message Content intent, and in its server: View Channels, Send Messages, Send Messages in Threads, Create Public Threads, Manage Threads, Read Message History, Attach Files and Add Reactions.
 diff --git a/external_plugins/discord/bot.test.ts b/external_plugins/discord/bot.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..291d3650f46d9bd58e7028c2de7abd6ac40f99f7
+index 0000000000000000000000000000000000000000..af693f25307bd37d955712e458d48f240f73fdc2
 --- /dev/null
 +++ b/external_plugins/discord/bot.test.ts
-@@ -0,0 +1,401 @@
+@@ -0,0 +1,422 @@
 +import { beforeAll, expect, mock, test } from 'bun:test'
 +import { connect } from 'net'
 +import { mkdirSync, mkdtempSync, writeFileSync } from 'fs'
@@ -411,6 +411,7 @@ index 0000000000000000000000000000000000000000..291d3650f46d9bd58e7028c2de7abd6a
 +    },
 +  }
 +  guilds = { cache: new Collection([[GUILD, { id: GUILD, systemChannel: general, channels: { cache: channels, fetch: async () => new Collection([...channels].filter(([, ch]) => ch.guildId === GUILD && !ch.isThread())) } }]]) }
++  users = { fetch: async (id: string) => (id === OWNER ? owner : { id, username: 'someone' }) }
 +  rest = {
 +    get: async (route: string, { query }: { query: URLSearchParams }) => (done.push({ get: route, query: query.toString() }), found),
 +  }
@@ -695,12 +696,32 @@ index 0000000000000000000000000000000000000000..291d3650f46d9bd58e7028c2de7abd6a
 +  expect(opened.content).toBe('launch post review')
 +  expect(opened.meta).toMatchObject({ channel: 'news', new_thread: 'true' })
 +})
++
++test('a vote on the bot\'s poll reaches its thread as the answer, a retracted vote says so, and other votes are dropped', async () => {
++  const answers = new Collection([[1, { text: 'Tacos' }], [2, { text: 'Ramen' }]])
++  const lunch = say(here, 26, '', { author: bot, poll: { question: { text: 'Lunch?' }, answers } })
++  const partial = { id: lunch.id, channelId: here.id, channel: here, partial: true, fetch: async () => lunch }
++  handlers.get('messagePollVoteAdd')!({ id: 2, poll: { message: partial } }, OWNER)
++  const voted = await inbound(received, line => line.meta.poll_message_id === lunch.id)
++  expect(voted.content).toBe('(vote: Ramen)')
++  expect(voted.meta).toMatchObject({ chat_id: here.id, user: 'bassim', vote: 'Ramen', poll: 'Lunch?' })
++  expect(voted.meta.vote_removed).toBeUndefined()
++
++  handlers.get('messagePollVoteRemove')!({ id: 2, poll: { message: lunch } }, OWNER)
++  expect((await inbound(received, line => line.meta.vote_removed === 'true')).content).toBe('(vote removed: Ramen)')
++
++  const theirs = say(here, 27, '', { poll: { question: { text: 'Dinner?' }, answers } })
++  handlers.get('messagePollVoteAdd')!({ id: 1, poll: { message: theirs } }, OWNER)
++  handlers.get('messagePollVoteAdd')!({ id: 1, poll: { message: lunch } }, '8888')
++  await Bun.sleep(100)
++  expect(received.some(line => line.meta?.poll === 'Dinner?' || line.meta?.vote === 'Tacos')).toBe(false)
++})
 diff --git a/external_plugins/discord/bot.ts b/external_plugins/discord/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..117efcdd061350cefd439394ad7ece7202b8fe56
+index 0000000000000000000000000000000000000000..17d143c842d455cfe2b59b99950862925b7e78e4
 --- /dev/null
 +++ b/external_plugins/discord/bot.ts
-@@ -0,0 +1,650 @@
+@@ -0,0 +1,683 @@
 +#!/usr/bin/env bun
 +import {
 +  Client,
@@ -723,6 +744,8 @@ index 0000000000000000000000000000000000000000..117efcdd061350cefd439394ad7ece72
 +  type User,
 +  type PartialUser,
 +  type ButtonInteraction,
++  type PollAnswer,
++  type PartialPollAnswer,
 +  type ActionRow,
 +  type ButtonComponent,
 +  type RESTGetAPIGuildMessagesSearchResult,
@@ -903,8 +926,8 @@ index 0000000000000000000000000000000000000000..117efcdd061350cefd439394ad7ece72
 +
 +function serve(token: string) {
 +  const client = new Client({
-+    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.GuildMessageReactions, GatewayIntentBits.MessageContent],
-+    partials: [Partials.Message, Partials.Reaction, Partials.User],
++    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.GuildMessageReactions, GatewayIntentBits.GuildMessagePolls, GatewayIntentBits.MessageContent],
++    partials: [Partials.Message, Partials.Reaction, Partials.User, Partials.Poll, Partials.PollAnswer],
 +  })
 +
 +  async function threadChannel(thread: string): Promise<ThreadChannel> {
@@ -1279,6 +1302,29 @@ index 0000000000000000000000000000000000000000..117efcdd061350cefd439394ad7ece72
 +    })
 +  }
 +
++  async function handleVote(answer: PollAnswer | PartialPollAnswer, userId: string, removed: boolean): Promise<void> {
++    if (!loadAccess().allowFrom.includes(userId)) return
++    const ch = await servedThread(answer.poll.message)
++    if (!ch) return
++    const msg = answer.poll.message.partial ? await answer.poll.message.fetch() : answer.poll.message
++    if (msg.author.id !== client.user!.id || !msg.poll) return
++    const vote = msg.poll.answers.get(answer.id)?.text ?? ''
++    const who = await client.users.fetch(userId)
++    hub.deliver(ch.id, ch.name, {
++      content: `(${removed ? 'vote removed' : 'vote'}: ${vote})`,
++      meta: {
++        chat_id: ch.id,
++        user: who.username,
++        user_id: who.id,
++        ts: new Date().toISOString(),
++        vote,
++        ...(removed ? { vote_removed: 'true' } : {}),
++        poll_message_id: msg.id,
++        poll: msg.poll.question.text ?? '',
++      },
++    })
++  }
++
 +  async function handleTap(tap: ButtonInteraction): Promise<void> {
 +    if (!loadAccess().allowFrom.includes(tap.user.id)) return void (await tap.deferUpdate())
 +    const labels = (tap.message.components as ActionRow<ButtonComponent>[]).flatMap(row => row.components.map(button => button.label!))
@@ -1306,6 +1352,14 @@ index 0000000000000000000000000000000000000000..117efcdd061350cefd439394ad7ece72
 +
 +  client.on('messageReactionRemove', (reaction, user) => {
 +    handleReaction(reaction, user, true).catch(failure('handleReaction'))
++  })
++
++  client.on('messagePollVoteAdd', (answer, userId) => {
++    handleVote(answer, userId, false).catch(failure('handleVote'))
++  })
++
++  client.on('messagePollVoteRemove', (answer, userId) => {
++    handleVote(answer, userId, true).catch(failure('handleVote'))
 +  })
 +
 +  client.on('messageDelete', msg => {
@@ -1371,7 +1425,7 @@ index eac89c3befd8ebb90758a9acdf7f400de8c9f298..87aff60aefe5d5610abfa8d4e6e2b719
    "dependencies": {
      "@modelcontextprotocol/sdk": "^1.0.0",
 diff --git a/external_plugins/discord/server.ts b/external_plugins/discord/server.ts
-index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..954e99879d4d298ef14c48b6bd17a3dfc45bfd2b 100644
+index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..f6ac88e5d100a9ca276613ce911f5ae1eefda190 100644
 --- a/external_plugins/discord/server.ts
 +++ b/external_plugins/discord/server.ts
 @@ -1,533 +1,40 @@
@@ -1839,7 +1893,7 @@ index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..954e99879d4d298ef14c48b6bd17a3df
 +      'The sender reads Discord, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat. Nobody watches this terminal either, so once your reply is sent, end the turn instead of summarizing it here.',
        '',
 -      'Messages from Discord arrive as <channel source="discord" chat_id="..." message_id="..." user="..." ts="...">. If the tag has attachment_count, the attachments attribute lists name/type/size — call download_attachment(chat_id, message_id) to fetch them. Reply with the reply tool — pass chat_id back. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply, omit reply_to for normal responses.',
-+      'This session is one Discord thread, the place for deeper work. Discord renders Markdown, so answers can be longer and structured: headings, lists, and code blocks with a language. Its messages arrive as <channel source="discord" chat_id="..." message_id="..." user="..." ts="...">, and everything you send with these tools lands back in that same thread. If the tag has new_thread="true", this thread was just opened from that message and named after its first words: give it a fitting 1–2 word name with rename_thread first. If the tag has attachment_count, the attachments attribute lists name/type/size — call download_attachment(message_id) to fetch them. If the tag has reply_to_message_id, the sender replied to that earlier message: reply_to_text is its text and reply_to_attachments lists its files (download_attachment with that id). edited="true" means the sender edited the message with that message_id and this is its new text; forwarded="true" means it is a message they forwarded. stickers lists sent stickers with their image URLs; poll is a poll question, with poll_options and poll_multiple when several answers are allowed. post_title is the title of a new forum post. A reaction arrives as "(reaction: 👍)" with reaction, reaction_to_message_id, reaction_to_user and reaction_to_text, plus reaction_removed="true" when taken off. deleted="true" means the message with that message_id was deleted, with deleted_text when known. button="true" means the sender tapped the button with this label on button_message_id. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply.',
++      'This session is one Discord thread, the place for deeper work. Discord renders Markdown, so answers can be longer and structured: headings, lists, and code blocks with a language. Its messages arrive as <channel source="discord" chat_id="..." message_id="..." user="..." ts="...">, and everything you send with these tools lands back in that same thread. If the tag has new_thread="true", this thread was just opened from that message and named after its first words: give it a fitting 1–2 word name with rename_thread first. If the tag has attachment_count, the attachments attribute lists name/type/size — call download_attachment(message_id) to fetch them. If the tag has reply_to_message_id, the sender replied to that earlier message: reply_to_text is its text and reply_to_attachments lists its files (download_attachment with that id). edited="true" means the sender edited the message with that message_id and this is its new text; forwarded="true" means it is a message they forwarded. stickers lists sent stickers with their image URLs; poll is a poll question, with poll_options and poll_multiple when several answers are allowed. post_title is the title of a new forum post. A reaction arrives as "(reaction: 👍)" with reaction, reaction_to_message_id, reaction_to_user and reaction_to_text, plus reaction_removed="true" when taken off. deleted="true" means the message with that message_id was deleted, with deleted_text when known. button="true" means the sender tapped the button with this label on button_message_id. A vote on your poll arrives as "(vote: Tacos)" with vote, poll and poll_message_id, plus vote_removed="true" when taken back. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply.',
        '',
 -      'reply accepts file paths (files: ["/abs/path.png"]) for attachments. Use react to add emoji reactions, and edit_message for interim progress updates. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',
 +      'reply accepts file paths (files: ["/abs/path.png"]) for attachments, silent: true to skip the notification, and buttons: ["Yes", "No"] for tappable choices. Use react to add emoji reactions, and edit_message for interim progress updates or to swap a sent file. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',

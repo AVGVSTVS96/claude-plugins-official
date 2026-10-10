@@ -115,6 +115,7 @@ class Client {
     },
   }
   guilds = { cache: new Collection([[GUILD, { id: GUILD, systemChannel: general, channels: { cache: channels, fetch: async () => new Collection([...channels].filter(([, ch]) => ch.guildId === GUILD && !ch.isThread())) } }]]) }
+  users = { fetch: async (id: string) => (id === OWNER ? owner : { id, username: 'someone' }) }
   rest = {
     get: async (route: string, { query }: { query: URLSearchParams }) => (done.push({ get: route, query: query.toString() }), found),
   }
@@ -398,4 +399,24 @@ test('a tag in an announcement channel starts a thread like in a text channel', 
   const opened = await inbound(s.received, line => line.meta.message_id === thread.id)
   expect(opened.content).toBe('launch post review')
   expect(opened.meta).toMatchObject({ channel: 'news', new_thread: 'true' })
+})
+
+test('a vote on the bot\'s poll reaches its thread as the answer, a retracted vote says so, and other votes are dropped', async () => {
+  const answers = new Collection([[1, { text: 'Tacos' }], [2, { text: 'Ramen' }]])
+  const lunch = say(here, 26, '', { author: bot, poll: { question: { text: 'Lunch?' }, answers } })
+  const partial = { id: lunch.id, channelId: here.id, channel: here, partial: true, fetch: async () => lunch }
+  handlers.get('messagePollVoteAdd')!({ id: 2, poll: { message: partial } }, OWNER)
+  const voted = await inbound(received, line => line.meta.poll_message_id === lunch.id)
+  expect(voted.content).toBe('(vote: Ramen)')
+  expect(voted.meta).toMatchObject({ chat_id: here.id, user: 'bassim', vote: 'Ramen', poll: 'Lunch?' })
+  expect(voted.meta.vote_removed).toBeUndefined()
+
+  handlers.get('messagePollVoteRemove')!({ id: 2, poll: { message: lunch } }, OWNER)
+  expect((await inbound(received, line => line.meta.vote_removed === 'true')).content).toBe('(vote removed: Ramen)')
+
+  const theirs = say(here, 27, '', { poll: { question: { text: 'Dinner?' }, answers } })
+  handlers.get('messagePollVoteAdd')!({ id: 1, poll: { message: theirs } }, OWNER)
+  handlers.get('messagePollVoteAdd')!({ id: 1, poll: { message: lunch } }, '8888')
+  await Bun.sleep(100)
+  expect(received.some(line => line.meta?.poll === 'Dinner?' || line.meta?.vote === 'Tacos')).toBe(false)
 })

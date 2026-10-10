@@ -20,6 +20,8 @@ import {
   type User,
   type PartialUser,
   type ButtonInteraction,
+  type PollAnswer,
+  type PartialPollAnswer,
   type ActionRow,
   type ButtonComponent,
   type RESTGetAPIGuildMessagesSearchResult,
@@ -200,8 +202,8 @@ function title(text: string): string {
 
 function serve(token: string) {
   const client = new Client({
-    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.GuildMessageReactions, GatewayIntentBits.MessageContent],
-    partials: [Partials.Message, Partials.Reaction, Partials.User],
+    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.GuildMessageReactions, GatewayIntentBits.GuildMessagePolls, GatewayIntentBits.MessageContent],
+    partials: [Partials.Message, Partials.Reaction, Partials.User, Partials.Poll, Partials.PollAnswer],
   })
 
   async function threadChannel(thread: string): Promise<ThreadChannel> {
@@ -576,6 +578,29 @@ function serve(token: string) {
     })
   }
 
+  async function handleVote(answer: PollAnswer | PartialPollAnswer, userId: string, removed: boolean): Promise<void> {
+    if (!loadAccess().allowFrom.includes(userId)) return
+    const ch = await servedThread(answer.poll.message)
+    if (!ch) return
+    const msg = answer.poll.message.partial ? await answer.poll.message.fetch() : answer.poll.message
+    if (msg.author.id !== client.user!.id || !msg.poll) return
+    const vote = msg.poll.answers.get(answer.id)?.text ?? ''
+    const who = await client.users.fetch(userId)
+    hub.deliver(ch.id, ch.name, {
+      content: `(${removed ? 'vote removed' : 'vote'}: ${vote})`,
+      meta: {
+        chat_id: ch.id,
+        user: who.username,
+        user_id: who.id,
+        ts: new Date().toISOString(),
+        vote,
+        ...(removed ? { vote_removed: 'true' } : {}),
+        poll_message_id: msg.id,
+        poll: msg.poll.question.text ?? '',
+      },
+    })
+  }
+
   async function handleTap(tap: ButtonInteraction): Promise<void> {
     if (!loadAccess().allowFrom.includes(tap.user.id)) return void (await tap.deferUpdate())
     const labels = (tap.message.components as ActionRow<ButtonComponent>[]).flatMap(row => row.components.map(button => button.label!))
@@ -603,6 +628,14 @@ function serve(token: string) {
 
   client.on('messageReactionRemove', (reaction, user) => {
     handleReaction(reaction, user, true).catch(failure('handleReaction'))
+  })
+
+  client.on('messagePollVoteAdd', (answer, userId) => {
+    handleVote(answer, userId, false).catch(failure('handleVote'))
+  })
+
+  client.on('messagePollVoteRemove', (answer, userId) => {
+    handleVote(answer, userId, true).catch(failure('handleVote'))
   })
 
   client.on('messageDelete', msg => {

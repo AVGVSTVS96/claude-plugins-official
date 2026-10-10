@@ -4,7 +4,7 @@ id: discord-threads
 summary: Rework the Discord channel so every thread in a server is its own Claude Code session, Claude-tag style, through the thread hub.
 baseline: ac996c0dde7fb2a9f805cd5277ffc95ecd44a321
 patch_file: discord-threads.patch
-patch_sha256: 510d9f9906bf4b785c46ce5a641239478fc744701e2ef6ce6e3dc51182b01dd3
+patch_sha256: 6e039d5f2790e8a3b64670a8a28f2ddd9cd9330cea3b283e95653379d8d6acf6
 ---
 
 ## Intent
@@ -63,6 +63,8 @@ Discord is the place for deeper work, Claude-tag style:
   thread that already has a session, as `reaction_*` and `deleted` meta.
   Discord doesn't say who deleted a message, so the bot's own
   `delete_message` calls are the only deletes not reported.
+- The sender's votes on the bot's own polls, cast or taken back, reach the
+  poll's thread with the answer and question.
 - `reply` can be `silent` and carry `buttons`; a tap comes back as a
   message with the button's label, and the buttons lock on the choice.
 - `delete_message`, `react` with `remove`, `pin`/unpin, `forward` (native
