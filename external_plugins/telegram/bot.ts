@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { Bot, GrammyError, InputFile, type Context } from 'grammy'
-import type { MessageEntity, MessageOrigin, ReactionTypeEmoji } from 'grammy/types'
+import type { Chat, MessageEntity, MessageOrigin, ReactionTypeEmoji } from 'grammy/types'
 import { readFileSync, writeFileSync, mkdirSync, statSync, realpathSync, chmodSync } from 'fs'
 import { homedir } from 'os'
 import { basename, join, extname, sep } from 'path'
@@ -41,7 +41,7 @@ type Access = {
   ackReaction?: string
   /** Which chunks get Telegram's reply reference when reply_to is passed. Default: 'first'. 'off' = never thread. */
   replyToMode?: 'off' | 'first' | 'all'
-  /** Max chars per outbound message before splitting. Default: 4096 (Telegram's hard cap). */
+  /** Max chars per outbound message before splitting. Default: Telegram's hard cap, 4096 (32768 for format 'markdown'). */
   textChunkLimit?: number
   /** Split on paragraph boundaries instead of hard char count. */
   chunkMode?: 'length' | 'newline'
@@ -57,7 +57,11 @@ function loadAccess(): Access {
 }
 
 const MAX_CHUNK_LIMIT = 4096
+const MAX_RICH_LIMIT = 32768
+const MAX_CAPTION = 1024
+const MAX_PHOTO_BYTES = 10 * 1024 * 1024
 const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
+const ALBUM_WAIT = 1000
 
 // reply's files param takes any path, but channel state and .env files (tokens)
 // are the things Claude has no reason to ever send.
@@ -93,9 +97,33 @@ function chunk(text: string, limit: number, mode: 'length' | 'newline'): string[
   return out
 }
 
+// A code block cut across two messages renders as broken text in both, so
+// each chunk closes the fence it opened and the next one reopens it.
+function fenced(text: string, limit: number, mode: 'length' | 'newline'): string[] {
+  const out: string[] = []
+  let open = ''
+  for (const part of chunk(text, limit - 16, mode)) {
+    let body = open ? `${open}\n${part}` : part
+    for (const line of part.split('\n')) {
+      const fence = line.match(/^\s*```(\S*)/)
+      if (fence) open = open ? '' : '```' + fence[1]
+    }
+    if (open) body += '\n```'
+    out.push(body)
+  }
+  return out
+}
+
 // .jpg/.jpeg/.png/.gif/.webp go as photos (Telegram compresses + shows inline);
-// everything else goes as documents (raw file, no compression).
+// everything else, and photos over Telegram's 10MB photo cap, go as documents.
 const PHOTO_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp'])
+
+function asPhoto(f: string): boolean {
+  assertSendable(f)
+  const { size } = statSync(f)
+  if (size > MAX_ATTACHMENT_BYTES) throw new Error(`file too large: ${f} (${(size / 1024 / 1024).toFixed(1)}MB, max 50MB)`)
+  return PHOTO_EXTS.has(extname(f).toLowerCase()) && size <= MAX_PHOTO_BYTES
+}
 
 function threadOf(ctx: Context): string {
   const chat = String(ctx.chat!.id)
@@ -108,6 +136,34 @@ function target(thread: string) {
 }
 
 const topicNames = new Map<string, string>()
+
+// Telegram's reaction updates carry neither the message's text nor its topic,
+// so the hub keeps both for every message it sends or receives, per thread,
+// until the thread is forgotten.
+type Seen = { text?: string; user: string; poll?: { id: string; options: string[] } }
+const seen = new Map<string, Map<number, Seen>>()
+
+function remember(thread: string, id: number, entry: Seen): void {
+  if (!seen.has(thread)) seen.set(thread, new Map())
+  seen.get(thread)!.set(id, entry)
+}
+
+function recall(chat: string, id: number): [string, Seen] | undefined {
+  for (const [thread, messages] of seen) {
+    if (target(thread).chat_id === chat && messages.has(id)) return [thread, messages.get(id)!]
+  }
+}
+
+function me(): string {
+  return bot.botInfo.username
+}
+
+function retire(thread: string): Promise<string> {
+  return hub.retire(thread).then(session => {
+    seen.delete(thread)
+    return session
+  })
+}
 
 function nameOf(ctx: Context, thread: string): string {
   const created = ctx.msg?.reply_to_message?.forum_topic_created
@@ -162,13 +218,40 @@ function title(text: string): string {
   return title
 }
 
+async function icons() {
+  const stickers = await bot.api.getForumTopicIconStickers()
+  return stickers.filter(sticker => sticker.custom_emoji_id && sticker.emoji)
+}
+
+async function iconOf(emoji: string): Promise<string> {
+  const all = await icons()
+  const plain = (e: string) => e.replace(/\uFE0F/g, '')
+  const icon = all.find(sticker => plain(sticker.emoji!) === plain(emoji.trim()))
+  if (!icon) throw new Error(`Telegram has no topic icon ${emoji}; pick one of ${all.map(sticker => sticker.emoji).join(' ')}`)
+  return icon.custom_emoji_id!
+}
+
 async function place(name: string) {
   if (!MAIN) throw new Error('topics need HEX_MAIN_THREAD, the group they open in')
   const { chat_id } = target(MAIN)
-  const topic = await bot.api.createForumTopic(chat_id, name)
+  const icon = await icons().then(all => all[Math.floor(Math.random() * all.length)]?.custom_emoji_id, () => undefined)
+  const topic = await bot.api.createForumTopic(chat_id, name, icon ? { icon_custom_emoji_id: icon } : {})
   const thread = `${chat_id}:${topic.message_thread_id}`
   topicNames.set(thread, name)
   return { thread, link: `https://t.me/c/${chat_id.replace(/^-100/, '')}/${topic.message_thread_id}` }
+}
+
+// A new topic opens with the request that asked for it and what the session
+// said since, when a message from the user started the caller's current turn.
+async function origin(from: string, to: string): Promise<void> {
+  if (!typing.has(from)) return
+  const messages = [...(seen.get(from) ?? [])]
+  const asked = messages.findLastIndex(([, message]) => message.user !== me())
+  if (asked < 0) return
+  const picked = messages.slice(asked).filter(([, message], i) => i === 0 || message.user === me())
+  const { chat_id, extra } = target(to)
+  const copies = await bot.api.forwardMessages(chat_id, target(from).chat_id, picked.map(([id]) => id), extra)
+  copies.forEach((copy, i) => remember(to, copy.message_id, { text: picked[i]![1].text, user: me() }))
 }
 
 async function call(caller: string, tool: string, args: Record<string, unknown>): Promise<string> {
@@ -177,32 +260,38 @@ async function call(caller: string, tool: string, args: Record<string, unknown>)
   const access = loadAccess()
   switch (tool) {
     case 'reply': {
-      const text = args.text as string
+      const text = (args.text as string | undefined) ?? ''
       const reply_to = args.reply_to != null ? Number(args.reply_to) : undefined
       const files = (args.files as string[] | undefined) ?? []
-      const parseMode = args.format === 'markdownv2' ? 'MarkdownV2' as const : undefined
+      const buttons = (args.buttons as string[] | undefined) ?? []
+      const markdown = args.format === 'markdown'
+      const parseMode = args.format === 'markdownv2' ? { parse_mode: 'MarkdownV2' as const } : {}
+      if (!text && !files.length) throw new Error('reply needs text or files')
+      if (buttons.length && !text) throw new Error('buttons need text to go with them')
 
-      for (const f of files) {
-        assertSendable(f)
-        const st = statSync(f)
-        if (st.size > MAX_ATTACHMENT_BYTES) {
-          throw new Error(`file too large: ${f} (${(st.size / 1024 / 1024).toFixed(1)}MB, max 50MB)`)
-        }
-      }
-
-      const limit = Math.max(1, Math.min(access.textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT))
+      const photos = files.map(asPhoto)
+      const caption = files.length && !markdown && text.length <= MAX_CAPTION ? text : ''
+      const cap = markdown ? MAX_RICH_LIMIT : MAX_CHUNK_LIMIT
+      const limit = Math.max(1, Math.min(access.textChunkLimit ?? cap, cap))
       const replyMode = access.replyToMode ?? 'first'
-      const chunks = chunk(text, limit, access.chunkMode ?? 'length')
+      const chunks = !text || caption ? [] : markdown ? fenced(text, limit, access.chunkMode ?? 'length') : chunk(text, limit, access.chunkMode ?? 'length')
+      const silent = args.silent ? { disable_notification: true } : {}
+      const keyboard = buttons.length ? { reply_markup: { inline_keyboard: [buttons.map((label, i) => ({ text: label, callback_data: String(i) }))] } } : {}
       const sentIds: number[] = []
 
       try {
         for (let i = 0; i < chunks.length; i++) {
           const shouldReplyTo = reply_to != null && replyMode !== 'off' && (replyMode === 'all' || i === 0)
-          const sent = await bot.api.sendMessage(chat_id, chunks[i]!, {
+          const opts = {
             ...extra,
             ...(shouldReplyTo ? { reply_parameters: { message_id: reply_to } } : {}),
-            ...(parseMode ? { parse_mode: parseMode } : {}),
-          })
+            ...silent,
+            ...(i === chunks.length - 1 ? keyboard : {}),
+          }
+          const sent = markdown
+            ? await bot.api.sendRichMessage(chat_id, { markdown: chunks[i]! }, opts)
+            : await bot.api.sendMessage(chat_id, chunks[i]!, { ...opts, ...parseMode })
+          remember(thread, sent.message_id, { text: chunks[i], user: me() })
           sentIds.push(sent.message_id)
         }
       } catch (err) {
@@ -210,42 +299,103 @@ async function call(caller: string, tool: string, args: Record<string, unknown>)
         throw new Error(`reply failed after ${sentIds.length} of ${chunks.length} chunk(s) sent: ${msg}`)
       }
 
-      for (const f of files) {
-        const input = new InputFile(f)
+      for (let i = 0; i < files.length; i++) {
+        const input = new InputFile(files[i]!)
+        const captioned = i === 0 && caption
         const opts = {
           ...extra,
           ...(reply_to != null && replyMode !== 'off' ? { reply_parameters: { message_id: reply_to } } : {}),
+          ...silent,
+          ...(captioned ? { caption, ...parseMode, ...keyboard } : {}),
         }
-        const sent = PHOTO_EXTS.has(extname(f).toLowerCase())
+        const sent = photos[i]
           ? await bot.api.sendPhoto(chat_id, input, opts)
           : await bot.api.sendDocument(chat_id, input, opts)
+        remember(thread, sent.message_id, { text: captioned ? caption : undefined, user: me() })
         sentIds.push(sent.message_id)
       }
 
       return sentIds.length === 1 ? `sent (id: ${sentIds[0]})` : `sent ${sentIds.length} parts (ids: ${sentIds.join(', ')})`
     }
     case 'react': {
-      await bot.api.setMessageReaction(chat_id, Number(args.message_id), [
+      await bot.api.setMessageReaction(chat_id, Number(args.message_id), args.remove ? [] : [
         { type: 'emoji', emoji: args.emoji as ReactionTypeEmoji['emoji'] },
       ])
-      return 'reacted'
+      return args.remove ? 'reaction removed' : 'reacted'
     }
     case 'edit_message': {
-      const parseMode = args.format === 'markdownv2' ? 'MarkdownV2' as const : undefined
-      const edited = await bot.api.editMessageText(
-        chat_id,
-        Number(args.message_id),
-        args.text as string,
-        ...(parseMode ? [{ parse_mode: parseMode }] : []),
-      )
-      return `edited (id: ${typeof edited === 'object' ? edited.message_id : args.message_id})`
+      const id = Number(args.message_id)
+      const text = args.text as string | undefined
+      const file = args.file as string | undefined
+      const parseMode = args.format === 'markdownv2' ? { parse_mode: 'MarkdownV2' as const } : {}
+      if (file) {
+        const caption = text != null ? { caption: text, ...parseMode } : {}
+        await bot.api.editMessageMedia(chat_id, id, { type: asPhoto(file) ? 'photo' : 'document', media: new InputFile(file), ...caption })
+      } else {
+        if (text == null) throw new Error('edit_message needs text or a file')
+        const edit = args.format === 'markdown'
+          ? bot.api.editMessageText(chat_id, id, { markdown: text })
+          : bot.api.editMessageText(chat_id, id, text, parseMode)
+        await edit.catch(err => {
+          if (!/no text in the message/.test(String(err))) throw err
+          if (args.format === 'markdown') throw new Error("a file's caption can't take format 'markdown'; use 'text' or 'markdownv2'")
+          return bot.api.editMessageCaption(chat_id, id, { caption: text, ...parseMode })
+        })
+      }
+      if (text != null) remember(thread, id, { text, user: me() })
+      return `edited (id: ${id})`
+    }
+    case 'delete_message': {
+      const id = Number(args.message_id)
+      await bot.api.deleteMessage(chat_id, id)
+      seen.get(thread)?.delete(id)
+      return `deleted (id: ${id})`
+    }
+    case 'pin': {
+      const id = Number(args.message_id)
+      if (args.unpin) await bot.api.unpinChatMessage(chat_id, id)
+      else await bot.api.pinChatMessage(chat_id, id)
+      return `${args.unpin ? 'unpinned' : 'pinned'} (id: ${id})`
+    }
+    case 'forward': {
+      const id = Number(args.message_id)
+      const from = target(caller).chat_id
+      const sent = await bot.api.forwardMessage(chat_id, from, id, extra)
+      remember(thread, sent.message_id, { text: recall(from, id)?.[1].text, user: me() })
+      return `forwarded to "${topicNames.get(thread) ?? hub.name(thread) ?? thread}" (id: ${sent.message_id})`
+    }
+    case 'poll': {
+      const question = args.question as string
+      const options = args.options as string[]
+      const sent = await bot.api.sendPoll(chat_id, question, options, {
+        ...extra,
+        is_anonymous: false,
+        allows_multiple_answers: !!args.multiple,
+      })
+      remember(thread, sent.message_id, { text: question, user: me(), poll: { id: sent.poll.id, options } })
+      return `sent poll (id: ${sent.message_id})`
+    }
+    case 'rename_thread': {
+      if (!extra.message_thread_id) throw new Error('only topics can be renamed')
+      const name = args.title != null ? title(args.title as string) : undefined
+      const icon = args.icon != null ? await iconOf(args.icon as string) : undefined
+      if (!name && !icon) throw new Error('rename_thread needs a title or an icon')
+      await bot.api.editForumTopic(chat_id, extra.message_thread_id, {
+        ...(name ? { name } : {}),
+        ...(icon ? { icon_custom_emoji_id: icon } : {}),
+      })
+      if (name) {
+        topicNames.set(thread, name)
+        hub.rename(thread, name)
+      }
+      return [name && `renamed to "${name}"`, icon && `icon set to ${args.icon}`].filter(Boolean).join(', ')
     }
     case 'download_attachment': {
       return download(args.file_id as string, args.file_id as string)
     }
     case 'close_thread': {
       if (!extra.message_thread_id) throw new Error('only topics can be closed')
-      void hub.retire(thread)
+      void retire(thread)
       await bot.api.closeForumTopic(chat_id, extra.message_thread_id).catch(err => {
         if (!gone(err)) throw err
       })
@@ -257,6 +407,7 @@ async function call(caller: string, tool: string, args: Record<string, unknown>)
       const there = app === 'telegram' ? { hub, place } : clients.get(app)
       if (!there) throw new Error(`${app} isn't connected`)
       const opened = await there.place(name, args.channel as string | undefined)
+      if (app === 'telegram') await origin(caller, opened.thread).catch(err => process.stderr.write(`telegram hub: couldn't forward where "${name}" came from: ${err}\n`))
       there.hub.open(opened.thread, name, args.prompt as string)
       return `started thread "${name}" in ${app}: ${opened.link}`
     }
@@ -268,6 +419,7 @@ async function call(caller: string, tool: string, args: Record<string, unknown>)
         await bot.api.sendMessage(chat_id, `Continued in ${to}: ${link}`, extra)
         return `a copy of this conversation continues in ${to}: ${link}. You stay here.`
       }
+      seen.delete(thread)
       await bot.api.sendMessage(chat_id, `Moved to ${to}: ${link}`, extra)
       await bot.api.closeForumTopic(chat_id, extra.message_thread_id!)
       return `moving to ${to}: ${link}. Your session stops here once this turn ends and resumes there.`
@@ -289,7 +441,7 @@ async function callOrForget(caller: string, tool: string, args: Record<string, u
     const thread = args.thread ? hub.find(args.thread as string) : caller
     if (thread === MAIN || !thread.includes(':') || !gone(err)) throw err
     process.stderr.write(`telegram hub: topic ${thread} was deleted, forgetting it\n`)
-    void hub.retire(thread)
+    void retire(thread)
     throw new Error(`this topic was deleted in Telegram, so it's gone from the thread list now`)
   }
 }
@@ -412,6 +564,20 @@ bot.on('message:video_note', async ctx => {
   })
 })
 
+bot.on('message:poll', async ctx => {
+  const { question, options } = ctx.message.poll
+  await handleInbound(ctx, `(poll: ${question} [${options.map(option => option.text).join(' / ')}])`, undefined)
+})
+
+bot.on('message:dice', async ctx => {
+  const { emoji, value } = ctx.message.dice
+  await handleInbound(ctx, `(dice ${emoji}: ${value})`, undefined)
+})
+
+bot.on('message:game', async ctx => {
+  await handleInbound(ctx, `(game: ${ctx.message.game.title})`, undefined)
+})
+
 bot.on('message:sticker', async ctx => {
   const sticker = ctx.message.sticker
   const emoji = sticker.emoji ? ` ${sticker.emoji}` : ''
@@ -421,6 +587,83 @@ bot.on('message:sticker', async ctx => {
     size: sticker.file_size,
   })
 })
+
+// Telegram only reports reactions to bots that are admins, and the update
+// names neither the topic nor the text, so both come from what the hub has seen.
+bot.on('message_reaction', ctx => {
+  const { chat, message_id, user, date } = ctx.messageReaction
+  if (!allowed(user)) return
+  const known = recall(String(chat.id), message_id)
+  const thread = known?.[0] ?? plainThread(chat)
+  if (!thread) return
+  const { emojiAdded, emojiRemoved } = ctx.reactions()
+  const meta = {
+    chat_id: String(chat.id),
+    user: user.username ?? String(user.id),
+    user_id: String(user.id),
+    ts: new Date(date * 1000).toISOString(),
+    reaction_to_message_id: String(message_id),
+    ...(known ? { reaction_to_user: known[1].user } : {}),
+    ...(known?.[1].text ? { reaction_to_text: known[1].text } : {}),
+  }
+  for (const emoji of emojiAdded) hub.deliver(thread, nameOf(ctx, thread), { content: `(reaction: ${emoji})`, meta: { ...meta, reaction: emoji } })
+  for (const emoji of emojiRemoved) hub.deliver(thread, nameOf(ctx, thread), { content: `(reaction removed: ${emoji})`, meta: { ...meta, reaction: emoji, reaction_removed: 'true' } })
+})
+
+// Outside a forum a chat is one thread; a forum's topic, or a DM relayed into
+// the main thread under a new id, is only known from messages the hub has seen.
+function plainThread(chat: Chat): string | undefined {
+  if (!('is_forum' in chat && chat.is_forum) && !(chat.type === 'private' && MAIN)) return String(chat.id)
+}
+
+bot.on('callback_query:data', async ctx => {
+  await ctx.answerCallbackQuery().catch(() => {})
+  const message = ctx.callbackQuery.message
+  const label = message && 'reply_markup' in message ? message.reply_markup?.inline_keyboard.flat()[Number(ctx.callbackQuery.data)]?.text : undefined
+  if (!message || !label || !allowed(ctx.from)) return
+  await bot.api.editMessageReplyMarkup(message.chat.id, message.message_id, {
+    reply_markup: { inline_keyboard: [[{ text: `✓ ${label}`, disabled: {} }]] },
+  }).catch(err => process.stderr.write(`telegram hub: couldn't mark the tapped button: ${err}\n`))
+  const thread = threadOf(ctx)
+  hub.deliver(thread, nameOf(ctx, thread), {
+    content: label,
+    meta: {
+      chat_id: String(message.chat.id),
+      user: ctx.from.username ?? String(ctx.from.id),
+      user_id: String(ctx.from.id),
+      ts: new Date().toISOString(),
+      button: 'true',
+      button_message_id: String(message.message_id),
+    },
+  })
+})
+
+bot.on('poll_answer', ctx => {
+  const { poll_id, user, option_ids } = ctx.pollAnswer
+  if (!allowed(user)) return
+  for (const [thread, messages] of seen) {
+    for (const [id, message] of messages) {
+      if (message.poll?.id !== poll_id) continue
+      const vote = option_ids.map(i => message.poll!.options[i]).join('; ')
+      hub.deliver(thread, nameOf(ctx, thread), {
+        content: vote ? `(vote: ${vote})` : '(vote removed)',
+        meta: {
+          chat_id: target(thread).chat_id,
+          user: user.username ?? String(user.id),
+          user_id: String(user.id),
+          ts: new Date().toISOString(),
+          ...(vote ? { vote } : { vote_removed: 'true' }),
+          poll_message_id: String(id),
+          poll: message.text!,
+        },
+      })
+    }
+  }
+})
+
+function allowed<U extends { id: number }>(user: U | undefined): user is U {
+  return !!user && loadAccess().allowFrom.includes(String(user.id))
+}
 
 type AttachmentMeta = {
   kind: string
@@ -463,26 +706,41 @@ function senderOf(origin: MessageOrigin): string {
 const REPLY_FILE_KINDS = ['animation', 'document', 'video', 'audio', 'voice', 'video_note', 'sticker'] as const
 
 // Inside a topic, every message that isn't a reply points at the topic's
-// first message, the one that says the topic was created.
+// first message, the one that says the topic was created. A reply to a
+// message in another topic or chat comes as external_reply instead, with no text.
 async function replyMeta(msg: Context['msg']): Promise<Record<string, string>> {
-  const replied = msg?.reply_to_message
-  if (!replied || replied.forum_topic_created) return {}
-  const text = replied.text ?? replied.caption
-  const photo = replied.photo?.at(-1)
+  const external = msg?.external_reply
+  const replied = external ? undefined : msg?.reply_to_message
+  const source = external ?? replied
+  if (!msg || !source || replied?.forum_topic_created) return {}
+  const id = replied?.message_id ?? external?.message_id
+  const known = id != null ? recall(String(external?.chat?.id ?? msg.chat.id), id)?.[1] : undefined
+  const text = replied?.text ?? replied?.caption
+  const user = replied?.from ? replied.from.username ?? String(replied.from.id) : external ? senderOf(external.origin) : undefined
+  const photo = source.photo?.at(-1)
   const imagePath = photo && await download(photo.file_id, photo.file_unique_id).catch(err => {
     process.stderr.write(`telegram hub: replied-to photo download failed: ${err}\n`)
     return undefined
   })
-  const kind = REPLY_FILE_KINDS.find(k => replied[k])
+  const kind = REPLY_FILE_KINDS.find(k => source[k])
   return {
-    reply_to_message_id: String(replied.message_id),
-    ...(replied.from ? { reply_to_user: replied.from.username ?? String(replied.from.id) } : {}),
-    ...(text ? { reply_to_text: linked(text, replied.entities ?? replied.caption_entities) } : {}),
+    ...(id != null ? { reply_to_message_id: String(id) } : {}),
+    ...(user ? { reply_to_user: user } : {}),
+    ...(text ? { reply_to_text: linked(text, replied?.entities ?? replied?.caption_entities) } : known?.text ? { reply_to_text: known.text } : {}),
     ...(msg.quote ? { reply_to_quote: msg.quote.text } : {}),
     ...(imagePath ? { reply_to_image_path: imagePath } : {}),
-    ...(kind ? { reply_to_attachment_kind: kind, reply_to_attachment_file_id: replied[kind]!.file_id } : {}),
+    ...(kind ? { reply_to_attachment_kind: kind, reply_to_attachment_file_id: source[kind]!.file_id } : {}),
   }
 }
+
+type Part = {
+  ctx: Context
+  text: string
+  downloadImage?: () => Promise<string | undefined>
+  attachment?: AttachmentMeta
+}
+
+const albums = new Map<string, { parts: Part[]; timer?: ReturnType<typeof setTimeout> }>()
 
 async function handleInbound(
   ctx: Context,
@@ -490,11 +748,33 @@ async function handleInbound(
   downloadImage: (() => Promise<string | undefined>) | undefined,
   attachment?: AttachmentMeta,
 ): Promise<void> {
-  const access = loadAccess()
-  const from = ctx.from
-  if (!from || !access.allowFrom.includes(String(from.id))) return
+  if (!allowed(ctx.from)) return
+  const part = { ctx, text, downloadImage, attachment }
+  const group = ctx.message?.media_group_id
+  if (!group) return deliverInbound([part])
+  const album = albums.get(group) ?? { parts: [] }
+  albums.set(group, album)
+  album.parts.push(part)
+  clearTimeout(album.timer)
+  // Telegram sends an album as one message per item, with no event once the last has arrived.
+  album.timer = setTimeout(() => {
+    albums.delete(group)
+    void deliverInbound(album.parts)
+  }, ALBUM_WAIT)
+}
 
-  const { thread, msgId } = await placeOf(ctx)
+// One field per attachment, in order: '; ' never appears in an id, a kind, or a safeName.
+function listed(name: string, values: (string | number | undefined)[]): Record<string, string> {
+  return values.some(value => value != null) ? { [name]: values.map(value => value ?? '').join('; ') } : {}
+}
+
+async function deliverInbound(parts: Part[]): Promise<void> {
+  const access = loadAccess()
+  const { ctx } = parts[0]!
+  const from = ctx.from!
+  const places = []
+  for (const part of parts) places.push(await placeOf(part.ctx))
+  const { thread, msgId } = places[0]!
   const { chat_id } = target(thread)
 
   sendTyping(thread)
@@ -509,26 +789,31 @@ async function handleInbound(
       .catch(() => {})
   }
 
-  const imagePath = downloadImage ? await downloadImage() : undefined
+  const imagePaths = (await Promise.all(parts.map(part => part.downloadImage?.()))).filter(Boolean) as string[]
+  const attachments = parts.flatMap(part => part.attachment ?? [])
+  const captioned = parts.find(part => part.ctx.msg?.caption) ?? parts[0]!
+  const content = parts.length > 1 && captioned.ctx.msg?.caption == null
+    ? `(album of ${parts.length})`
+    : linked(captioned.text, captioned.ctx.msg?.entities ?? captioned.ctx.msg?.caption_entities)
+  const user = from.username ?? String(from.id)
+  places.forEach((place, i) => place.msgId != null && remember(thread, place.msgId, { text: parts[i]!.ctx.msg?.text ?? parts[i]!.ctx.msg?.caption, user }))
 
   // image_path goes in meta only — an in-content "[image attached — read: PATH]"
   // annotation is forgeable by any allowlisted sender typing that string.
   const message: Message = {
-    content: linked(text, ctx.msg?.entities ?? ctx.msg?.caption_entities),
+    content,
     meta: {
       chat_id,
       ...(msgId != null ? { message_id: String(msgId) } : {}),
-      user: from.username ?? String(from.id),
+      user,
       user_id: String(from.id),
       ts: new Date((ctx.msg?.date ?? 0) * 1000).toISOString(),
-      ...(imagePath ? { image_path: imagePath } : {}),
-      ...(attachment ? {
-        attachment_kind: attachment.kind,
-        attachment_file_id: attachment.file_id,
-        ...(attachment.size != null ? { attachment_size: String(attachment.size) } : {}),
-        ...(attachment.mime ? { attachment_mime: attachment.mime } : {}),
-        ...(attachment.name ? { attachment_name: attachment.name } : {}),
-      } : {}),
+      ...(imagePaths.length ? { image_path: imagePaths.join('; ') } : {}),
+      ...listed('attachment_kind', attachments.map(a => a.kind)),
+      ...listed('attachment_file_id', attachments.map(a => a.file_id)),
+      ...listed('attachment_size', attachments.map(a => a.size)),
+      ...listed('attachment_mime', attachments.map(a => a.mime)),
+      ...listed('attachment_name', attachments.map(a => a.name)),
       ...(await replyMeta(ctx.msg)),
       ...(ctx.editedMessage ? { edited: 'true' } : {}),
       ...(ctx.msg?.forward_origin ? { forwarded_from: senderOf(ctx.msg.forward_origin) } : {}),
@@ -548,7 +833,7 @@ bot.catch(err => {
 for (let attempt = 1; ; attempt++) {
   try {
     await bot.start({
-      allowed_updates: ['message', 'edited_message'],
+      allowed_updates: ['message', 'edited_message', 'message_reaction', 'callback_query', 'poll_answer'],
       onStart: info => {
         attempt = 0
         process.stderr.write(`telegram hub: polling as @${info.username}\n`)
