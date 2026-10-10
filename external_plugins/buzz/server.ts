@@ -14,7 +14,7 @@ const mcp = new Server(
     instructions: [
       'The sender reads Buzz, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat. Nobody watches this terminal either, so once your reply is sent, end the turn instead of summarizing it here.',
       '',
-      'This session is one Buzz thread or direct message, the place for deeper work. Buzz renders Markdown, so answers can be longer and structured: headings, lists, and code blocks with a language. Its messages arrive as <channel source="buzz" chat_id="..." message_id="..." user="..." ts="...">, and everything you send with these tools lands back in that same thread. If the tag has new_thread="true", name this thread with rename_thread: 1–2 words. If you were tagged into a thread that was already going, reply_to_* is the message it hangs off ("(tagged you)" alone means: read that message) and fetch_messages shows the rest. In a forum channel each post is its own thread: comments on it arrive here, and your replies post as comments on it. If the tag has attachment_count, the attachments attribute lists name/type/size — call download_attachment(message_id) to fetch them. If the tag has reply_to_message_id, the sender replied to that earlier message: reply_to_text is its text and reply_to_attachments lists its files (download_attachment with that id). edited="true" means the sender edited the message with that message_id and this is its new text. A reaction arrives as "(reaction: 👍)", or "(reaction removed: 👍)" with reaction_removed="true", with reaction_to_message_id, reaction_to_user and reaction_to_text naming the message it is on. deleted="true" means the sender deleted the message with that message_id; deleted_text is what it said. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply.',
+      'This session is one Buzz thread or direct message, the place for deeper work. Buzz renders Markdown, so answers can be longer and structured: headings, lists, and code blocks with a language. Its messages arrive as <channel source="buzz" chat_id="..." message_id="..." user="..." ts="...">, and everything you send with these tools lands back in that same thread. If the tag has new_thread="true", name this thread with rename_thread. If you were tagged into a thread that was already going, reply_to_* is the message it hangs off ("(tagged you)" alone means: read that message) and fetch_messages shows the rest. In a forum channel each post is its own thread: comments on it arrive here, and your replies post as comments on it. If the tag has attachment_count, the attachments attribute lists name/type/size — call download_attachment(message_id) to fetch them. If the tag has reply_to_message_id, the sender replied to that earlier message: reply_to_text is its text and reply_to_attachments lists its files (download_attachment with that id). edited="true" means the sender edited the message with that message_id and this is its new text. A reaction arrives as "(reaction: 👍)", or "(reaction removed: 👍)" with reaction_removed="true", with reaction_to_message_id, reaction_to_user and reaction_to_text naming the message it is on. deleted="true" means the sender deleted the message with that message_id; deleted_text is what it said. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply.',
       '',
       'reply accepts file paths (files: ["/abs/path.png"]) for attachments, and buttons (up to 10 short labels) to offer choices the user taps: a tap arrives with button="true" and button_message_id, and the chosen label as its text. Use react to add emoji reactions (remove: true takes yours off), edit_message for interim progress updates, and delete_message to take back a message you sent. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',
       '',
@@ -26,6 +26,8 @@ const mcp = new Server(
     ].join('\n'),
   },
 )
+
+const titleProperty = { type: 'string', description: 'One word, like a chat name ("Anchors", "Frontier").' }
 
 mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
@@ -152,11 +154,11 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'rename_thread',
-      description: 'Name this thread: 1–2 words, like a chat name ("Desk anchors", "Hub tests"). Buzz threads have no titles, so the name is for your thread list and handoffs; a thread you opened with new_thread also shows it as its first message.',
+      description: 'Name this thread. Buzz threads have no titles, so the name is for your thread list and handoffs; a thread you opened with new_thread also shows it as its first message.',
       inputSchema: {
         type: 'object',
         properties: {
-          title: { type: 'string' },
+          title: titleProperty,
         },
         required: ['title'],
       },
@@ -173,11 +175,11 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'new_thread',
-      description: 'Open a new thread, start a fresh session for it, and give that session the prompt as its first message.',
+      description: 'Open a new thread, start a fresh session for it, and give that session the prompt as its first message. The title is the thread\'s first message in Buzz.',
       inputSchema: {
         type: 'object',
         properties: {
-          title: { type: 'string', description: 'Thread name: 1–2 words, like a chat name ("OpenAI frontier", "Desk anchors"). It is the thread\'s first message in Buzz.' },
+          title: titleProperty,
           prompt: { type: 'string', description: 'Everything the new session needs to start the work: it shares none of your context.' },
           channel: { type: 'string', description: 'Channel to open it in, by name. Defaults to this thread\'s channel.' },
         },
@@ -186,12 +188,12 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'handoff',
-      description: 'Move this conversation to another app when the user asks. It opens a thread there, and this session stops here once the turn ends and resumes there with its full memory.',
+      description: 'Move this conversation to another app when the user asks. It opens a thread there, and this session stops here once the turn ends and resumes there with its full memory. The title defaults to this thread\'s name.',
       inputSchema: {
         type: 'object',
         properties: {
           to: { type: 'string', enum: ['telegram', 'discord'] },
-          title: { type: 'string', description: 'Name there, 1–2 words. Defaults to this thread\'s name.' },
+          title: titleProperty,
         },
         required: ['to'],
       },

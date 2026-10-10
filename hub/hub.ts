@@ -21,6 +21,12 @@ const IDLE_STOP = 30 * 60_000
 const RELAUNCH = 30_000
 const PRIVATE = /_BOT_TOKEN$|^HEX_|^BUZZ_/
 
+export function title(text: string): string {
+  const title = text.trim()
+  if (!/^[^\s_-]+$/.test(title)) throw new Error(`title must be one word, got "${title}"`)
+  return title
+}
+
 export function startHub({ stateDir, channel, main, mainName = 'main', call, state, failed, idleStop = IDLE_STOP, relaunch = RELAUNCH, jobsDir = JOBS, hexDir = process.cwd(), launcher = 'claude' }: {
   stateDir: string
   channel: string

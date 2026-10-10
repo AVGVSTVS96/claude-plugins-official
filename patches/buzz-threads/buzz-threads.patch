@@ -790,7 +790,7 @@ index 0000000000000000000000000000000000000000..e7f5fdf660dd123b4dd66c8d9946b647
 +}
 diff --git a/external_plugins/buzz/bot.test.ts b/external_plugins/buzz/bot.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..5a6db15149ff3523af7989b7c3e06f52b6a680ac
+index 0000000000000000000000000000000000000000..fc173c36c6559b6e5225bc08e43016552c779f42
 --- /dev/null
 +++ b/external_plugins/buzz/bot.test.ts
 @@ -0,0 +1,707 @@
@@ -1103,12 +1103,12 @@ index 0000000000000000000000000000000000000000..5a6db15149ff3523af7989b7c3e06f52
 +  return { root, session }
 +}
 +
-+test('Hex goes online, and a tag in a channel starts a thread on that message, named by its first words', async () => {
++test('Hex goes online, and a tag in a channel starts a thread on that message, named by its first word', async () => {
 +  const bot = await startBot()
 +  expect((await until(() => bot.published(20001)[0])).content).toBe('online')
 +  const root = bot.say('@Hex desk anchors are loose', [['p', bot.me]])
 +  const args = await until(() => bot.launches()[0])
-+  expect(args.slice(0, 5)).toEqual(['--bg', '--channels', 'plugin:buzz@hex', '--name', 'desk anchors'])
++  expect(args.slice(0, 5)).toEqual(['--bg', '--channels', 'plugin:buzz@hex', '--name', 'desk'])
 +  const [inbound] = await (await bot.session(root.id)).inbound(1)
 +  expect(inbound.content).toBe('desk anchors are loose')
 +  expect(inbound.meta).toMatchObject({ chat_id: root.id, message_id: root.id, user: 'Bassim', user_id: owner, channel: 'general', new_thread: 'true' })
@@ -1169,7 +1169,7 @@ index 0000000000000000000000000000000000000000..5a6db15149ff3523af7989b7c3e06f52
 +  const post = bot.say('gpt-live-1 can i use custom voices')
 +  bot.say('@Hex', [['e', post.id, '', 'reply'], ['p', bot.me]])
 +  const args = await until(() => bot.launches()[0])
-+  expect(args[args.indexOf('--name') + 1]).toBe('gpt-live-1 can')
++  expect(args[args.indexOf('--name') + 1]).toBe('gpt-live-1')
 +  const [inbound] = await (await bot.session(post.id)).inbound(1)
 +  expect(inbound.content).toBe('(tagged you)')
 +  expect(inbound.meta).toMatchObject({ chat_id: post.id, new_thread: 'true', reply_to_message_id: post.id, reply_to_user: 'Bassim', reply_to_text: 'gpt-live-1 can i use custom voices' })
@@ -1213,7 +1213,7 @@ index 0000000000000000000000000000000000000000..5a6db15149ff3523af7989b7c3e06f52
 +      return event
 +    }
 +    root = at(0, '@Hex desk anchors are loose', [['p', me]])
-+    writeFileSync(join(state, 'threads.json'), JSON.stringify({ [root.id]: { name: 'Desk anchors' } }))
++    writeFileSync(join(state, 'threads.json'), JSON.stringify({ [root.id]: { name: 'Anchors' } }))
 +    writeFileSync(join(state, 'cursor.json'), JSON.stringify({ at: t, ids: [root.id] }))
 +    at(9, 'three', [['e', root.id, '', 'reply']])
 +    at(0, 'one', [['e', root.id, '', 'reply']])
@@ -1284,12 +1284,12 @@ index 0000000000000000000000000000000000000000..5a6db15149ff3523af7989b7c3e06f52
 +test('new_thread opens a thread in Buzz, starts its session with the prompt, and links to it', async () => {
 +  const bot = await startBot()
 +  const { session } = await threadStarted(bot)
-+  const result = await session.call('new_thread', { title: 'Desk anchors', prompt: 'find better anchors' })
-+  const root = await until(() => bot.published(9).find(event => event.content === '**Desk anchors**'))
++  const result = await session.call('new_thread', { title: 'Anchors', prompt: 'find better anchors' })
++  const root = await until(() => bot.published(9).find(event => event.content === '**Anchors**'))
 +  expect(root.tags).toEqual([['h', bot.channel], ['p', owner], bot.auth])
-+  expect(result.text).toBe(`started thread "Desk anchors": buzz://message?channel=${bot.channel}&id=${root.id}`)
++  expect(result.text).toBe(`started thread "Anchors": buzz://message?channel=${bot.channel}&id=${root.id}`)
 +  const args = await until(() => bot.launches()[1])
-+  expect(args[args.indexOf('--name') + 1]).toBe('Desk anchors')
++  expect(args[args.indexOf('--name') + 1]).toBe('Anchors')
 +  expect(args.at(-1)).toBe('find better anchors')
 +})
 +
@@ -1337,13 +1337,13 @@ index 0000000000000000000000000000000000000000..5a6db15149ff3523af7989b7c3e06f52
 +test('rename_thread renames a thread Hex opened in Buzz too, by editing its first message', async () => {
 +  const bot = await startBot()
 +  const { session } = await threadStarted(bot)
-+  await session.call('rename_thread', { title: 'Loose anchors' })
++  await session.call('rename_thread', { title: 'Loose' })
 +  expect(bot.published(40003)).toEqual([])
-+  await session.call('new_thread', { title: 'Desk anchors', prompt: 'find better anchors' })
-+  const root = await until(() => bot.published(9).find(event => event.content === '**Desk anchors**'))
++  await session.call('new_thread', { title: 'Anchors', prompt: 'find better anchors' })
++  const root = await until(() => bot.published(9).find(event => event.content === '**Anchors**'))
 +  const opened = await bot.session(root.id)
-+  expect((await opened.call('rename_thread', { title: 'Desk mounts' })).text).toBe('renamed to "Desk mounts", and its first message in Buzz now says so')
-+  expect(bot.published(40003).map(event => [event.content, event.tags])).toEqual([['**Desk mounts**', [['h', bot.channel], ['e', root.id], bot.auth]]])
++  expect((await opened.call('rename_thread', { title: 'Mounts' })).text).toBe('renamed to "Mounts", and its first message in Buzz now says so')
++  expect(bot.published(40003).map(event => [event.content, event.tags])).toEqual([['**Mounts**', [['h', bot.channel], ['e', root.id], bot.auth]]])
 +})
 +
 +test('delete_message and react with remove take back what Hex posted, and nothing of anyone else\'s', async () => {
@@ -1472,7 +1472,7 @@ index 0000000000000000000000000000000000000000..5a6db15149ff3523af7989b7c3e06f52
 +  posted('nobody asked hex here')
 +  const post = posted('@Hex should we ship the relay PR', [['p', bot.me]])
 +  const args = await until(() => bot.launches()[0])
-+  expect(args[args.indexOf('--name') + 1]).toBe('should we')
++  expect(args[args.indexOf('--name') + 1]).toBe('should')
 +  const session = await bot.session(post.id)
 +  const first = comment('the CI is green now', [['e', post.id, '', 'reply']])
 +  bot.relay.inject(signed(ownerKey, 40003, 'the CI is finally green', [['h', bot.forum], ['e', first.id]]))
@@ -1484,8 +1484,8 @@ index 0000000000000000000000000000000000000000..5a6db15149ff3523af7989b7c3e06f52
 +  expect(inbound[3].meta).toMatchObject({ deleted: 'true', message_id: first.id, deleted_text: 'the CI is finally green' })
 +  const sent = (await session.call('reply', { text: 'ship it' })).text.match(/id: (\w+)/)[1]
 +  expect(bot.relay.events.find(event => event.id === sent)).toMatchObject({ kind: 45003, tags: [['h', bot.forum], ['e', post.id, '', 'reply'], ['p', owner], bot.auth] })
-+  await session.call('new_thread', { title: 'Release notes', prompt: 'draft them', channel: 'ideas' })
-+  expect(await until(() => bot.relay.events.find(event => event.content === '**Release notes**'))).toMatchObject({ kind: 45001, tags: [['h', bot.forum], ['p', owner], bot.auth] })
++  await session.call('new_thread', { title: 'Notes', prompt: 'draft them', channel: 'ideas' })
++  expect(await until(() => bot.relay.events.find(event => event.content === '**Notes**'))).toMatchObject({ kind: 45001, tags: [['h', bot.forum], ['p', owner], bot.auth] })
 +  await Bun.sleep(300)
 +  expect(bot.launches().length).toBe(2)
 +})
@@ -1503,10 +1503,10 @@ index 0000000000000000000000000000000000000000..5a6db15149ff3523af7989b7c3e06f52
 +})
 diff --git a/external_plugins/buzz/bot.ts b/external_plugins/buzz/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..50e94b44936a228074a5f751ab3dcbf225825885
+index 0000000000000000000000000000000000000000..ac9725485e999fd5bc1cc1f5207116a5f3966a67
 --- /dev/null
 +++ b/external_plugins/buzz/bot.ts
-@@ -0,0 +1,857 @@
+@@ -0,0 +1,851 @@
 +#!/usr/bin/env bun
 +import { readFileSync, writeFileSync, mkdirSync, statSync, realpathSync, chmodSync, renameSync } from 'fs'
 +import { createHash } from 'crypto'
@@ -1515,7 +1515,7 @@ index 0000000000000000000000000000000000000000..50e94b44936a228074a5f751ab3dcbf2
 +import { finalizeEvent, type Event } from 'nostr-tools/pure'
 +import { decode } from 'nostr-tools/nip19'
 +import { hexToBytes } from 'nostr-tools/utils'
-+import { startHub, clients, move, type Message } from '../../hub/hub.ts'
++import { startHub, clients, move, title, type Message } from '../../hub/hub.ts'
 +import { connectRelay } from './relay.ts'
 +import { startActivity } from './activity.ts'
 +import { startMemory } from './memory.ts'
@@ -1635,12 +1635,6 @@ index 0000000000000000000000000000000000000000..50e94b44936a228074a5f751ab3dcbf2
 +    out.push(body)
 +  }
 +  return out
-+}
-+
-+function title(text: string): string {
-+  const title = text.trim()
-+  if (!title || title.split(/\s+/).length > 2) throw new Error(`title must be 1–2 words, got "${title}"`)
-+  return title
 +}
 +
 +function keep(path: string, value: unknown) {
@@ -2269,7 +2263,7 @@ index 0000000000000000000000000000000000000000..50e94b44936a228074a5f751ab3dcbf2
 +    const atts = listed(event)
 +    const reply = await replyMeta(original, thread, joined)
 +    const words = (text || reply.reply_to_text || '').split(/\s+/).filter(word => word && !word.startsWith('@'))
-+    const name = isChannel(thread) ? await nameOf(event.pubkey) : words.slice(0, 2).join(' ') || 'New thread'
++    const name = isChannel(thread) ? await nameOf(event.pubkey) : words[0] ?? 'Thread'
 +
 +    // A bare tag on someone's message brings Hex in to read it: the message is reply_to_*.
 +    const message: Message = {
@@ -3885,10 +3879,10 @@ index 0000000000000000000000000000000000000000..44eff7405c67b2f404d4fa71ba85c228
 +}
 diff --git a/external_plugins/buzz/server.ts b/external_plugins/buzz/server.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..13692f2113df66fa896fbc0f8a178f8713be4777
+index 0000000000000000000000000000000000000000..aa1d6a0391a0db289f738735ef5f3dd98b35a34c
 --- /dev/null
 +++ b/external_plugins/buzz/server.ts
-@@ -0,0 +1,273 @@
+@@ -0,0 +1,275 @@
 +#!/usr/bin/env bun
 +import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 +import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
@@ -3905,7 +3899,7 @@ index 0000000000000000000000000000000000000000..13692f2113df66fa896fbc0f8a178f87
 +    instructions: [
 +      'The sender reads Buzz, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat. Nobody watches this terminal either, so once your reply is sent, end the turn instead of summarizing it here.',
 +      '',
-+      'This session is one Buzz thread or direct message, the place for deeper work. Buzz renders Markdown, so answers can be longer and structured: headings, lists, and code blocks with a language. Its messages arrive as <channel source="buzz" chat_id="..." message_id="..." user="..." ts="...">, and everything you send with these tools lands back in that same thread. If the tag has new_thread="true", name this thread with rename_thread: 1–2 words. If you were tagged into a thread that was already going, reply_to_* is the message it hangs off ("(tagged you)" alone means: read that message) and fetch_messages shows the rest. In a forum channel each post is its own thread: comments on it arrive here, and your replies post as comments on it. If the tag has attachment_count, the attachments attribute lists name/type/size — call download_attachment(message_id) to fetch them. If the tag has reply_to_message_id, the sender replied to that earlier message: reply_to_text is its text and reply_to_attachments lists its files (download_attachment with that id). edited="true" means the sender edited the message with that message_id and this is its new text. A reaction arrives as "(reaction: 👍)", or "(reaction removed: 👍)" with reaction_removed="true", with reaction_to_message_id, reaction_to_user and reaction_to_text naming the message it is on. deleted="true" means the sender deleted the message with that message_id; deleted_text is what it said. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply.',
++      'This session is one Buzz thread or direct message, the place for deeper work. Buzz renders Markdown, so answers can be longer and structured: headings, lists, and code blocks with a language. Its messages arrive as <channel source="buzz" chat_id="..." message_id="..." user="..." ts="...">, and everything you send with these tools lands back in that same thread. If the tag has new_thread="true", name this thread with rename_thread. If you were tagged into a thread that was already going, reply_to_* is the message it hangs off ("(tagged you)" alone means: read that message) and fetch_messages shows the rest. In a forum channel each post is its own thread: comments on it arrive here, and your replies post as comments on it. If the tag has attachment_count, the attachments attribute lists name/type/size — call download_attachment(message_id) to fetch them. If the tag has reply_to_message_id, the sender replied to that earlier message: reply_to_text is its text and reply_to_attachments lists its files (download_attachment with that id). edited="true" means the sender edited the message with that message_id and this is its new text. A reaction arrives as "(reaction: 👍)", or "(reaction removed: 👍)" with reaction_removed="true", with reaction_to_message_id, reaction_to_user and reaction_to_text naming the message it is on. deleted="true" means the sender deleted the message with that message_id; deleted_text is what it said. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply.',
 +      '',
 +      'reply accepts file paths (files: ["/abs/path.png"]) for attachments, and buttons (up to 10 short labels) to offer choices the user taps: a tap arrives with button="true" and button_message_id, and the chosen label as its text. Use react to add emoji reactions (remove: true takes yours off), edit_message for interim progress updates, and delete_message to take back a message you sent. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',
 +      '',
@@ -3917,6 +3911,8 @@ index 0000000000000000000000000000000000000000..13692f2113df66fa896fbc0f8a178f87
 +    ].join('\n'),
 +  },
 +)
++
++const titleProperty = { type: 'string', description: 'One word, like a chat name ("Anchors", "Frontier").' }
 +
 +mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
 +  tools: [
@@ -4043,11 +4039,11 @@ index 0000000000000000000000000000000000000000..13692f2113df66fa896fbc0f8a178f87
 +    },
 +    {
 +      name: 'rename_thread',
-+      description: 'Name this thread: 1–2 words, like a chat name ("Desk anchors", "Hub tests"). Buzz threads have no titles, so the name is for your thread list and handoffs; a thread you opened with new_thread also shows it as its first message.',
++      description: 'Name this thread. Buzz threads have no titles, so the name is for your thread list and handoffs; a thread you opened with new_thread also shows it as its first message.',
 +      inputSchema: {
 +        type: 'object',
 +        properties: {
-+          title: { type: 'string' },
++          title: titleProperty,
 +        },
 +        required: ['title'],
 +      },
@@ -4064,11 +4060,11 @@ index 0000000000000000000000000000000000000000..13692f2113df66fa896fbc0f8a178f87
 +    },
 +    {
 +      name: 'new_thread',
-+      description: 'Open a new thread, start a fresh session for it, and give that session the prompt as its first message.',
++      description: 'Open a new thread, start a fresh session for it, and give that session the prompt as its first message. The title is the thread\'s first message in Buzz.',
 +      inputSchema: {
 +        type: 'object',
 +        properties: {
-+          title: { type: 'string', description: 'Thread name: 1–2 words, like a chat name ("OpenAI frontier", "Desk anchors"). It is the thread\'s first message in Buzz.' },
++          title: titleProperty,
 +          prompt: { type: 'string', description: 'Everything the new session needs to start the work: it shares none of your context.' },
 +          channel: { type: 'string', description: 'Channel to open it in, by name. Defaults to this thread\'s channel.' },
 +        },
@@ -4077,12 +4073,12 @@ index 0000000000000000000000000000000000000000..13692f2113df66fa896fbc0f8a178f87
 +    },
 +    {
 +      name: 'handoff',
-+      description: 'Move this conversation to another app when the user asks. It opens a thread there, and this session stops here once the turn ends and resumes there with its full memory.',
++      description: 'Move this conversation to another app when the user asks. It opens a thread there, and this session stops here once the turn ends and resumes there with its full memory. The title defaults to this thread\'s name.',
 +      inputSchema: {
 +        type: 'object',
 +        properties: {
 +          to: { type: 'string', enum: ['telegram', 'discord'] },
-+          title: { type: 'string', description: 'Name there, 1–2 words. Defaults to this thread\'s name.' },
++          title: titleProperty,
 +        },
 +        required: ['to'],
 +      },

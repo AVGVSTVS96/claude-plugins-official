@@ -25,6 +25,8 @@ const mcp = new Server(
   },
 )
 
+const titleProperty = { type: 'string', description: 'One word, like a chat name ("Anchors", "Frontier").' }
+
 const formatProperty = {
   type: 'string',
   enum: ['markdown', 'text', 'markdownv2'],
@@ -155,7 +157,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       inputSchema: {
         type: 'object',
         properties: {
-          title: { type: 'string', description: '1–2 words, like a chat name ("Desk anchors", "Hub tests").' },
+          title: titleProperty,
           icon: { type: 'string', description: 'An emoji from Telegram\'s topic icon set, e.g. 🔥.' },
         },
       },
@@ -176,7 +178,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       inputSchema: {
         type: 'object',
         properties: {
-          title: { type: 'string', description: 'Topic name the user sees in Telegram: 1–2 words, like a chat name ("OpenAI frontier", "Desk anchors").' },
+          title: titleProperty,
           prompt: { type: 'string', description: 'Everything the new session needs to start the work: it shares none of your context.' },
           app: { type: 'string', enum: ['telegram', 'discord', 'buzz'], description: 'Where to open it. Default: telegram.' },
           channel: { type: 'string', description: 'Discord or Buzz only: the channel to open it in, by name. Default: the server\'s first channel.' },
@@ -186,12 +188,12 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'handoff',
-      description: 'Move this conversation to Discord or Buzz when the user asks. It opens a thread there, and this session stops here once the turn ends and resumes there with its full memory. From General, a copy continues there and you stay.',
+      description: 'Move this conversation to Discord or Buzz when the user asks. It opens a thread there, and this session stops here once the turn ends and resumes there with its full memory. From General, a copy continues there and you stay. The title defaults to this topic\'s name, and is required from General.',
       inputSchema: {
         type: 'object',
         properties: {
           to: { type: 'string', enum: ['discord', 'buzz'] },
-          title: { type: 'string', description: 'Thread name there, 1–2 words. Defaults to this topic\'s name; required from General.' },
+          title: titleProperty,
           channel: { type: 'string', description: 'Channel to open it in, by name. Default: the server\'s first channel.' },
         },
         required: ['to'],

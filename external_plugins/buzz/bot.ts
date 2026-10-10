@@ -6,7 +6,7 @@ import { basename, join, sep } from 'path'
 import { finalizeEvent, type Event } from 'nostr-tools/pure'
 import { decode } from 'nostr-tools/nip19'
 import { hexToBytes } from 'nostr-tools/utils'
-import { startHub, clients, move, type Message } from '../../hub/hub.ts'
+import { startHub, clients, move, title, type Message } from '../../hub/hub.ts'
 import { connectRelay } from './relay.ts'
 import { startActivity } from './activity.ts'
 import { startMemory } from './memory.ts'
@@ -126,12 +126,6 @@ function fenced(text: string, limit: number): string[] {
     out.push(body)
   }
   return out
-}
-
-function title(text: string): string {
-  const title = text.trim()
-  if (!title || title.split(/\s+/).length > 2) throw new Error(`title must be 1–2 words, got "${title}"`)
-  return title
 }
 
 function keep(path: string, value: unknown) {
@@ -760,7 +754,7 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
     const atts = listed(event)
     const reply = await replyMeta(original, thread, joined)
     const words = (text || reply.reply_to_text || '').split(/\s+/).filter(word => word && !word.startsWith('@'))
-    const name = isChannel(thread) ? await nameOf(event.pubkey) : words.slice(0, 2).join(' ') || 'New thread'
+    const name = isChannel(thread) ? await nameOf(event.pubkey) : words[0] ?? 'Thread'
 
     // A bare tag on someone's message brings Hex in to read it: the message is reply_to_*.
     const message: Message = {

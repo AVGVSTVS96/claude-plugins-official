@@ -4,7 +4,7 @@ id: telegram-topics
 summary: Rework the Telegram channel so every forum topic in a group is its own Claude Code session, through the thread hub.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: telegram-topics.patch
-patch_sha256: 616be2447a434d001faf3768f855855622c49d4bafc7a04c421767e80135bee6
+patch_sha256: 609469ff1acd24f00bcc5b6e5bc650b876ea03e47f22fd8868038154c9e973fd
 ---
 
 ## Intent
@@ -24,7 +24,7 @@ On top of upstream:
 
 - `new_thread(title, prompt)` opens a topic with a fresh session, or a
   Discord or Buzz thread with `app: "discord"` or `app: "buzz"`. Titles are
-  1–2 words, enforced.
+  one word, enforced by the hub's `title`.
 - `handoff(to: "discord" | "buzz")` moves a topic's session to a new thread
   there and closes the topic. From General, a copy continues there and main stays.
 - `close_thread` closes a topic, stops its session once it's idle and

@@ -35,7 +35,7 @@ import {
 import { readFileSync, writeFileSync, mkdirSync, statSync, realpathSync, chmodSync } from 'fs'
 import { homedir } from 'os'
 import { basename, join, sep } from 'path'
-import { startHub, clients, move, type Message } from '../../hub/hub.ts'
+import { startHub, clients, move, title, type Message } from '../../hub/hub.ts'
 
 const STATE_DIR = process.env.DISCORD_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'hex', 'discord')
 const ACCESS_FILE = join(STATE_DIR, 'access.json')
@@ -192,12 +192,6 @@ async function downloadAttachment(att: Attachment): Promise<string> {
   mkdirSync(INBOX_DIR, { recursive: true })
   writeFileSync(path, buf)
   return path
-}
-
-function title(text: string): string {
-  const title = text.trim()
-  if (!title || title.split(/\s+/).length > 2) throw new Error(`title must be 1–2 words, got "${title}"`)
-  return title
 }
 
 function serve(token: string) {
@@ -470,7 +464,7 @@ function serve(token: string) {
     if (!isText(msg.channel) || !client.user || !msg.mentions.has(client.user)) return
     if (msg.thread) return msg.thread
     const words = msg.content.replace(/<@[!&]?\d+>/g, '').trim().split(/\s+/).filter(Boolean)
-    return msg.startThread({ name: words.slice(0, 2).join(' ') || 'New thread' })
+    return msg.startThread({ name: words[0] ?? 'Thread' })
   }
 
   async function replyMeta(msg: DiscordMessage): Promise<Record<string, string>> {

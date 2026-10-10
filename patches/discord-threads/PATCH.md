@@ -4,7 +4,7 @@ id: discord-threads
 summary: Rework the Discord channel so every thread in a server is its own Claude Code session, Claude-tag style, through the thread hub.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: discord-threads.patch
-patch_sha256: 6e039d5f2790e8a3b64670a8a28f2ddd9cd9330cea3b283e95653379d8d6acf6
+patch_sha256: 6872974acd74726a3e7ce84d24bdef8df6e0ae8b99f0716b0ddb86a947c82fd3
 ---
 
 ## Intent
@@ -25,7 +25,7 @@ Discord is the place for deeper work, Claude-tag style:
 
 - Tagging the bot in a text channel starts a thread on that message, with a
   fresh session. Inside a thread every message reaches its session, no tag
-  needed. The session renames a new thread to 1–2 words (`rename_thread`).
+  needed. The session renames a new thread to one word (`rename_thread`).
 - Answers can be longer and structured: the instructions say so, the
   chunker splits on paragraphs by default, and a code block cut across
   messages is closed and reopened so both halves render.

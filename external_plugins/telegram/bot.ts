@@ -4,7 +4,7 @@ import type { Chat, MessageEntity, MessageOrigin, ReactionTypeEmoji } from 'gram
 import { readFileSync, writeFileSync, mkdirSync, statSync, realpathSync, chmodSync } from 'fs'
 import { homedir } from 'os'
 import { basename, join, extname, sep } from 'path'
-import { startHub, clients, move, type Message } from '../../hub/hub.ts'
+import { startHub, clients, move, title, type Message } from '../../hub/hub.ts'
 
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'hex', 'telegram')
 const ACCESS_FILE = join(STATE_DIR, 'access.json')
@@ -212,12 +212,6 @@ function showTyping(thread: string, busy: boolean): void {
   typing.set(thread, setInterval(() => sendTyping(thread), 4000))
 }
 
-function title(text: string): string {
-  const title = text.trim()
-  if (!title || title.split(/\s+/).length > 2) throw new Error(`title must be 1–2 words, got "${title}"`)
-  return title
-}
-
 async function icons() {
   const stickers = await bot.api.getForumTopicIconStickers()
   return stickers.filter(sticker => sticker.custom_emoji_id && sticker.emoji)
@@ -413,7 +407,7 @@ async function call(caller: string, tool: string, args: Record<string, unknown>)
     }
     case 'handoff': {
       const to = args.to as string
-      const name = title((args.title as string | undefined) ?? topicNames.get(thread) ?? '')
+      const name = args.title != null ? title(args.title as string) : topicNames.get(thread) ?? title('')
       const link = await move(hub, thread, to, name, args.channel as string | undefined)
       if (thread === MAIN) {
         await bot.api.sendMessage(chat_id, `Continued in ${to}: ${link}`, extra)

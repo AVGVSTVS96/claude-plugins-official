@@ -217,13 +217,14 @@ test('new_thread opens a topic with a random icon, forwarding the request and th
   await until(() => calls.find(c => c.method === 'sendChatAction'))
   const sent = await call('reply', { text: 'on it' })
   const replyId = Number(sent.text.match(/id: (\d+)/)[1])
-  expect((await call('new_thread', { title: 'Desk anchors', prompt: 'research desk anchors' })).text).toMatch(/^started thread "Desk anchors" in telegram/)
+  expect((await call('new_thread', { title: 'Desk', prompt: 'research desk anchors' })).text).toMatch(/^started thread "Desk" in telegram/)
   expect((await called('createForumTopic')).icon_custom_emoji_id).toMatch(/^(111|222)$/)
   expect(await called('forwardMessages')).toMatchObject({ chat_id: String(FORUM), from_chat_id: String(FORUM), message_ids: [asked.message_id, replyId], message_thread_id: 9 })
   session({ type: 'state', thread: DESK, busy: false })
 
   await call('rename_thread', { title: 'Anchors', icon: '❤' })
   expect(await called('editForumTopic')).toMatchObject({ message_thread_id: 5, name: 'Anchors', icon_custom_emoji_id: '222' })
+  expect((await call('rename_thread', { title: 'Desk anchors' })).error).toBe('title must be one word, got "Desk anchors"')
   expect((await call('rename_thread', { icon: '🦄' })).error).toBe('Telegram has no topic icon 🦄; pick one of 🔥 ❤️')
 })
 
