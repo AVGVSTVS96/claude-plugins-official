@@ -199,7 +199,7 @@ afterEach(() => {
 
 // Runs bot.ts the way the hub service does, against its own fake relay, with
 // a fake `claude` that records its calls and a channel and a DM Hex is in.
-async function startBot(prepare?: (setup: { state: string; relay: ReturnType<typeof fakeRelay>; channel: string; me: string }) => void) {
+async function startBot(prepare?: (setup: { state: string; relay: ReturnType<typeof fakeRelay>; channel: string; me: string; key: Uint8Array }) => void) {
   const dir = mkdtempSync(join(tmpdir(), 'buzz-'))
   const state = join(dir, 'state')
   mkdirSync(state)
@@ -235,7 +235,7 @@ exit 0
   relay.inject(signed(host, 39000, '', [['d', secret], ['name', 'secret'], ['t', 'stream']]))
   relay.inject(signed(host, 39000, '', [['d', dm], ['name', 'dm'], ['hidden'], ['t', 'dm']]))
   relay.inject(signed(host, 39000, '', [['d', forum], ['name', 'ideas'], ['t', 'forum']]))
-  prepare?.({ state, relay, channel, me })
+  prepare?.({ state, relay, channel, me, key })
 
   const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^(BUZZ_|HEX_|TELEGRAM_|DISCORD_)/.test(name)))
   const bot = Bun.spawn(['bun', join(import.meta.dir, 'bot.ts')], {
@@ -495,6 +495,47 @@ test('new_thread opens a thread in Buzz, starts its session with the prompt, and
   const args = await until(() => bot.launches()[1])
   expect(args[args.indexOf('--name') + 1]).toBe('Desk anchors')
   expect(args.at(-1)).toBe('find better anchors')
+})
+
+test('reply with buttons lists them numbered and reacts with each keycap; the first tap arrives as a button, the other keycaps come off, later taps are ignored', async () => {
+  const bot = await startBot()
+  const { session } = await threadStarted(bot)
+  expect((await session.call('reply', { text: 'pick one', buttons: Array.from({ length: 11 }, (_, i) => `${i}`) })).error).toBe('at most 10 buttons')
+  const id = (await session.call('reply', { text: 'Ship it?', buttons: ['Yes', 'No'] })).text.match(/id: (\w+)/)[1]
+  expect(bot.relay.events.find(event => event.id === id)!.content).toBe('Ship it?\n\n1️⃣ Yes\n2️⃣ No')
+  const keycaps = bot.published(7).filter(event => event.tags[0]![1] === id)
+  expect(keycaps.map(event => event.content)).toEqual(['1️⃣', '2️⃣'])
+  bot.relay.inject(signed(ownerKey, 7, '2\u20E3', [['e', id]]))
+  const [, tapped] = await session.inbound(2)
+  expect(tapped.content).toBe('No')
+  expect(tapped.meta).toMatchObject({ button: 'true', button_message_id: id, user: 'Bassim', channel: 'general' })
+  expect(await until(() => bot.published(5).find(event => event.tags[0]![1] === keycaps[0]!.id))).toBeTruthy()
+  expect(bot.published(5).some(event => event.tags[0]![1] === keycaps[1]!.id)).toBe(false)
+  bot.relay.inject(signed(ownerKey, 7, '1️⃣', [['e', id]]))
+  bot.relay.inject(signed(ownerKey, 7, '👍', [['e', id]]))
+  const inbound = await session.inbound(3)
+  expect(inbound[2].content).toBe('(reaction: 👍)')
+  await Bun.sleep(300)
+  expect((await session.inbound(3)).length).toBe(3)
+})
+
+test('a tap on buttons sent before a restart still arrives as a button', async () => {
+  const at = Math.floor(Date.now() / 1000) - 100
+  let question!: Event
+  let yes!: Event
+  const bot = await startBot(({ state, relay, channel, me, key }) => {
+    const root = signed(ownerKey, 9, '@Hex ship it?', [['h', channel], ['p', me]], at)
+    question = signed(key, 9, 'Ship it?\n\n1️⃣ Yes\n2️⃣ No', [['h', channel], ['e', root.id, '', 'reply']], at)
+    yes = signed(key, 7, '1️⃣', [['e', question.id]], at)
+    const no = signed(key, 7, '2️⃣', [['e', question.id]], at)
+    for (const event of [root, question, yes, no]) relay.inject(event)
+    writeFileSync(join(state, 'threads.json'), JSON.stringify({ [root.id]: { name: 'Ship it' } }))
+    writeFileSync(join(state, 'buttons.json'), JSON.stringify({ [question.id]: { thread: root.id, choices: [{ label: 'Yes', reaction: yes.id }, { label: 'No', reaction: no.id }] } }))
+  })
+  bot.relay.inject(signed(ownerKey, 7, '2️⃣', [['e', question.id]]))
+  const [tapped] = await (await bot.session(question.tags[1]![1]!)).inbound(1)
+  expect(tapped).toMatchObject({ content: 'No', meta: { button: 'true', button_message_id: question.id } })
+  expect(await until(() => bot.published(5).find(event => event.tags[0]![1] === yes.id))).toBeTruthy()
 })
 
 test('rename_thread renames a thread Hex opened in Buzz too, by editing its first message', async () => {

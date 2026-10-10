@@ -790,10 +790,10 @@ index 0000000000000000000000000000000000000000..e7f5fdf660dd123b4dd66c8d9946b647
 +}
 diff --git a/external_plugins/buzz/bot.test.ts b/external_plugins/buzz/bot.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..dd3bfbba73512852bbb2c5b5db44bf2f986f59c2
+index 0000000000000000000000000000000000000000..5a6db15149ff3523af7989b7c3e06f52b6a680ac
 --- /dev/null
 +++ b/external_plugins/buzz/bot.test.ts
-@@ -0,0 +1,666 @@
+@@ -0,0 +1,707 @@
 +import { afterAll, afterEach, expect, test } from 'bun:test'
 +import type { ServerWebSocket, Subprocess } from 'bun'
 +import { connect, type Socket } from 'net'
@@ -995,7 +995,7 @@ index 0000000000000000000000000000000000000000..dd3bfbba73512852bbb2c5b5db44bf2f
 +
 +// Runs bot.ts the way the hub service does, against its own fake relay, with
 +// a fake `claude` that records its calls and a channel and a DM Hex is in.
-+async function startBot(prepare?: (setup: { state: string; relay: ReturnType<typeof fakeRelay>; channel: string; me: string }) => void) {
++async function startBot(prepare?: (setup: { state: string; relay: ReturnType<typeof fakeRelay>; channel: string; me: string; key: Uint8Array }) => void) {
 +  const dir = mkdtempSync(join(tmpdir(), 'buzz-'))
 +  const state = join(dir, 'state')
 +  mkdirSync(state)
@@ -1031,7 +1031,7 @@ index 0000000000000000000000000000000000000000..dd3bfbba73512852bbb2c5b5db44bf2f
 +  relay.inject(signed(host, 39000, '', [['d', secret], ['name', 'secret'], ['t', 'stream']]))
 +  relay.inject(signed(host, 39000, '', [['d', dm], ['name', 'dm'], ['hidden'], ['t', 'dm']]))
 +  relay.inject(signed(host, 39000, '', [['d', forum], ['name', 'ideas'], ['t', 'forum']]))
-+  prepare?.({ state, relay, channel, me })
++  prepare?.({ state, relay, channel, me, key })
 +
 +  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^(BUZZ_|HEX_|TELEGRAM_|DISCORD_)/.test(name)))
 +  const bot = Bun.spawn(['bun', join(import.meta.dir, 'bot.ts')], {
@@ -1293,6 +1293,47 @@ index 0000000000000000000000000000000000000000..dd3bfbba73512852bbb2c5b5db44bf2f
 +  expect(args.at(-1)).toBe('find better anchors')
 +})
 +
++test('reply with buttons lists them numbered and reacts with each keycap; the first tap arrives as a button, the other keycaps come off, later taps are ignored', async () => {
++  const bot = await startBot()
++  const { session } = await threadStarted(bot)
++  expect((await session.call('reply', { text: 'pick one', buttons: Array.from({ length: 11 }, (_, i) => `${i}`) })).error).toBe('at most 10 buttons')
++  const id = (await session.call('reply', { text: 'Ship it?', buttons: ['Yes', 'No'] })).text.match(/id: (\w+)/)[1]
++  expect(bot.relay.events.find(event => event.id === id)!.content).toBe('Ship it?\n\n1️⃣ Yes\n2️⃣ No')
++  const keycaps = bot.published(7).filter(event => event.tags[0]![1] === id)
++  expect(keycaps.map(event => event.content)).toEqual(['1️⃣', '2️⃣'])
++  bot.relay.inject(signed(ownerKey, 7, '2\u20E3', [['e', id]]))
++  const [, tapped] = await session.inbound(2)
++  expect(tapped.content).toBe('No')
++  expect(tapped.meta).toMatchObject({ button: 'true', button_message_id: id, user: 'Bassim', channel: 'general' })
++  expect(await until(() => bot.published(5).find(event => event.tags[0]![1] === keycaps[0]!.id))).toBeTruthy()
++  expect(bot.published(5).some(event => event.tags[0]![1] === keycaps[1]!.id)).toBe(false)
++  bot.relay.inject(signed(ownerKey, 7, '1️⃣', [['e', id]]))
++  bot.relay.inject(signed(ownerKey, 7, '👍', [['e', id]]))
++  const inbound = await session.inbound(3)
++  expect(inbound[2].content).toBe('(reaction: 👍)')
++  await Bun.sleep(300)
++  expect((await session.inbound(3)).length).toBe(3)
++})
++
++test('a tap on buttons sent before a restart still arrives as a button', async () => {
++  const at = Math.floor(Date.now() / 1000) - 100
++  let question!: Event
++  let yes!: Event
++  const bot = await startBot(({ state, relay, channel, me, key }) => {
++    const root = signed(ownerKey, 9, '@Hex ship it?', [['h', channel], ['p', me]], at)
++    question = signed(key, 9, 'Ship it?\n\n1️⃣ Yes\n2️⃣ No', [['h', channel], ['e', root.id, '', 'reply']], at)
++    yes = signed(key, 7, '1️⃣', [['e', question.id]], at)
++    const no = signed(key, 7, '2️⃣', [['e', question.id]], at)
++    for (const event of [root, question, yes, no]) relay.inject(event)
++    writeFileSync(join(state, 'threads.json'), JSON.stringify({ [root.id]: { name: 'Ship it' } }))
++    writeFileSync(join(state, 'buttons.json'), JSON.stringify({ [question.id]: { thread: root.id, choices: [{ label: 'Yes', reaction: yes.id }, { label: 'No', reaction: no.id }] } }))
++  })
++  bot.relay.inject(signed(ownerKey, 7, '2️⃣', [['e', question.id]]))
++  const [tapped] = await (await bot.session(question.tags[1]![1]!)).inbound(1)
++  expect(tapped).toMatchObject({ content: 'No', meta: { button: 'true', button_message_id: question.id } })
++  expect(await until(() => bot.published(5).find(event => event.tags[0]![1] === yes.id))).toBeTruthy()
++})
++
 +test('rename_thread renames a thread Hex opened in Buzz too, by editing its first message', async () => {
 +  const bot = await startBot()
 +  const { session } = await threadStarted(bot)
@@ -1462,10 +1503,10 @@ index 0000000000000000000000000000000000000000..dd3bfbba73512852bbb2c5b5db44bf2f
 +})
 diff --git a/external_plugins/buzz/bot.ts b/external_plugins/buzz/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..51d2714bd17adcab19b9b381c0dbe9c16d0b3df9
+index 0000000000000000000000000000000000000000..50e94b44936a228074a5f751ab3dcbf225825885
 --- /dev/null
 +++ b/external_plugins/buzz/bot.ts
-@@ -0,0 +1,812 @@
+@@ -0,0 +1,857 @@
 +#!/usr/bin/env bun
 +import { readFileSync, writeFileSync, mkdirSync, statSync, realpathSync, chmodSync, renameSync } from 'fs'
 +import { createHash } from 'crypto'
@@ -1483,6 +1524,7 @@ index 0000000000000000000000000000000000000000..51d2714bd17adcab19b9b381c0dbe9c1
 +const ACCESS_FILE = join(STATE_DIR, 'access.json')
 +const ENV_FILE = join(STATE_DIR, '.env')
 +const CURSOR_FILE = join(STATE_DIR, 'cursor.json')
++const BUTTONS_FILE = join(STATE_DIR, 'buttons.json')
 +const INBOX_DIR = join(STATE_DIR, 'inbox')
 +
 +try {
@@ -1544,6 +1586,8 @@ index 0000000000000000000000000000000000000000..51d2714bd17adcab19b9b381c0dbe9c1
 +// Messages, forum posts and comments, edits, reactions, and deletions (NIP-09, and NIP-29's admin delete): what reaches Hex live.
 +const INBOUND = [9, POST, COMMENT, 40003, 7, 5, 9005]
 +const CANVAS = 40100
++// Buzz has no buttons, so choices are numbered with these and tapped as reactions.
++const KEYCAPS = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟']
 +
 +// reply's files param takes any path, but channel state and .env files (keys)
 +// are the things Claude has no reason to ever send.
@@ -1598,6 +1642,22 @@ index 0000000000000000000000000000000000000000..51d2714bd17adcab19b9b381c0dbe9c1
 +  if (!title || title.split(/\s+/).length > 2) throw new Error(`title must be 1–2 words, got "${title}"`)
 +  return title
 +}
++
++function keep(path: string, value: unknown) {
++  writeFileSync(`${path}.tmp`, JSON.stringify(value) + '\n')
++  renameSync(`${path}.tmp`, path)
++}
++
++function load<T>(path: string, fallback: T): T {
++  try {
++    return JSON.parse(readFileSync(path, 'utf8'))
++  } catch {
++    return fallback
++  }
++}
++
++// Some clients send a keycap without its variation selector.
++const keycap = (emoji: string) => KEYCAPS.findIndex(choice => choice.replace(/\uFE0F/g, '') === emoji.replace(/\uFE0F/g, ''))
 +
 +function now() {
 +  return Math.floor(Date.now() / 1000)
@@ -1654,6 +1714,8 @@ index 0000000000000000000000000000000000000000..51d2714bd17adcab19b9b381c0dbe9c1
 +  // The relay hides deleted events, so a deletion is explained by what Hex saw before it.
 +  const texts = new Map<string, { thread: string; text: string }>()
 +  const reactions = new Map<string, { thread: string; emoji: string; meta: Record<string, string> }>()
++  // Messages Hex sent with buttons, its keycap reaction for each, and which one was tapped.
++  const buttons = load<Record<string, { thread: string; choices: { label: string; reaction?: string }[]; chosen?: number }>>(BUTTONS_FILE, {})
 +  const access = loadAccess()
 +  const panels = access.panels !== false
 +  const activity = panels ? startActivity({ relay, secretKey, owner, hexDir: process.env.HEX_DIR ?? process.cwd(), cancel }) : undefined
@@ -1955,7 +2017,9 @@ index 0000000000000000000000000000000000000000..51d2714bd17adcab19b9b381c0dbe9c1
 +    const thread = args.thread ? hub.find(args.thread as string) : caller
 +    switch (tool) {
 +      case 'reply': {
-+        const text = args.text as string
++        const choices = (args.buttons as string[] | undefined) ?? []
++        if (choices.length > KEYCAPS.length) throw new Error(`at most ${KEYCAPS.length} buttons`)
++        const text = [args.text as string, choices.map((label, i) => `${KEYCAPS[i]} ${label}`).join('\n')].filter(Boolean).join('\n\n')
 +        const reply_to = args.reply_to as string | undefined
 +        const files = (args.files as string[] | undefined) ?? []
 +
@@ -1981,6 +2045,13 @@ index 0000000000000000000000000000000000000000..51d2714bd17adcab19b9b381c0dbe9c1
 +        } catch (err) {
 +          const msg = err instanceof Error ? err.message : String(err)
 +          throw new Error(`reply failed after ${sentIds.length} of ${chunks.length} chunk(s) sent: ${msg}`)
++        }
++
++        if (choices.length > 0) {
++          const asked = (buttons[sentIds.at(-1)!] = { thread, choices: choices.map(label => ({ label })) })
++          keep(BUTTONS_FILE, buttons)
++          for (const [i, choice] of asked.choices.entries()) choice.reaction = (await react(sentIds.at(-1)!, KEYCAPS[i]!)).id
++          keep(BUTTONS_FILE, buttons)
 +        }
 +
 +        return sentIds.length === 1 ? `sent (id: ${sentIds[0]})` : `sent ${sentIds.length} parts (ids: ${sentIds.join(', ')})`
@@ -2123,8 +2194,12 @@ index 0000000000000000000000000000000000000000..51d2714bd17adcab19b9b381c0dbe9c1
 +  }
 +
 +  // A reaction reaches the thread the message it's on belongs to, if Hex is in it.
++  // A keycap on a message with buttons is a tap instead, and only the first counts.
 +  async function handleReaction(event: Event): Promise<void> {
 +    const id = event.tags.findLast(t => t[0] === 'e')?.[1]
++    const asked = id ? buttons[id] : undefined
++    const index = keycap(event.content)
++    if (asked?.choices[index]) return asked.chosen === undefined ? tap(event, id!, index) : undefined
 +    const [target] = id ? await relay.query([{ kinds: MESSAGES, ids: [id] }]) : []
 +    const thread = target && threadOf(target, false)
 +    if (!thread) return
@@ -2137,6 +2212,21 @@ index 0000000000000000000000000000000000000000..51d2714bd17adcab19b9b381c0dbe9c1
 +    hub.deliver(thread, hub.name(thread) ?? await nameOf(event.pubkey), {
 +      content: `(reaction: ${event.content})`,
 +      meta: { ...(await about(event, thread, tag(target, 'h'))), reaction: event.content, ...meta },
++    })
++  }
++
++  // The bot's other keycaps come off, so the one tapped stands out.
++  async function tap(event: Event, id: string, index: number): Promise<void> {
++    const asked = buttons[id]!
++    asked.chosen = index
++    keep(BUTTONS_FILE, buttons)
++    for (const [i, choice] of asked.choices.entries()) {
++      if (i !== index && choice.reaction) void relay.publish({ kind: 5, content: '', tags: [['e', choice.reaction]] }).catch(() => {})
++    }
++    const meta = await about(event, asked.thread, await channelOf(asked.thread))
++    hub.deliver(asked.thread, hub.name(asked.thread) ?? meta.user!, {
++      content: asked.choices[index]!.label,
++      meta: { ...meta, button: 'true', button_message_id: id },
 +    })
 +  }
 +
@@ -2198,16 +2288,12 @@ index 0000000000000000000000000000000000000000..51d2714bd17adcab19b9b381c0dbe9c1
 +
 +  // The last event handled, and every id handled in that second, so a restart
 +  // picks up from there and nothing is delivered twice.
-+  let cursor: { at: number; ids: string[] } = { at: start, ids: [] }
-+  try {
-+    cursor = JSON.parse(readFileSync(CURSOR_FILE, 'utf8'))
-+  } catch {}
++  let cursor = load<{ at: number; ids: string[] }>(CURSOR_FILE, { at: start, ids: [] })
 +
 +  function handled(event: Event) {
 +    if (event.created_at < cursor.at) return
 +    cursor = event.created_at === cursor.at ? { at: cursor.at, ids: [...cursor.ids, event.id] } : { at: event.created_at, ids: [event.id] }
-+    writeFileSync(`${CURSOR_FILE}.tmp`, JSON.stringify(cursor) + '\n')
-+    renameSync(`${CURSOR_FILE}.tmp`, CURSOR_FILE)
++    keep(CURSOR_FILE, cursor)
 +  }
 +
 +  // Events are handled one at a time, in the order they came, so a thread's
@@ -3799,10 +3885,10 @@ index 0000000000000000000000000000000000000000..44eff7405c67b2f404d4fa71ba85c228
 +}
 diff --git a/external_plugins/buzz/server.ts b/external_plugins/buzz/server.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..a3283c8d917ca051c30de360f3852f9cfb689508
+index 0000000000000000000000000000000000000000..13692f2113df66fa896fbc0f8a178f8713be4777
 --- /dev/null
 +++ b/external_plugins/buzz/server.ts
-@@ -0,0 +1,268 @@
+@@ -0,0 +1,273 @@
 +#!/usr/bin/env bun
 +import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 +import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
@@ -3821,7 +3907,7 @@ index 0000000000000000000000000000000000000000..a3283c8d917ca051c30de360f3852f9c
 +      '',
 +      'This session is one Buzz thread or direct message, the place for deeper work. Buzz renders Markdown, so answers can be longer and structured: headings, lists, and code blocks with a language. Its messages arrive as <channel source="buzz" chat_id="..." message_id="..." user="..." ts="...">, and everything you send with these tools lands back in that same thread. If the tag has new_thread="true", name this thread with rename_thread: 1–2 words. If you were tagged into a thread that was already going, reply_to_* is the message it hangs off ("(tagged you)" alone means: read that message) and fetch_messages shows the rest. In a forum channel each post is its own thread: comments on it arrive here, and your replies post as comments on it. If the tag has attachment_count, the attachments attribute lists name/type/size — call download_attachment(message_id) to fetch them. If the tag has reply_to_message_id, the sender replied to that earlier message: reply_to_text is its text and reply_to_attachments lists its files (download_attachment with that id). edited="true" means the sender edited the message with that message_id and this is its new text. A reaction arrives as "(reaction: 👍)", or "(reaction removed: 👍)" with reaction_removed="true", with reaction_to_message_id, reaction_to_user and reaction_to_text naming the message it is on. deleted="true" means the sender deleted the message with that message_id; deleted_text is what it said. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply.',
 +      '',
-+      'reply accepts file paths (files: ["/abs/path.png"]) for attachments. Use react to add emoji reactions (remove: true takes yours off), edit_message for interim progress updates, and delete_message to take back a message you sent. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',
++      'reply accepts file paths (files: ["/abs/path.png"]) for attachments, and buttons (up to 10 short labels) to offer choices the user taps: a tap arrives with button="true" and button_message_id, and the chosen label as its text. Use react to add emoji reactions (remove: true takes yours off), edit_message for interim progress updates, and delete_message to take back a message you sent. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',
 +      '',
 +      'Each channel has one shared canvas, a Markdown document the user opens from the channel\'s details: canvas() reads it with its revision, and canvas(text, revision) replaces it, refused if someone changed it since that revision. presence tells you whether the user is online, away or offline.',
 +      '',
@@ -3850,6 +3936,11 @@ index 0000000000000000000000000000000000000000..a3283c8d917ca051c30de360f3852f9c
 +            type: 'array',
 +            items: { type: 'string' },
 +            description: 'Absolute file paths to attach: images, MP4 video, PDFs or other files, but not audio. Max 100MB each.',
++          },
++          buttons: {
++            type: 'array',
++            items: { type: 'string' },
++            description: 'Choices the user can tap, at most 10, like ["Yes", "No"]. They show as a numbered list under the text.',
 +          },
 +        },
 +        required: ['text'],

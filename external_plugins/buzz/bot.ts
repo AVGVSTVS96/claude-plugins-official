@@ -15,6 +15,7 @@ const STATE_DIR = process.env.BUZZ_STATE_DIR ?? join(homedir(), '.claude', 'chan
 const ACCESS_FILE = join(STATE_DIR, 'access.json')
 const ENV_FILE = join(STATE_DIR, '.env')
 const CURSOR_FILE = join(STATE_DIR, 'cursor.json')
+const BUTTONS_FILE = join(STATE_DIR, 'buttons.json')
 const INBOX_DIR = join(STATE_DIR, 'inbox')
 
 try {
@@ -76,6 +77,8 @@ const COMMENT = 45003
 // Messages, forum posts and comments, edits, reactions, and deletions (NIP-09, and NIP-29's admin delete): what reaches Hex live.
 const INBOUND = [9, POST, COMMENT, 40003, 7, 5, 9005]
 const CANVAS = 40100
+// Buzz has no buttons, so choices are numbered with these and tapped as reactions.
+const KEYCAPS = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟']
 
 // reply's files param takes any path, but channel state and .env files (keys)
 // are the things Claude has no reason to ever send.
@@ -130,6 +133,22 @@ function title(text: string): string {
   if (!title || title.split(/\s+/).length > 2) throw new Error(`title must be 1–2 words, got "${title}"`)
   return title
 }
+
+function keep(path: string, value: unknown) {
+  writeFileSync(`${path}.tmp`, JSON.stringify(value) + '\n')
+  renameSync(`${path}.tmp`, path)
+}
+
+function load<T>(path: string, fallback: T): T {
+  try {
+    return JSON.parse(readFileSync(path, 'utf8'))
+  } catch {
+    return fallback
+  }
+}
+
+// Some clients send a keycap without its variation selector.
+const keycap = (emoji: string) => KEYCAPS.findIndex(choice => choice.replace(/\uFE0F/g, '') === emoji.replace(/\uFE0F/g, ''))
 
 function now() {
   return Math.floor(Date.now() / 1000)
@@ -186,6 +205,8 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
   // The relay hides deleted events, so a deletion is explained by what Hex saw before it.
   const texts = new Map<string, { thread: string; text: string }>()
   const reactions = new Map<string, { thread: string; emoji: string; meta: Record<string, string> }>()
+  // Messages Hex sent with buttons, its keycap reaction for each, and which one was tapped.
+  const buttons = load<Record<string, { thread: string; choices: { label: string; reaction?: string }[]; chosen?: number }>>(BUTTONS_FILE, {})
   const access = loadAccess()
   const panels = access.panels !== false
   const activity = panels ? startActivity({ relay, secretKey, owner, hexDir: process.env.HEX_DIR ?? process.cwd(), cancel }) : undefined
@@ -487,7 +508,9 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
     const thread = args.thread ? hub.find(args.thread as string) : caller
     switch (tool) {
       case 'reply': {
-        const text = args.text as string
+        const choices = (args.buttons as string[] | undefined) ?? []
+        if (choices.length > KEYCAPS.length) throw new Error(`at most ${KEYCAPS.length} buttons`)
+        const text = [args.text as string, choices.map((label, i) => `${KEYCAPS[i]} ${label}`).join('\n')].filter(Boolean).join('\n\n')
         const reply_to = args.reply_to as string | undefined
         const files = (args.files as string[] | undefined) ?? []
 
@@ -513,6 +536,13 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err)
           throw new Error(`reply failed after ${sentIds.length} of ${chunks.length} chunk(s) sent: ${msg}`)
+        }
+
+        if (choices.length > 0) {
+          const asked = (buttons[sentIds.at(-1)!] = { thread, choices: choices.map(label => ({ label })) })
+          keep(BUTTONS_FILE, buttons)
+          for (const [i, choice] of asked.choices.entries()) choice.reaction = (await react(sentIds.at(-1)!, KEYCAPS[i]!)).id
+          keep(BUTTONS_FILE, buttons)
         }
 
         return sentIds.length === 1 ? `sent (id: ${sentIds[0]})` : `sent ${sentIds.length} parts (ids: ${sentIds.join(', ')})`
@@ -655,8 +685,12 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
   }
 
   // A reaction reaches the thread the message it's on belongs to, if Hex is in it.
+  // A keycap on a message with buttons is a tap instead, and only the first counts.
   async function handleReaction(event: Event): Promise<void> {
     const id = event.tags.findLast(t => t[0] === 'e')?.[1]
+    const asked = id ? buttons[id] : undefined
+    const index = keycap(event.content)
+    if (asked?.choices[index]) return asked.chosen === undefined ? tap(event, id!, index) : undefined
     const [target] = id ? await relay.query([{ kinds: MESSAGES, ids: [id] }]) : []
     const thread = target && threadOf(target, false)
     if (!thread) return
@@ -669,6 +703,21 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
     hub.deliver(thread, hub.name(thread) ?? await nameOf(event.pubkey), {
       content: `(reaction: ${event.content})`,
       meta: { ...(await about(event, thread, tag(target, 'h'))), reaction: event.content, ...meta },
+    })
+  }
+
+  // The bot's other keycaps come off, so the one tapped stands out.
+  async function tap(event: Event, id: string, index: number): Promise<void> {
+    const asked = buttons[id]!
+    asked.chosen = index
+    keep(BUTTONS_FILE, buttons)
+    for (const [i, choice] of asked.choices.entries()) {
+      if (i !== index && choice.reaction) void relay.publish({ kind: 5, content: '', tags: [['e', choice.reaction]] }).catch(() => {})
+    }
+    const meta = await about(event, asked.thread, await channelOf(asked.thread))
+    hub.deliver(asked.thread, hub.name(asked.thread) ?? meta.user!, {
+      content: asked.choices[index]!.label,
+      meta: { ...meta, button: 'true', button_message_id: id },
     })
   }
 
@@ -730,16 +779,12 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
 
   // The last event handled, and every id handled in that second, so a restart
   // picks up from there and nothing is delivered twice.
-  let cursor: { at: number; ids: string[] } = { at: start, ids: [] }
-  try {
-    cursor = JSON.parse(readFileSync(CURSOR_FILE, 'utf8'))
-  } catch {}
+  let cursor = load<{ at: number; ids: string[] }>(CURSOR_FILE, { at: start, ids: [] })
 
   function handled(event: Event) {
     if (event.created_at < cursor.at) return
     cursor = event.created_at === cursor.at ? { at: cursor.at, ids: [...cursor.ids, event.id] } : { at: event.created_at, ids: [event.id] }
-    writeFileSync(`${CURSOR_FILE}.tmp`, JSON.stringify(cursor) + '\n')
-    renameSync(`${CURSOR_FILE}.tmp`, CURSOR_FILE)
+    keep(CURSOR_FILE, cursor)
   }
 
   // Events are handled one at a time, in the order they came, so a thread's

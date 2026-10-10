@@ -4,7 +4,7 @@ id: buzz-threads
 summary: Add a Buzz channel where every Buzz thread is its own Claude Code session through the thread hub, with Buzz's activity, memory and files panels.
 baseline: ac996c0dde7fb2a9f805cd5277ffc95ecd44a321
 patch_file: buzz-threads.patch
-patch_sha256: 08e5e2d3d26a16ab03b7013acb1cfef5643e93a638e4f303d62c5fb4a5f83bb5
+patch_sha256: 383683cb4e861ead86535065041b0338881d14fbdae808148bf91df7e75cae30
 ---
 
 ## Intent
@@ -76,6 +76,12 @@ Buzz works like Discord:
 - Buzz threads have no title (Desktop's header just says "Thread"), so
   `new_thread` posts the name as the thread's first message, and
   `rename_thread` edits that message when Hex posted it.
+- Buzz has no buttons, so `reply`'s `buttons` (at most 10) end the message
+  with the choices numbered 1️⃣ to 🔟 and Hex reacts with each keycap. The
+  sender's first keycap tap on it arrives as a button tap (the choice's label,
+  `button="true"`, `button_message_id`), Hex takes its other keycaps off so
+  the chosen one stands out, and later taps are ignored. Which messages carry
+  buttons is kept in `buttons.json`, so a tap after a restart still counts.
 - `delete_message` and `react` with `remove` take back Hex's own messages and
   reactions; `canvas` reads and replaces a channel's canvas (kind 40100, with
   Desktop's `expected-revision` check and a timestamp past the head it read);
