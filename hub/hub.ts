@@ -1,7 +1,7 @@
 import { createServer, type Socket } from 'net'
 import { execFile, spawn } from 'child_process'
 import { createHash } from 'crypto'
-import { existsSync, readFileSync, writeFileSync, renameSync, rmSync, watch, type FSWatcher } from 'fs'
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, writeFileSync, renameSync, rmSync, watch, type FSWatcher } from 'fs'
 import { homedir } from 'os'
 import { basename, join } from 'path'
 
@@ -42,6 +42,7 @@ const CLAUDE = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude')
 const JOBS = join(CLAUDE, 'jobs')
 const IDLE_STOP = 30 * 60_000
 const RELAUNCH = 30_000
+const CAPACITY = 200_000
 const PRIVATE = /_BOT_TOKEN$|^HEX_|^BUZZ_/
 
 export function title(text: string): string {
@@ -50,7 +51,7 @@ export function title(text: string): string {
   return title
 }
 
-export function startHub({ stateDir, channel, main, mainName = 'main', call, state, failed, permission, args = () => [], fresh = () => false, idleStop = IDLE_STOP, relaunch = RELAUNCH, jobsDir = JOBS, hexDir = process.cwd(), projectsDir = join(CLAUDE, 'projects'), launcher = 'claude' }: {
+export function startHub({ stateDir, channel, main, mainName = 'main', call, state, failed, permission, args = () => [], fresh = () => false, capacity = CAPACITY, idleStop = IDLE_STOP, relaunch = RELAUNCH, jobsDir = JOBS, hexDir = process.cwd(), projectsDir = join(CLAUDE, 'projects'), launcher = 'claude' }: {
   stateDir: string
   channel: string
   main?: string
@@ -60,9 +61,11 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
   failed: Failed
   permission?: (thread: string, request: Permission) => void
   args?: (thread: string) => string[]
-  // A fresh thread starts a new session for each message that finds its session done,
-  // instead of resuming it, and the launcher builds what that session knows of the chat.
+  // A fresh thread keeps one session running until its context holds `capacity` tokens;
+  // then, once it's done, a new session takes over, and the launcher builds what that
+  // session knows of the chat.
   fresh?: (thread: string) => boolean
+  capacity?: number
   idleStop?: number
   relaunch?: number
   jobsDir?: string
@@ -124,6 +127,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
     idle.delete(thread)
     if (busy.has(thread) || thread === main || !live.has(thread)) return
     if (retiring.has(thread)) stop(thread)
+    else if (fresh(thread)) renew(thread)
     else idle.set(thread, setTimeout(() => stopIfIdle(thread), idleStop))
   }
 
@@ -136,6 +140,38 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
     agent(session, running => {
       if (!busy.has(thread) && running?.status !== 'busy') stop(thread)
     })
+  }
+
+  // A full session is replaced as soon as it's done, so the next message finds a new one
+  // already running.
+  function renew(thread: string) {
+    if (!full(thread)) return
+    agent(current(thread)!, running => {
+      if (!busy.has(thread) && running?.status !== 'busy' && full(thread)) cycle(thread, running)
+    })
+  }
+
+  // Claude records each response's usage in the conversation, so the last one tells how
+  // much context the session holds.
+  function full(thread: string) {
+    const session = current(thread)
+    if (!session) return false
+    let tail = ''
+    try {
+      const fd = openSync(transcript(thread, session), 'r')
+      const size = fstatSync(fd).size
+      const buffer = Buffer.alloc(Math.min(size, 1 << 20))
+      readSync(fd, buffer, 0, buffer.length, size - buffer.length)
+      closeSync(fd)
+      tail = buffer.toString('utf8')
+    } catch {
+      return false
+    }
+    for (const line of tail.split('\n').reverse()) {
+      const usage = line.includes('"usage"') && (() => { try { return JSON.parse(line).message?.usage } catch {} })()
+      if (usage) return usage.input_tokens + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) >= capacity
+    }
+    return false
   }
 
   function stop(thread: string) {
@@ -208,7 +244,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
     if (prompt || queued.has(thread)) setState(thread, true)
     launching.set(thread, undefined)
     if (fork) return start(known, thread, prompt, fork)
-    if (!known.session || fresh(thread)) return start(known, thread, prompt)
+    if (!known.session || fresh(thread) && full(thread)) return start(known, thread, prompt)
     const session = known.session
     agent(session, running => {
       if (running) return
@@ -267,7 +303,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
         '--bg',
         '--channels', channel,
         '--name', known.name,
-        ...(fork ? ['--resume', fork, '--fork-session'] : known.session && !fresh(thread) ? ['--resume', known.session] : []),
+        ...(fork ? ['--resume', fork, '--fork-session'] : known.session && !(fresh(thread) && full(thread)) ? ['--resume', known.session] : []),
         ...launchArgs,
         '--settings', JSON.stringify({ enabledPlugins: { [plugin]: true }, env: bound }),
         ...(prompt ? [prompt] : []),
@@ -317,7 +353,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
 
   function deliver(thread: string, name: string, message: Message) {
     const socket = live.get(thread)
-    if (socket && !stale(thread) && !fresh(thread)) return send(socket, { type: 'inbound', ...message })
+    if (socket && !stale(thread) && !(fresh(thread) && full(thread))) return send(socket, { type: 'inbound', ...message })
     if (socket) return refresh(thread, message)
     queued.set(thread, [...(queued.get(thread) ?? []), message])
     launch(thread, name)
@@ -382,10 +418,14 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
   function claim(thread: string) {
     const session = unsaved.get(thread)
     const known = threads[thread]
-    if (!session || !known || !existsSync(join(projectsDir, (known.cwd ?? hexDir).replace(/[^a-zA-Z0-9]/g, '-'), `${session}.jsonl`))) return
+    if (!session || !known || !existsSync(transcript(thread, session))) return
     unsaved.delete(thread)
     known.session = session
     save()
+  }
+
+  function transcript(thread: string, session: string) {
+    return join(projectsDir, (threads[thread]?.cwd ?? hexDir).replace(/[^a-zA-Z0-9]/g, '-'), `${session}.jsonl`)
   }
 
   function current(thread: string) {

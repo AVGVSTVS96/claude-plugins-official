@@ -37,7 +37,7 @@ afterEach(() => {
   process.env.PATH = process.env.PATH!.split(':').slice(1).join(':')
 })
 
-function start(options: { main?: string; idleStop?: number; relaunch?: number; launcher?: string; registry?: object; agents?: object[]; fresh?: (thread: string) => boolean } = {}) {
+function start(options: { main?: string; idleStop?: number; relaunch?: number; launcher?: string; registry?: object; agents?: object[]; fresh?: (thread: string) => boolean; capacity?: number } = {}) {
   if (options.registry) writeFileSync(join(dir, 'threads.json'), JSON.stringify(options.registry))
   if (options.agents) writeFileSync(join(dir, 'agents'), JSON.stringify(options.agents))
   const seen: [string, boolean][] = (states = [])
@@ -58,6 +58,7 @@ function start(options: { main?: string; idleStop?: number; relaunch?: number; l
     relaunch: options.relaunch,
     launcher: options.launcher,
     fresh: options.fresh,
+    capacity: options.capacity,
     mainName: 'hex',
   })
 }
@@ -96,10 +97,11 @@ async function session(thread: string, id = SESSION) {
   return { socket, received, send: (payload: object) => socket.write(JSON.stringify(payload) + '\n') }
 }
 
-function saved(id = SESSION, folder = join(dir, 'hex')) {
+function saved(id = SESSION, folder = join(dir, 'hex'), context?: number) {
   const project = join(dir, 'projects', folder.replace(/[^a-zA-Z0-9]/g, '-'))
   mkdirSync(project, { recursive: true })
-  writeFileSync(join(project, `${id}.jsonl`), '{}\n')
+  const usage = { input_tokens: 2, cache_read_input_tokens: context, cache_creation_input_tokens: 0 }
+  writeFileSync(join(project, `${id}.jsonl`), context === undefined ? '{}\n' : `{}\n${JSON.stringify({ type: 'assistant', message: { usage } })}\n{"type":"system"}\n`)
 }
 
 function settingsOf(args: string[]) {
@@ -402,22 +404,32 @@ test('a thread\'s model and effort are kept, and a running session takes them by
   expect(fresh.received[0]).toMatchObject({ type: 'inbound', content: 'again' })
 })
 
-test('a fresh thread starts a new session instead of resuming its last, and says so in its env', async () => {
-  start({ registry: { dm: { name: 'DM', session: SESSION } }, agents: [], fresh: thread => thread === 'dm' })
+test('a fresh thread resumes its session while it has room, and says so in its env', async () => {
+  start({ registry: { dm: { name: 'DM', session: SESSION } }, agents: [], fresh: thread => thread === 'dm', capacity: 1000 })
+  saved(SESSION, join(dir, 'hex'), 500)
   hub.deliver('dm', 'DM', message)
   const args = await launched()
-  expect(args).not.toContain('--resume')
-  expect(calls().some(args => args[0] === 'rm')).toBe(false)
+  expect(args.slice(args.indexOf('--resume'), args.indexOf('--resume') + 2)).toEqual(['--resume', SESSION])
   expect(settingsOf(args).env).toEqual({ HEX_CHANNEL: CHANNEL, HEX_THREAD: 'dm', HEX_HUB: join(dir, 'hub.sock'), HEX_FRESH: '1' })
-  const NEXT = '0a1b2c3d-0000-4000-8000-000000000001'
-  saved(NEXT)
-  const { received } = await session('dm', NEXT)
-  await until(() => received.length)
-  expect(registry().dm).toEqual({ name: 'DM', session: NEXT })
 })
 
-test('a message to a fresh thread steers its session while Claude reports it working, and starts a new one once it is done', async () => {
-  start({ registry: { dm: { name: 'DM', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 999999, status: 'busy' }], fresh: thread => thread === 'dm' })
+test('a fresh thread steers one running session with every message, and keeps it up while idle', async () => {
+  start({ registry: { dm: { name: 'DM', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 999999, status: 'idle' }], fresh: thread => thread === 'dm', capacity: 1000, idleStop: 10 })
+  saved(SESSION, join(dir, 'hex'), 500)
+  const { received, send } = await session('dm')
+  await Bun.sleep(50)
+  hub.deliver('dm', 'DM', message)
+  send({ type: 'state', thread: 'dm', busy: false })
+  await until(() => states.length)
+  hub.deliver('dm', 'DM', { content: 'next', meta: {} })
+  await until(() => received.length === 2)
+  await Bun.sleep(100)
+  expect(calls().some(args => args[0] === 'stop' || args[0] === '--bg')).toBe(false)
+})
+
+test('once a fresh thread\'s session is full, a new one takes over as soon as it is done, before the next message', async () => {
+  start({ registry: { dm: { name: 'DM', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 999999, status: 'busy' }], fresh: thread => thread === 'dm', capacity: 1000 })
+  saved(SESSION, join(dir, 'hex'), 1500)
   const { received, send } = await session('dm')
   await Bun.sleep(50)
   hub.deliver('dm', 'DM', message)
@@ -425,15 +437,16 @@ test('a message to a fresh thread steers its session while Claude reports it wor
   expect(received).toEqual([{ type: 'inbound', ...message }])
   writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid: 999999, status: 'idle' }]))
   send({ type: 'state', thread: 'dm', busy: false })
-  await until(() => states.length)
-  hub.deliver('dm', 'DM', { content: 'next', meta: {} })
   expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
   const args = await launched()
   expect(args).not.toContain('--resume')
-  expect(received).toHaveLength(1)
+  expect(args.at(-1)).toStartWith('{')
   const next = await session('dm', '0a1b2c3d-0000-4000-8000-000000000001')
+  await Bun.sleep(50)
+  hub.deliver('dm', 'DM', { content: 'next', meta: {} })
   await until(() => next.received.length)
   expect(next.received[0]).toMatchObject({ type: 'inbound', content: 'next' })
+  expect(received).toHaveLength(1)
 })
 
 test('a fresh thread keeps its session while it waits on a permission prompt or its turn is still running', async () => {
