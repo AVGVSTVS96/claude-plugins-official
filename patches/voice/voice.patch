@@ -33,10 +33,10 @@ index 0000000000000000000000000000000000000000..07fdedd6c4bc9e7072f8d860f7eadd42
 +}
 diff --git a/external_plugins/voice/README.md b/external_plugins/voice/README.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..ab2806061963f3e41cab4f17e47fa269e1473efc
+index 0000000000000000000000000000000000000000..37c4d955297f055a730e38ce38fae973a4ef93d9
 --- /dev/null
 +++ b/external_plugins/voice/README.md
-@@ -0,0 +1,97 @@
+@@ -0,0 +1,99 @@
 +# voice
 +
 +Live voice calls for Claude Code. OpenAI's `gpt-live-1` talks with you in real
@@ -80,8 +80,10 @@ index 0000000000000000000000000000000000000000..ab2806061963f3e41cab4f17e47fa269
 +   | `task` | `session.thinking.append` (the whole board) | task status: running, done, failed |
 +
 +   Each tool returns once OpenAI acknowledges the update.
-+5. The voice answers "how's it going?" from the board, without a handoff, so
-+   status questions never touch running work.
++5. The voice hands every question to Claude, status questions included, and
++   only says Claude's answers. Claude is a dispatcher with work in background
++   subagents, so answering never stops running work; the board keeps the
++   voice aware of it.
 +6. When the call ends, Claude gets the last words and a "call ended" message.
 +
 +## Setup
@@ -603,10 +605,10 @@ index 0000000000000000000000000000000000000000..6fb7ade3ee476a5787d80414f42063b4
 +</html>
 diff --git a/external_plugins/voice/server.ts b/external_plugins/voice/server.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..e2c34c6f63e664b7da6dce3405c811d8f8acf504
+index 0000000000000000000000000000000000000000..3a15b81b1c824921a378bed7de82868630a0e321
 --- /dev/null
 +++ b/external_plugins/voice/server.ts
-@@ -0,0 +1,277 @@
+@@ -0,0 +1,273 @@
 +#!/usr/bin/env bun
 +import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 +import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
@@ -643,7 +645,7 @@ index 0000000000000000000000000000000000000000..e2c34c6f63e664b7da6dce3405c811d8
 +
 +const VOICE_PROMPT = `${IDENTITY}
 +
-+Speak warmly and naturally, like a sharp friend: plain words, short answers. Everything you know about the user, their life and their work lives in the backend, so you find it out by delegating.
++Speak warmly and naturally, like a sharp friend: plain words, short answers.
 +
 +Backchannel policy: Use light backchannels. Acknowledge naturally without competing with the main response.
 +
@@ -651,20 +653,16 @@ index 0000000000000000000000000000000000000000..e2c34c6f63e664b7da6dce3405c811d8
 +
 +Delegation policy:
 +Backend tools:
-+- Assistant: an agent with the user's files, machines, projects, memory, messages, email, calendar and the web. It can look things up, take actions and run long tasks in the background.
++- Assistant: the real assistant, an agent with the user's files, machines, projects, memory, messages, email, calendar and the web. It can look things up, take actions and run long tasks in the background. It does the thinking; you are its voice.
 +
 +Delegate to the backend when:
-+- The user asks about themselves, the people in their life, their work, what you know about them, or what's going on.
-+- The request needs anything from the user's world or the web: their files, projects, messages, accounts, schedule, or current facts.
-+- The user asks you to do, check, build, send, change or remember something.
++- The user asks anything, says anything that needs an answer, or asks for anything to be done. That is almost every turn, including questions about you, about them, and how a task is going.
 +- A correction or addition changes work already requested.
 +
 +Do not delegate to the backend when:
-+- You can answer from the conversation, your instructions, or a result the backend already gave you.
-+- The user asks how a task is going: answer from the task board.
-+- You need a brief clarification to understand the request.
++- The user only greets you, thanks you, or asks you to repeat what the backend just said.
 +
-+Delegate before giving an answer that depends on backend work. While it works, say briefly that you're on it and keep talking with the user; do not guess the result.
++Delegate before you answer. While the backend works, say a few words like "one sec" and wait for its result; then say what it gave you. Every answer you give comes from the backend, never from your own knowledge.
 +Backend work keeps running while you talk, and several tasks can run at once. A task board arrives as quiet context whenever a task starts or finishes.`
 +
 +type Pending = { resolve: () => void; reject: (error: Error) => void }
@@ -684,9 +682,9 @@ index 0000000000000000000000000000000000000000..e2c34c6f63e664b7da6dce3405c811d8
 +
 +Each handoff arrives as <channel source="voice" delegation_id="..."> with the transcript since the last handoff, oldest first, timestamped from the start of the call: "you" is the caller, "voice" is the voice model. Speech transcripts can mishear words, and the latest correction wins. A late line can belong before one you already got; its timestamp places it.
 +
-+Answer a handoff with say(delegation_id, text). The voice model paraphrases it aloud, so write one or two plain spoken sentences, no markdown. Use note for facts the voice should know without saying them yet.
++Answer every handoff with say(delegation_id, text): the voice says only what you give it, so you are the one talking. It paraphrases aloud, so write one or two plain spoken sentences, no markdown. Use note for facts the voice should know without saying them yet.
 +
-+Keep each turn quick so the next handoff reaches you fast. Run anything longer than a quick lookup as a background subagent, put it on the board with task (running, then done or failed), and say its result when it arrives. The voice answers "how's it going?" from the board. Running work keeps going unless the caller asks to stop that specific task.
++Keep each turn quick so the next handoff reaches you fast. Run anything longer than a quick lookup as a background subagent, put it on the board with task (running, then done or failed), and say its result when it arrives. Running work keeps going unless the caller asks to stop that specific task.
 +
 +A result too long to speak goes wherever the caller reads, if this session has another channel to reach them; say where you sent it. Voice page: http://localhost:${PORT}.`,
 +  },

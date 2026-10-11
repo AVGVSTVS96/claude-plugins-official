@@ -41,8 +41,10 @@ Claude to stop that task.
    | `task` | `session.thinking.append` (the whole board) | task status: running, done, failed |
 
    Each tool returns once OpenAI acknowledges the update.
-5. The voice answers "how's it going?" from the board, without a handoff, so
-   status questions never touch running work.
+5. The voice hands every question to Claude, status questions included, and
+   only says Claude's answers. Claude is a dispatcher with work in background
+   subagents, so answering never stops running work; the board keeps the
+   voice aware of it.
 6. When the call ends, Claude gets the last words and a "call ended" message.
 
 ## Setup
