@@ -37,7 +37,7 @@ afterEach(() => {
   process.env.PATH = process.env.PATH!.split(':').slice(1).join(':')
 })
 
-function start(options: { main?: string; idleStop?: number; relaunch?: number; launcher?: string; registry?: object; agents?: object[] } = {}) {
+function start(options: { main?: string; idleStop?: number; relaunch?: number; launcher?: string; registry?: object; agents?: object[]; fresh?: (thread: string) => boolean } = {}) {
   if (options.registry) writeFileSync(join(dir, 'threads.json'), JSON.stringify(options.registry))
   if (options.agents) writeFileSync(join(dir, 'agents'), JSON.stringify(options.agents))
   const seen: [string, boolean][] = (states = [])
@@ -57,6 +57,7 @@ function start(options: { main?: string; idleStop?: number; relaunch?: number; l
     idleStop: options.idleStop,
     relaunch: options.relaunch,
     launcher: options.launcher,
+    fresh: options.fresh,
     mainName: 'hex',
   })
 }
@@ -391,6 +392,54 @@ test('a thread\'s model and effort are kept, and a running session takes them by
   const fresh = await session('chat:7')
   await until(() => fresh.received.length)
   expect(fresh.received[0]).toMatchObject({ type: 'inbound', content: 'again' })
+})
+
+test('a fresh thread starts a new session instead of resuming its last, and says so in its env', async () => {
+  start({ registry: { dm: { name: 'DM', session: SESSION } }, agents: [], fresh: thread => thread === 'dm' })
+  hub.deliver('dm', 'DM', message)
+  const args = await launched()
+  expect(args).not.toContain('--resume')
+  expect(calls().some(args => args[0] === 'rm')).toBe(false)
+  expect(settingsOf(args).env).toEqual({ HEX_CHANNEL: CHANNEL, HEX_THREAD: 'dm', HEX_HUB: join(dir, 'hub.sock'), HEX_FRESH: '1' })
+  const NEXT = '0a1b2c3d-0000-4000-8000-000000000001'
+  saved(NEXT)
+  const { received } = await session('dm', NEXT)
+  await until(() => received.length)
+  expect(registry().dm).toEqual({ name: 'DM', session: NEXT })
+})
+
+test('a message to a fresh thread steers its session while Claude reports it working, and starts a new one once it is done', async () => {
+  start({ registry: { dm: { name: 'DM', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 999999, status: 'busy' }], fresh: thread => thread === 'dm' })
+  const { received, send } = await session('dm')
+  await Bun.sleep(50)
+  hub.deliver('dm', 'DM', message)
+  await until(() => received.length)
+  expect(received).toEqual([{ type: 'inbound', ...message }])
+  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid: 999999, status: 'idle' }]))
+  send({ type: 'state', thread: 'dm', busy: false })
+  await until(() => states.length)
+  hub.deliver('dm', 'DM', { content: 'next', meta: {} })
+  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
+  const args = await launched()
+  expect(args).not.toContain('--resume')
+  expect(received).toHaveLength(1)
+  const next = await session('dm', '0a1b2c3d-0000-4000-8000-000000000001')
+  await until(() => next.received.length)
+  expect(next.received[0]).toMatchObject({ type: 'inbound', content: 'next' })
+})
+
+test('a fresh thread keeps its session while it waits on a permission prompt or its turn is still running', async () => {
+  start({ registry: { dm: { name: 'DM', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 999999, state: 'blocked' }], fresh: thread => thread === 'dm' })
+  const { received, send } = await session('dm')
+  await Bun.sleep(50)
+  hub.deliver('dm', 'DM', message)
+  await until(() => received.length)
+  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid: 999999, status: 'idle' }]))
+  send({ type: 'state', thread: 'dm', busy: true })
+  await until(() => states.length)
+  hub.deliver('dm', 'DM', { content: 'more', meta: {} })
+  await until(() => received.length === 2)
+  expect(calls().some(args => args[0] === 'stop' || args[0] === '--bg')).toBe(false)
 })
 
 test('closing an idle thread stops its session right away, then forgets the thread', async () => {

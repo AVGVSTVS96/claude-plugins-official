@@ -617,10 +617,10 @@ index 0000000000000000000000000000000000000000..4486f907176ced9251ed152d6042954c
 +})
 diff --git a/external_plugins/telegram/bot.ts b/external_plugins/telegram/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..2428b2cd46be165831c2c060c72f54fa68562d50
+index 0000000000000000000000000000000000000000..3437c32b1dd9ec0d314e0884fe60bbc4696fdd72
 --- /dev/null
 +++ b/external_plugins/telegram/bot.ts
-@@ -0,0 +1,882 @@
+@@ -0,0 +1,883 @@
 +#!/usr/bin/env bun
 +import { Bot, GrammyError, InputFile, type Context } from 'grammy'
 +import type { Chat, MessageEntity, MessageOrigin, ReactionTypeEmoji } from 'grammy/types'
@@ -1114,6 +1114,7 @@ index 0000000000000000000000000000000000000000..2428b2cd46be165831c2c060c72f54fa
 +  mainName: process.env.HEX_NAME,
 +  call: callOrForget,
 +  state: settle,
++  fresh: thread => !thread.startsWith('-'),
 +  permission: (thread, request) => void ask(thread, request).catch(err => process.stderr.write(`telegram hub: couldn't relay a permission prompt to ${thread}: ${err}\n`)),
 +  failed: (thread, reason) => {
 +    const { chat_id, extra } = target(thread)

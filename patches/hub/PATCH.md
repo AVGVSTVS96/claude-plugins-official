@@ -4,7 +4,7 @@ id: hub
 summary: Add a client-agnostic hub that gives every chat thread its own Claude Code session and moves threads between clients.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: hub.patch
-patch_sha256: fc6f80065274b429a981aaba707d5f01abaa1f0cbb41fb2df407e4719c7b7793
+patch_sha256: fb2c0c4e8156b28a872cb085ffdecab6441074189e3cb1e07bda70f611419b87
 ---
 
 ## Intent
@@ -44,7 +44,12 @@ that session alone (`permission`). A thread can have its own model and effort
 client can add launch arguments per thread. `threads.json` keeps a digest of what a
 session started with, so a message to a session whose arguments changed goes to a
 fresh start of it (a session busy with background work keeps running and takes it
-as it is). Each session's settings enable only its client's plugin.
+as it is). A client can mark threads fresh: a fresh thread's session is never
+resumed, so a message that finds its session done (Claude reports it idle and its
+turn has ended) starts a new one, and a message while it still works, on its turn,
+a permission prompt or background agents, reaches it as it is. Its settings env
+says `HEX_FRESH`, so the launcher can build what the new session knows. Messages
+waiting for a new start keep their order. Each session's settings enable only its client's plugin.
 
 `tappable` turns `buzz://` links into web links through `open.html` on hex's
 site, since chat apps only link web addresses.
@@ -54,7 +59,7 @@ starts, never stops it for being idle, and starts it again when its session
 has been gone for 30 seconds.
 
 `hub/serve.ts` is the service: it runs every client (Telegram, Discord,
-Buzz, T3 Code, voice) in one process. Each chat client registers in `clients` with a `place` that opens a
+Buzz, T3 Code) in one process. Each chat client registers in `clients` with a `place` that opens a
 thread, led by a line saying what it's for when one is given, which lets `move` hand a thread to another client: its session
 stops once its turn ends (`release`) and resumes there with its memory
 (`adopt`). The main thread never leaves, so a copy of it continues there
@@ -89,7 +94,7 @@ instead (`fork`, `--fork-session`).
 
 `bun test hub` drives routing, queueing, resume, folders, running sessions, the main
 thread (started with the hub, kept running, revived), the launcher and its
-environment, failed starts, busy and idle, idle stops, stopping, closing, naming and
+environment, failed starts, busy and idle, idle stops, fresh threads, stopping, closing, naming and
 handoffs (release, adopt, fork), permission prompts and bad input against a fake `claude`. Run `scripts/verify`.
 
 ## Removal

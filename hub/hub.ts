@@ -37,7 +37,7 @@ export function title(text: string): string {
   return title
 }
 
-export function startHub({ stateDir, channel, main, mainName = 'main', call, state, failed, permission, args = () => [], idleStop = IDLE_STOP, relaunch = RELAUNCH, jobsDir = JOBS, hexDir = process.cwd(), projectsDir = join(CLAUDE, 'projects'), launcher = 'claude' }: {
+export function startHub({ stateDir, channel, main, mainName = 'main', call, state, failed, permission, args = () => [], fresh = () => false, idleStop = IDLE_STOP, relaunch = RELAUNCH, jobsDir = JOBS, hexDir = process.cwd(), projectsDir = join(CLAUDE, 'projects'), launcher = 'claude' }: {
   stateDir: string
   channel: string
   main?: string
@@ -47,6 +47,9 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
   failed: Failed
   permission?: (thread: string, request: Permission) => void
   args?: (thread: string) => string[]
+  // A fresh thread starts a new session for each message that finds its session done,
+  // instead of resuming it, and the launcher builds what that session knows of the chat.
+  fresh?: (thread: string) => boolean
   idleStop?: number
   relaunch?: number
   jobsDir?: string
@@ -192,7 +195,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
     if (prompt || queued.has(thread)) setState(thread, true)
     launching.set(thread, undefined)
     if (fork) return start(known, thread, prompt, fork)
-    if (!known.session) return start(known, thread, prompt)
+    if (!known.session || fresh(thread)) return start(known, thread, prompt)
     const session = known.session
     agent(session, running => {
       if (running) return
@@ -238,7 +241,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
   }
 
   function start(known: Thread, thread: string, prompt?: string, fork?: string) {
-    const bound = { HEX_CHANNEL: channel, HEX_THREAD: thread, HEX_HUB: socketPath, ...(thread === main ? { HEX_MAIN: '1' } : {}) }
+    const bound = { HEX_CHANNEL: channel, HEX_THREAD: thread, HEX_HUB: socketPath, ...(thread === main ? { HEX_MAIN: '1' } : {}), ...(fresh(thread) ? { HEX_FRESH: '1' } : {}) }
     const launchArgs = extra(thread)
     const launched = launchArgs.length ? digest(launchArgs) : undefined
     if (known.launched !== launched) {
@@ -251,7 +254,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
         '--bg',
         '--channels', channel,
         '--name', known.name,
-        ...(fork ? ['--resume', fork, '--fork-session'] : known.session ? ['--resume', known.session] : []),
+        ...(fork ? ['--resume', fork, '--fork-session'] : known.session && !fresh(thread) ? ['--resume', known.session] : []),
         ...launchArgs,
         '--settings', JSON.stringify({ enabledPlugins: { [plugin]: true }, env: bound }),
         ...(prompt ? [prompt] : []),
@@ -301,7 +304,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
 
   function deliver(thread: string, name: string, message: Message) {
     const socket = live.get(thread)
-    if (socket && !stale(thread)) return send(socket, { type: 'inbound', ...message })
+    if (socket && !stale(thread) && !fresh(thread)) return send(socket, { type: 'inbound', ...message })
     if (socket) return refresh(thread, message)
     queued.set(thread, [...(queued.get(thread) ?? []), message])
     launch(thread, name)
@@ -318,11 +321,14 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
   }
 
   // Delivers a message to a fresh start of the thread's session, so it gets new launch
-  // arguments; a session busy with background work keeps running and takes it as it is.
+  // arguments or, in a fresh thread, a new session; a session still working, on its turn
+  // or on background agents, keeps running and takes it as it is, unless earlier messages
+  // already wait for the new start.
   function refresh(thread: string, message: Message) {
     agent(current(thread) ?? '', running => {
       const socket = live.get(thread)
-      if (socket && running?.status === 'busy') return send(socket, { type: 'inbound', ...message })
+      const working = fresh(thread) ? busy.has(thread) || (running && running.status !== 'idle') : running?.status === 'busy'
+      if (socket && working && !queued.has(thread)) return send(socket, { type: 'inbound', ...message })
       queued.set(thread, [...(queued.get(thread) ?? []), message])
       cycle(thread, running)
     })

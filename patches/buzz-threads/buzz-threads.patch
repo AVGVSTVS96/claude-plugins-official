@@ -1523,10 +1523,10 @@ index 0000000000000000000000000000000000000000..7bd476828c59d433b49add7dbed4dcc3
 +})
 diff --git a/external_plugins/buzz/bot.ts b/external_plugins/buzz/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..0548e4226c1db730b34fe1ae44e64855ad598065
+index 0000000000000000000000000000000000000000..6e35f63f4f07f94de45c7c2294e74d9b2753b41c
 --- /dev/null
 +++ b/external_plugins/buzz/bot.ts
-@@ -0,0 +1,869 @@
+@@ -0,0 +1,870 @@
 +#!/usr/bin/env bun
 +import { readFileSync, writeFileSync, mkdirSync, statSync, realpathSync, chmodSync, renameSync } from 'fs'
 +import { createHash } from 'crypto'
@@ -2156,6 +2156,7 @@ index 0000000000000000000000000000000000000000..0548e4226c1db730b34fe1ae44e64855
 +    channel: 'plugin:buzz@hex',
 +    call,
 +    state: showState,
++    fresh: thread => channels.get(thread)?.dm ?? false,
 +    failed: (thread, reason) => {
 +      void post(thread, `Couldn't start this thread's session: ${reason}`).catch(() => {})
 +    },

@@ -4,7 +4,7 @@ id: discord-threads
 summary: Rework the Discord channel so every thread in a server is its own Claude Code session, Claude-tag style, through the thread hub.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: discord-threads.patch
-patch_sha256: 5b5bb851c6bc3431e85132c6f0320e1746a08031c60464e02c0281329cf58a69
+patch_sha256: d7e36a05ce68944714119348550831d17f807b4d7feb1f5777145e706a75e08d
 ---
 
 ## Intent
@@ -49,7 +49,8 @@ Discord is the place for deeper work, Claude-tag style:
   and they can be read, searched and posted into.
 - A DM to the bot is its own conversation: one session named `DM`,
   separate from every thread. Thread-only tools (`rename_thread`,
-  `close_thread`) say a DM is not a thread.
+  `close_thread`) say a DM is not a thread. A DM is a fresh thread (see the
+  hub): each message that finds its session done gets a new one.
 - Forum posts get sessions like any thread. A new post carries its title as
   `post_title` instead of asking for a rename.
 - The typing indicator follows the session's real busy state.

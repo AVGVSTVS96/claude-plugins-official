@@ -173,7 +173,7 @@ async function session(thread: string) {
     return until(() => received.find(line => line.type === 'result' && line.id === id))
   }
   await call('list_channels', {})
-  return { received, call }
+  return { received, call, send }
 }
 
 test('a message in a thread names the channel the thread is in', async () => {
@@ -422,8 +422,9 @@ test('a vote on the bot\'s poll reaches its thread as the answer, a retracted vo
   expect(received.some(line => line.meta?.poll === 'Dinner?' || line.meta?.vote === 'Tacos')).toBe(false)
 })
 
-test('a DM is its own session named DM, and replies go back to the DM', async () => {
+test('a DM is its own session named DM, a message reaches it while it works, and replies go back to the DM', async () => {
   const mine = await session(dm.id)
+  mine.send({ type: 'state', thread: dm.id, busy: true })
   const message = { ...say(dm, 30, 'quick one'), inGuild: () => false, channel: dm, mentions: { has: () => false }, react: async () => {} }
   handlers.get('messageCreate')!(message)
   const inbound = await until(() => mine.received.find(line => line.type === 'inbound' && line.content === 'quick one'))

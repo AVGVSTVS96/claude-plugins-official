@@ -4,7 +4,7 @@ id: telegram-topics
 summary: Rework the Telegram channel so every forum topic in a group is its own Claude Code session, through the thread hub.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: telegram-topics.patch
-patch_sha256: 1cc72a0ba147e6f0ac28c31379148ac7efbaee282dc5f746547171148dcb2b32
+patch_sha256: f208ca166482f03924e32b7b2070efb7d63f1585ce484ae5432f5008a121b231
 ---
 
 ## Intent
@@ -36,7 +36,8 @@ On top of upstream:
 - `reply` can post into another topic by name.
 - The typing indicator follows the session's real busy state.
 - A DM to the bot is its own thread: one session named `DM`, separate
-  from General, and its replies go back to the DM.
+  from General, and its replies go back to the DM. A DM is a fresh thread
+  (see the hub): each message that finds its session done gets a new one.
 - A session that fails to start says why, in its topic.
 - `reply` refuses to attach channel state or any `.env` file.
 - General is the hub's main thread, named after `HEX_NAME`.

@@ -491,6 +491,7 @@ const hub = startHub({
   mainName: process.env.HEX_NAME,
   call: callOrForget,
   state: settle,
+  fresh: thread => !thread.startsWith('-'),
   permission: (thread, request) => void ask(thread, request).catch(err => process.stderr.write(`telegram hub: couldn't relay a permission prompt to ${thread}: ${err}\n`)),
   failed: (thread, reason) => {
     const { chat_id, extra } = target(thread)

@@ -455,11 +455,13 @@ function serve(token: string) {
     }
   }
 
+  const dms = new Set<string>()
   const hub = startHub({
     stateDir: STATE_DIR,
     channel: 'plugin:discord@hex',
     call,
     state: showTyping,
+    fresh: thread => dms.has(thread),
     failed: (thread, reason) => {
       void threadChannel(thread).then(ch => ch.send(`Couldn't start this thread's session: ${reason}`)).catch(() => {})
     },
@@ -472,6 +474,7 @@ function serve(token: string) {
   // A tag in a channel starts a thread on that message, Claude-tag style;
   // inside a thread every message reaches its session without one.
   async function threadOf(msg: DiscordMessage): Promise<ThreadChannel | DMChannel | undefined> {
+    if (msg.channel.isDMBased()) dms.add(msg.channelId)
     if (msg.channel.isThread() || msg.channel.isDMBased()) return msg.channel as ThreadChannel | DMChannel
     if (!isText(msg.channel) || !client.user || !msg.mentions.has(client.user)) return
     if (msg.thread) return msg.thread

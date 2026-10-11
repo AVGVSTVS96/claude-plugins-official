@@ -627,6 +627,7 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
     channel: 'plugin:buzz@hex',
     call,
     state: showState,
+    fresh: thread => channels.get(thread)?.dm ?? false,
     failed: (thread, reason) => {
       void post(thread, `Couldn't start this thread's session: ${reason}`).catch(() => {})
     },
