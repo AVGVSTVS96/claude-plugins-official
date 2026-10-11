@@ -25,7 +25,7 @@ const TWILIO_SID = process.env.TWILIO_ACCOUNT_SID
 const TWILIO_TOKEN = process.env.TWILIO_AUTH_TOKEN
 const TWILIO_NUMBER = process.env.TWILIO_NUMBER
 const CALLER_NUMBER = process.env.CALLER_NUMBER
-const PUBLIC_URL = process.env.VOICE_PUBLIC_URL
+const PUBLIC_HOST = process.env.VOICE_PUBLIC_URL?.replace(/^\w+:\/\//, '')
 const HUB = process.env.HEX_HUB
 const THREAD = process.env.HEX_CHANNEL?.startsWith('plugin:voice@') ? process.env.HEX_THREAD : undefined
 
@@ -241,7 +241,7 @@ function session(extra: object = {}) {
 }
 
 async function dial(to = CALLER_NUMBER) {
-  if (!KEY || !TWILIO_SID || !TWILIO_TOKEN || !TWILIO_NUMBER || !PUBLIC_URL)
+  if (!KEY || !TWILIO_SID || !TWILIO_TOKEN || !TWILIO_NUMBER || !PUBLIC_HOST)
     throw new Error(`phone calls need TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_NUMBER and VOICE_PUBLIC_URL in ${join(STATE_DIR, '.env')}`)
   if (!to) throw new Error('no number to call: pass to, or set CALLER_NUMBER')
   const token = crypto.randomUUID()
@@ -252,7 +252,7 @@ async function dial(to = CALLER_NUMBER) {
     body: new URLSearchParams({
       To: to,
       From: TWILIO_NUMBER,
-      Twiml: `<Response><Connect><Stream url="wss://${PUBLIC_URL.replace(/^\w+:\/\//, '')}/twilio/${token}" /></Connect></Response>`,
+      Url: `https://${PUBLIC_HOST}/twilio/${token}/twiml`,
     }),
   })
   if (!response.ok) {
@@ -343,8 +343,10 @@ Bun.serve<Phone>({
   hostname: '127.0.0.1',
   fetch(request, server) {
     const { pathname } = new URL(request.url)
-    const token = pathname.match(/^\/twilio\/([\w-]+)$/)?.[1]
-    if (token && dials.delete(token)) return server.upgrade(request, { data: {} }) ? undefined : new Response('upgrade failed', { status: 400 })
+    const [, token, twiml] = pathname.match(/^\/twilio\/([\w-]+)(\/twiml)?$/) ?? []
+    if (twiml && dials.has(token))
+      return new Response(`<Response><Connect><Stream url="wss://${PUBLIC_HOST}/twilio/${token}" /></Connect></Response>`, { headers: { 'content-type': 'text/xml' } })
+    if (token && !twiml && dials.delete(token)) return server.upgrade(request, { data: {} }) ? undefined : new Response('upgrade failed', { status: 400 })
     if (pathname === '/') return new Response(page, { headers: { 'content-type': 'text/html; charset=utf-8' } })
     if (pathname === '/session' && request.method === 'POST') return start(request)
     if (pathname === '/phone' && request.method === 'POST')
