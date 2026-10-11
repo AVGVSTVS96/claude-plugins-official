@@ -1094,15 +1094,16 @@ index 0000000000000000000000000000000000000000..bda8244a4ec7c01c8a526a5c5cef292a
 +}
 diff --git a/hub/serve.ts b/hub/serve.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..e548a4b258fd9dd91ce6a14a70abdfd2fb1d7fd0
+index 0000000000000000000000000000000000000000..6f0497a3e3fb4ffea89c3139d93d8f17c9730a9b
 --- /dev/null
 +++ b/hub/serve.ts
-@@ -0,0 +1,6 @@
+@@ -0,0 +1,7 @@
 +await Promise.all([
 +  import('../external_plugins/telegram/bot.ts'),
 +  import('../external_plugins/discord/bot.ts'),
 +  import('../external_plugins/buzz/bot.ts'),
 +  import('../external_plugins/t3/bot.ts'),
++  import('../external_plugins/voice/bot.ts'),
 +])
 diff --git a/hub/state.ts b/hub/state.ts
 new file mode 100644

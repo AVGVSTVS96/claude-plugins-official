@@ -33,10 +33,10 @@ index 0000000000000000000000000000000000000000..07fdedd6c4bc9e7072f8d860f7eadd42
 +}
 diff --git a/external_plugins/voice/README.md b/external_plugins/voice/README.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..83ece7ef6b87b958c6a30917a8ee927269b09eff
+index 0000000000000000000000000000000000000000..598816f1cf2797e53f26dbffdde252fed9de36ac
 --- /dev/null
 +++ b/external_plugins/voice/README.md
-@@ -0,0 +1,87 @@
+@@ -0,0 +1,91 @@
 +# voice
 +
 +Live voice calls for Claude Code. OpenAI's `gpt-live-1` talks with you in real
@@ -106,6 +106,10 @@ index 0000000000000000000000000000000000000000..83ece7ef6b87b958c6a30917a8ee9272
 +   `{ "plugin": "voice", "marketplace": "hex" }` to `allowedChannelPlugins` in
 +   managed settings, then start it with `--channels plugin:voice@hex`.
 +
++   In [hex](https://github.com/AVGVSTVS96/hex), the hub runs `bot.ts`, which
++   keeps a session named `voice` always running with this channel, so the
++   call page comes back by itself after restarts and updates.
++
 +3. Open the call page. The browser only allows the microphone on `localhost`
 +   or HTTPS:
 +   - On the same machine: `http://localhost:8790`.
@@ -124,6 +128,33 @@ index 0000000000000000000000000000000000000000..83ece7ef6b87b958c6a30917a8ee9272
 +- Custom voices need OpenAI sales approval. Built-in voices work with any key.
 +- Voice costs $0.05 a minute, billed per second, on top of Claude usage.
 +- One call at a time. A new call ends the previous one.
+diff --git a/external_plugins/voice/bot.ts b/external_plugins/voice/bot.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..1e7cc26cdc2506b96d7dc4dfa64731dfe4846079
+--- /dev/null
++++ b/external_plugins/voice/bot.ts
+@@ -0,0 +1,21 @@
++import { mkdirSync } from 'fs'
++import { join } from 'path'
++import { startHub } from '../../hub/hub.ts'
++
++const HEX_DIR = process.env.HEX_DIR ?? process.cwd()
++const STATE_DIR = process.env.VOICE_STATE_DIR ?? join(HEX_DIR, 'state', 'voice')
++mkdirSync(STATE_DIR, { recursive: true })
++
++startHub({
++  stateDir: STATE_DIR,
++  channel: process.env.VOICE_CHANNEL ?? 'plugin:voice@hex',
++  main: 'voice',
++  mainName: 'voice',
++  hexDir: HEX_DIR,
++  launcher: process.env.HEX_LAUNCHER,
++  call: async (_, tool) => {
++    throw new Error(`unknown tool: ${tool}`)
++  },
++  state: () => {},
++  failed: (_, reason) => process.stderr.write(`voice hub: the voice session couldn't start: ${reason}\n`),
++})
 diff --git a/external_plugins/voice/bun.lock b/external_plugins/voice/bun.lock
 new file mode 100644
 index 0000000000000000000000000000000000000000..fa671dec5887946cb4acf6545fea0741c1180c40
@@ -566,15 +597,16 @@ index 0000000000000000000000000000000000000000..6fb7ade3ee476a5787d80414f42063b4
 +</html>
 diff --git a/external_plugins/voice/server.ts b/external_plugins/voice/server.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..424d5dd0c9bdc3b2761c1bebbdc5483672873ac1
+index 0000000000000000000000000000000000000000..41a337b50e5a6f936e7dc9ad58c9ba87929900ac
 --- /dev/null
 +++ b/external_plugins/voice/server.ts
-@@ -0,0 +1,235 @@
+@@ -0,0 +1,263 @@
 +#!/usr/bin/env bun
 +import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 +import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 +import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 +import { readFileSync } from 'fs'
++import { connect } from 'net'
 +import { homedir } from 'os'
 +import { join } from 'path'
 +import { Call, transcript, type Speaker, type Task } from './call.ts'
@@ -592,6 +624,8 @@ index 0000000000000000000000000000000000000000..424d5dd0c9bdc3b2761c1bebbdc54836
 +const VOICE = process.env.VOICE
 +const PORT = Number(process.env.VOICE_PORT ?? 8790)
 +const API = 'https://api.openai.com/v1/live/sessions'
++const HUB = process.env.HEX_HUB
++const THREAD = process.env.HEX_CHANNEL?.startsWith('plugin:voice@') ? process.env.HEX_THREAD : undefined
 +
 +const VOICE_PROMPT = `You are the voice of a personal assistant, talking with the person it works for. Speak warmly and naturally, like a sharp friend: plain words, short answers.
 +
@@ -793,7 +827,32 @@ index 0000000000000000000000000000000000000000..424d5dd0c9bdc3b2761c1bebbdc54836
 +  return Response.json(result, { status: 201 })
 +}
 +
++function joinHub() {
++  const socket = connect(HUB!)
++  let buffer = ''
++  socket.setEncoding('utf8')
++  socket.on('connect', () => {
++    setTimeout(() => socket.write(JSON.stringify({ type: 'hello', thread: THREAD, session: process.env.CLAUDE_CODE_SESSION_ID }) + '\n'), 1000)
++  })
++  socket.on('data', (chunk: string) => {
++    buffer += chunk
++    for (let end = buffer.indexOf('\n'); end >= 0; end = buffer.indexOf('\n')) {
++      const event = JSON.parse(buffer.slice(0, end))
++      buffer = buffer.slice(end + 1)
++      if (event.type === 'inbound') deliver(event.content, event.meta ?? {})
++    }
++  })
++  socket.on('close', () => setTimeout(joinHub, 2000))
++  socket.on('error', () => {})
++}
++
++mcp.oninitialized = () => {
++  if (HUB && THREAD) joinHub()
++}
++
 +await mcp.connect(new StdioServerTransport())
++process.stdin.on('end', () => process.exit(0))
++process.stdin.on('close', () => process.exit(0))
 +
 +Bun.serve({
 +  port: PORT,

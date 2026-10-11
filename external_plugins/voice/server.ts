@@ -3,6 +3,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { readFileSync } from 'fs'
+import { connect } from 'net'
 import { homedir } from 'os'
 import { join } from 'path'
 import { Call, transcript, type Speaker, type Task } from './call.ts'
@@ -20,6 +21,8 @@ const KEY = process.env.OPENAI_API_KEY
 const VOICE = process.env.VOICE
 const PORT = Number(process.env.VOICE_PORT ?? 8790)
 const API = 'https://api.openai.com/v1/live/sessions'
+const HUB = process.env.HEX_HUB
+const THREAD = process.env.HEX_CHANNEL?.startsWith('plugin:voice@') ? process.env.HEX_THREAD : undefined
 
 const VOICE_PROMPT = `You are the voice of a personal assistant, talking with the person it works for. Speak warmly and naturally, like a sharp friend: plain words, short answers.
 
@@ -221,7 +224,32 @@ async function start(request: Request) {
   return Response.json(result, { status: 201 })
 }
 
+function joinHub() {
+  const socket = connect(HUB!)
+  let buffer = ''
+  socket.setEncoding('utf8')
+  socket.on('connect', () => {
+    setTimeout(() => socket.write(JSON.stringify({ type: 'hello', thread: THREAD, session: process.env.CLAUDE_CODE_SESSION_ID }) + '\n'), 1000)
+  })
+  socket.on('data', (chunk: string) => {
+    buffer += chunk
+    for (let end = buffer.indexOf('\n'); end >= 0; end = buffer.indexOf('\n')) {
+      const event = JSON.parse(buffer.slice(0, end))
+      buffer = buffer.slice(end + 1)
+      if (event.type === 'inbound') deliver(event.content, event.meta ?? {})
+    }
+  })
+  socket.on('close', () => setTimeout(joinHub, 2000))
+  socket.on('error', () => {})
+}
+
+mcp.oninitialized = () => {
+  if (HUB && THREAD) joinHub()
+}
+
 await mcp.connect(new StdioServerTransport())
+process.stdin.on('end', () => process.exit(0))
+process.stdin.on('close', () => process.exit(0))
 
 Bun.serve({
   port: PORT,

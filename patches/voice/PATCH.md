@@ -4,7 +4,7 @@ id: voice
 summary: Add a voice channel where OpenAI's gpt-live-1 holds a live call and hands every real request to the Claude Code session.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: voice.patch
-patch_sha256: b9de2b4cfed6547fa56dfc6545fb59ea65b0bfd5068f9213a45888df20720c8d
+patch_sha256: ed51f7a030494eaef01a15d28c27c2bf829a739701f66b7f062163cac36322cf
 ---
 
 ## Intent
@@ -28,6 +28,10 @@ plugin with no hub code.
   (`session.thinking.append`) and `task` (updates the board and sends it as
   `session.thinking.append` with no delegation id). Each tool resolves on
   OpenAI's matching `*.appended` acknowledgement, or fails with its `error`.
+- `bot.ts` runs in the hub service (`hub/serve.ts`) and keeps one session,
+  `voice`, always running as its main thread, so the call page is back as
+  soon as the hub restarts it. That session's `server.ts` says hello on the
+  hub socket, which also lets other sessions message it as `inbound`.
 - When the call closes, pending handoffs and the last words reach Claude
   with a "call ended" message.
 

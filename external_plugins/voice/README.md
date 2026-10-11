@@ -67,6 +67,10 @@ Claude to stop that task.
    `{ "plugin": "voice", "marketplace": "hex" }` to `allowedChannelPlugins` in
    managed settings, then start it with `--channels plugin:voice@hex`.
 
+   In [hex](https://github.com/AVGVSTVS96/hex), the hub runs `bot.ts`, which
+   keeps a session named `voice` always running with this channel, so the
+   call page comes back by itself after restarts and updates.
+
 3. Open the call page. The browser only allows the microphone on `localhost`
    or HTTPS:
    - On the same machine: `http://localhost:8790`.
