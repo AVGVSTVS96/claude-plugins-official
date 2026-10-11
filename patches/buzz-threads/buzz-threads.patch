@@ -3918,10 +3918,10 @@ index 0000000000000000000000000000000000000000..44eff7405c67b2f404d4fa71ba85c228
 +}
 diff --git a/external_plugins/buzz/server.ts b/external_plugins/buzz/server.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..e512149a96cb6da37904f205c02c9b3ee3cf9176
+index 0000000000000000000000000000000000000000..1347ae67f1a8922662dcbe909dcaef2efff659f0
 --- /dev/null
 +++ b/external_plugins/buzz/server.ts
-@@ -0,0 +1,290 @@
+@@ -0,0 +1,292 @@
 +#!/usr/bin/env bun
 +import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 +import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
@@ -3957,6 +3957,7 @@ index 0000000000000000000000000000000000000000..e512149a96cb6da37904f205c02c9b3e
 +  tools: [
 +    {
 +      name: 'reply',
++      _meta: { 'anthropic/alwaysLoad': true },
 +      description: 'Reply in this Buzz thread, or post in another one by name. Optionally pass reply_to (message_id) for threading, and files (absolute paths) to attach images or other files.',
 +      inputSchema: {
 +        type: 'object',
@@ -3983,6 +3984,7 @@ index 0000000000000000000000000000000000000000..e512149a96cb6da37904f205c02c9b3e
 +    },
 +    {
 +      name: 'react',
++      _meta: { 'anthropic/alwaysLoad': true },
 +      description: 'Add an emoji reaction to a Buzz message, or take yours off.',
 +      inputSchema: {
 +        type: 'object',

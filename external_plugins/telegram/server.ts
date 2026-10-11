@@ -37,6 +37,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
       name: 'reply',
+      _meta: { 'anthropic/alwaysLoad': true },
       description: 'Reply in this Telegram thread, or post in another one by name. Optionally pass reply_to (message_id) for threading, files (absolute paths) to attach images or documents, and buttons for tappable choices.',
       inputSchema: {
         type: 'object',
@@ -67,6 +68,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'react',
+      _meta: { 'anthropic/alwaysLoad': true },
       description: 'Add an emoji reaction to a Telegram message, or take yours off. Telegram only accepts a fixed whitelist (👍 👎 ❤ 🔥 👀 🎉 etc) — non-whitelisted emoji will be rejected.',
       inputSchema: {
         type: 'object',

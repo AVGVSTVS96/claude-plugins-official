@@ -4,7 +4,7 @@ id: telegram-topics
 summary: Rework the Telegram channel so every forum topic in a group is its own Claude Code session, through the thread hub.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: telegram-topics.patch
-patch_sha256: de813e75af85cd40c8ca3dc05b7ef81d7f0ce878268c4fcece915527fbd6559f
+patch_sha256: 0ae8a9a447d662e02b897ae8591218fd078c9f8bfec7b5a99b4964d9b0e458d0
 ---
 
 ## Intent
@@ -40,6 +40,8 @@ On top of upstream:
   (see the hub): each message that finds its session done gets a new one.
 - A session that fails to start says why, in its topic.
 - `reply` refuses to attach channel state or any `.env` file.
+- `reply` and `react` are always loaded (`_meta` `anthropic/alwaysLoad`),
+  so a session's first reaction needs no tool search round first.
 - General is the hub's main thread, named after `HEX_NAME`.
 - A message that replies to an earlier one says which, in `reply_to_*`
   meta: its id, author, text or caption, the part highlighted, and the photo

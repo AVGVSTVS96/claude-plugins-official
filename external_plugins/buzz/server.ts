@@ -33,6 +33,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
       name: 'reply',
+      _meta: { 'anthropic/alwaysLoad': true },
       description: 'Reply in this Buzz thread, or post in another one by name. Optionally pass reply_to (message_id) for threading, and files (absolute paths) to attach images or other files.',
       inputSchema: {
         type: 'object',
@@ -59,6 +60,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'react',
+      _meta: { 'anthropic/alwaysLoad': true },
       description: 'Add an emoji reaction to a Buzz message, or take yours off.',
       inputSchema: {
         type: 'object',

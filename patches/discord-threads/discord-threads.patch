@@ -1475,10 +1475,10 @@ index eac89c3befd8ebb90758a9acdf7f400de8c9f298..87aff60aefe5d5610abfa8d4e6e2b719
    "dependencies": {
      "@modelcontextprotocol/sdk": "^1.0.0",
 diff --git a/external_plugins/discord/server.ts b/external_plugins/discord/server.ts
-index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..3524a664a2eeb4003db997322621cfc465995991 100644
+index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..ca1634d043a645ebd055f0d37aaa45013dba1637 100644
 --- a/external_plugins/discord/server.ts
 +++ b/external_plugins/discord/server.ts
-@@ -1,533 +1,42 @@
+@@ -1,533 +1,43 @@
  #!/usr/bin/env bun
 -/**
 - * Discord channel for Claude Code.
@@ -2015,6 +2015,7 @@ index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..3524a664a2eeb4003db997322621cfc4
        name: 'reply',
 -      description:
 -        'Reply on Discord. Pass chat_id from the inbound message. Optionally pass reply_to (message_id) for threading, and files (absolute paths) to attach images or other files.',
++      _meta: { 'anthropic/alwaysLoad': true },
 +      description: 'Reply in this Discord thread, or post in another one by name. Optionally pass reply_to (message_id) for threading, files (absolute paths) to attach images or other files, silent to send without a notification, and buttons for tappable choices.',
        inputSchema: {
          type: 'object',
@@ -2025,7 +2026,7 @@ index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..3524a664a2eeb4003db997322621cfc4
            reply_to: {
              type: 'string',
              description: 'Message ID to thread under. Use message_id from the inbound <channel> block, or an id from fetch_messages.',
-@@ -537,364 +46,257 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
+@@ -537,364 +47,258 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
              items: { type: 'string' },
              description: 'Absolute file paths to attach (images, logs, etc). Max 10 files, 25MB each.',
            },
@@ -2043,6 +2044,7 @@ index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..3524a664a2eeb4003db997322621cfc4
      {
        name: 'react',
 -      description: 'Add an emoji reaction to a Discord message. Unicode emoji work directly; custom emoji need the <:name:id> form.',
++      _meta: { 'anthropic/alwaysLoad': true },
 +      description: 'Add an emoji reaction to a Discord message, or take the bot\'s own off with remove. Unicode emoji work directly; custom emoji need the <:name:id> form.',
        inputSchema: {
          type: 'object',

@@ -31,6 +31,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
       name: 'reply',
+      _meta: { 'anthropic/alwaysLoad': true },
       description: 'Reply in this Discord thread, or post in another one by name. Optionally pass reply_to (message_id) for threading, files (absolute paths) to attach images or other files, silent to send without a notification, and buttons for tappable choices.',
       inputSchema: {
         type: 'object',
@@ -58,6 +59,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'react',
+      _meta: { 'anthropic/alwaysLoad': true },
       description: 'Add an emoji reaction to a Discord message, or take the bot\'s own off with remove. Unicode emoji work directly; custom emoji need the <:name:id> form.',
       inputSchema: {
         type: 'object',

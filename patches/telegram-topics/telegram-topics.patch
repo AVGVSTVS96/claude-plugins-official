@@ -1550,10 +1550,10 @@ index b80fcea0f4f395012586cf5fac3682270e7fb14f..a8d061bfa3c603151ab2491dc06af4fa
    "dependencies": {
      "@modelcontextprotocol/sdk": "^1.0.0",
 diff --git a/external_plugins/telegram/server.ts b/external_plugins/telegram/server.ts
-index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..60cfdcc6c115339ff39ae2f1b07d03164bfb672d 100644
+index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..3ad0d0e139ac41ee45e835cbfc15db54a23d14b8 100644
 --- a/external_plugins/telegram/server.ts
 +++ b/external_plugins/telegram/server.ts
-@@ -1,467 +1,51 @@
+@@ -1,467 +1,52 @@
  #!/usr/bin/env bun
 -/**
 - * Telegram channel for Claude Code.
@@ -2029,6 +2029,7 @@ index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..60cfdcc6c115339ff39ae2f1b07d0316
        name: 'reply',
 -      description:
 -        'Reply on Telegram. Pass chat_id from the inbound message. Optionally pass reply_to (message_id) for threading, and files (absolute paths) to attach images or documents.',
++      _meta: { 'anthropic/alwaysLoad': true },
 +      description: 'Reply in this Telegram thread, or post in another one by name. Optionally pass reply_to (message_id) for threading, files (absolute paths) to attach images or documents, and buttons for tappable choices.',
        inputSchema: {
          type: 'object',
@@ -2042,7 +2043,7 @@ index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..60cfdcc6c115339ff39ae2f1b07d0316
            reply_to: {
              type: 'string',
              description: 'Message ID to thread under. Use message_id from the inbound <channel> block.',
-@@ -469,28 +53,29 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
+@@ -469,28 +54,30 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
            files: {
              type: 'array',
              items: { type: 'string' },
@@ -2067,6 +2068,7 @@ index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..60cfdcc6c115339ff39ae2f1b07d0316
      {
        name: 'react',
 -      description: 'Add an emoji reaction to a Telegram message. Telegram only accepts a fixed whitelist (👍 👎 ❤ 🔥 👀 🎉 etc) — non-whitelisted emoji will be rejected.',
++      _meta: { 'anthropic/alwaysLoad': true },
 +      description: 'Add an emoji reaction to a Telegram message, or take yours off. Telegram only accepts a fixed whitelist (👍 👎 ❤ 🔥 👀 🎉 etc) — non-whitelisted emoji will be rejected.',
        inputSchema: {
          type: 'object',
@@ -2081,7 +2083,7 @@ index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..60cfdcc6c115339ff39ae2f1b07d0316
        },
      },
      {
-@@ -506,540 +91,197 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
+@@ -506,540 +93,197 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
      },
      {
        name: 'edit_message',
