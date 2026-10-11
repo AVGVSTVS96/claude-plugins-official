@@ -125,7 +125,9 @@ function known(thread: string) {
   return thread
 }
 
-function prompt(thread: string, blocks: ContentBlock[], client: AgentContext): Promise<PromptResponse> {
+// T3's MCP credentials live only in its running server, so when T3 quits or restarts
+// mid-turn (the prompt's request aborts) the session's T3 tools are dead: it stops like a cancel.
+function prompt(thread: string, blocks: ContentBlock[], client: AgentContext, signal: AbortSignal): Promise<PromptResponse> {
   const name = hub.name(known(thread))!
   if (turns.has(thread)) throw RequestError.invalidRequest(undefined, 'this thread is already working on a prompt')
   const session = hub.session(thread)
@@ -135,6 +137,7 @@ function prompt(thread: string, blocks: ContentBlock[], client: AgentContext): P
   return new Promise((resolve, reject) => {
     const turn: Turn = { client, sent: Promise.resolve(), resolve, reject, ...(compact && { compaction: randomUUID() }) }
     turns.set(thread, turn)
+    signal.addEventListener('abort', () => turns.get(thread) === turn && cancel(thread), { once: true })
     if (session) turn.reader = reader(thread, session, turn, false)
     if (!compact) {
       const message = { content: render(blocks), meta: { ts: new Date().toISOString() } }
@@ -254,7 +257,7 @@ function serve(socket: Socket) {
       return { configOptions: options(params.sessionId) }
     })
     .onRequest('session/set_config_option', ({ params }) => configure(params.sessionId, params.configId, params.value))
-    .onRequest('session/prompt', ({ params, client }) => prompt(params.sessionId, params.prompt, client))
+    .onRequest('session/prompt', ({ params, client, signal }) => prompt(params.sessionId, params.prompt, client, signal))
     .onNotification('session/cancel', ({ params }) => cancel(params.sessionId))
     .connect(ndJsonStream(Writable.toWeb(socket) as WritableStream<Uint8Array>, Readable.toWeb(socket) as ReadableStream<Uint8Array>))
   socket.on('error', () => {})

@@ -45,7 +45,7 @@ index 0000000000000000000000000000000000000000..214c29d1395919ce175f26d140526368
 +registry=https://registry.npmjs.org/
 diff --git a/external_plugins/t3/README.md b/external_plugins/t3/README.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..a76e4586c0af750eea2fd3a071f231191409f684
+index 0000000000000000000000000000000000000000..4fa1426f54c50902a1342025081e9c338a2541ba
 --- /dev/null
 +++ b/external_plugins/t3/README.md
 @@ -0,0 +1,12 @@
@@ -53,7 +53,7 @@ index 0000000000000000000000000000000000000000..a76e4586c0af750eea2fd3a071f23119
 +
 +A channel that serves the agent to [T3 Code](https://github.com/pingdotgg/t3code) as an [ACP](https://agentclientprotocol.com) agent. Pick it in T3's agent picker, in any project, and that T3 thread is its own Claude Code session working in that project, run by the hub like every Telegram topic or Buzz thread. Its intent, invariants and design live in [`patches/t3-acp/PATCH.md`](../../patches/t3-acp/PATCH.md).
 +
-+- `bot.ts` runs in the hub service (`bun hub/serve.ts`) next to Telegram, Discord and Buzz. It embeds the hub and serves ACP on `acp.sock`: `session/new` opens a thread in the request's `cwd`, `session/prompt` delivers the message and streams the turn back, `session/cancel` stops it, and `session/resume` picks a thread up again after T3 restarts.
++- `bot.ts` runs in the hub service (`bun hub/serve.ts`) next to Telegram, Discord and Buzz. It embeds the hub and serves ACP on `acp.sock`: `session/new` opens a thread in the request's `cwd`, `session/prompt` delivers the message and streams the turn back, `session/cancel` or T3 quitting mid-turn stops it, `session/resume` picks a thread up again after T3 restarts, and `session/set_config_option` sets the thread's model and effort from T3's pickers.
 +- `transcript.ts` turns a session's Claude Code transcript into ACP `session/update` notifications: text, thinking, tool calls and their results.
 +- `server.ts` is the channel each session loads. It only delivers T3's messages: the session's own output is what T3 shows, so it has no reply tool.
 +- `acp.ts` is what T3 starts. It relays stdio to `acp.sock`, so T3 reaches the agent that's already running instead of starting one.
@@ -89,10 +89,10 @@ index 0000000000000000000000000000000000000000..c12bf015726ea411ac246ded94d2493c
 +socket.on('close', () => process.exit(0))
 diff --git a/external_plugins/t3/bot.test.ts b/external_plugins/t3/bot.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..1407e8e2b6e2fa9e42cadbddcab7321c53f41db7
+index 0000000000000000000000000000000000000000..e85c9684bd25728cbfdbe29ea8a45ba1a28395a7
 --- /dev/null
 +++ b/external_plugins/t3/bot.test.ts
-@@ -0,0 +1,263 @@
+@@ -0,0 +1,323 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { connect, type Socket } from 'net'
 +import { Readable, Writable } from 'stream'
@@ -112,7 +112,7 @@ index 0000000000000000000000000000000000000000..1407e8e2b6e2fa9e42cadbddcab7321c
 +beforeEach(async () => {
 +  dir = mkdtempSync(join(tmpdir(), 't3-bot-'))
 +  project = join(dir, 'project')
-+  for (const path of [project, join(dir, 'hex'), join(dir, 'state'), join(dir, 'config', 'jobs', 'job12345'), join(dir, '.t3', 'scratch', 'chat')]) mkdirSync(path, { recursive: true })
++  for (const path of [project, join(dir, 'hex', '.claude'), join(dir, 'state'), join(dir, 'config', 'jobs', 'job12345'), join(dir, '.t3', 'scratch', 'chat')]) mkdirSync(path, { recursive: true })
 +  writeFileSync(join(dir, '.claude.json'), '{"projects":{}}')
 +  script('claude', `jq -cn '$ARGS.positional' --args -- "$@" >> "${dir}/claude"
 +[ "$1 $2" = "agents --json" ] && { cat "${dir}/agents" 2>/dev/null || echo '[]'; }
@@ -175,7 +175,7 @@ index 0000000000000000000000000000000000000000..1407e8e2b6e2fa9e42cadbddcab7321c
 +    .connect(ndJsonStream(Writable.toWeb(socket) as WritableStream<Uint8Array>, Readable.toWeb(socket) as ReadableStream<Uint8Array>))
 +  const agent = connection.agent
 +  await agent.request('initialize', { protocolVersion: 1, clientCapabilities: {} })
-+  return { agent, updates }
++  return { agent, updates, socket }
 +}
 +
 +// The hex session's side: its channel saying hello on the hub socket, and its hooks.
@@ -298,10 +298,70 @@ index 0000000000000000000000000000000000000000..1407e8e2b6e2fa9e42cadbddcab7321c
 +  expect(fresh.inbound[0]).toMatchObject({ type: 'inbound', content: 'again' })
 +})
 +
++test('a turn whose T3 connection closes stops its session, and a reconnected T3 starts it again with its new tools', async () => {
++  const first = await t3()
++  const { sessionId } = await first.agent.request('session/new', { cwd: project, mcpServers: [t3Tools('one')] })
++  first.agent.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'hi' }] }).catch(() => {})
++  await until(() => lines('launched').length)
++  const saved = join(dir, 'config', 'projects', project.replace(/[^a-zA-Z0-9]/g, '-'))
++  mkdirSync(saved, { recursive: true })
++  writeFileSync(join(saved, `${SESSION}.jsonl`), '')
++  const hex = await session(sessionId)
++  await until(() => existsSync(join(dir, 'state', 'threads.json')) && readFileSync(join(dir, 'state', 'threads.json'), 'utf8').includes(SESSION))
++  hex.busy()
++  const pid = Number(Bun.spawnSync(['sh', '-c', 'sleep 60 >/dev/null 2>&1 & echo $!']).stdout.toString())
++  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid, status: 'busy' }]))
++  first.socket.destroy()
++  await until(() => lines('claude').includes(JSON.stringify(['stop', SESSION.slice(0, 8)])) && !existsSync(join(dir, 'agents')))
++  const second = await t3()
++  await second.agent.request('session/resume', { sessionId, cwd: project, mcpServers: [t3Tools('two')] })
++  second.agent.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'hi' }] }).catch(() => {})
++  await until(() => lines('launched').some(line => line.includes('two')))
++  const fresh = await session(sessionId)
++  await until(() => fresh.inbound.length)
++  expect(fresh.inbound[0]).toMatchObject({ type: 'inbound', content: 'hi' })
++})
++
++test('a thread offers T3 model and effort pickers, and its session starts again with what was picked', async () => {
++  writeFileSync(join(dir, 'hex', '.claude', 'settings.json'), JSON.stringify({ model: 'opus', effortLevel: 'medium' }))
++  const { agent } = await t3()
++  const { sessionId, configOptions } = await agent.request('session/new', { cwd: project, mcpServers: [] })
++  expect(configOptions!.map(option => [option.id, option.category, option.type === 'select' && option.currentValue])).toEqual([['model', 'model', 'claude-opus-5-5'], ['effort', 'thought_level', 'medium']])
++  await expect(agent.request('session/set_config_option', { sessionId, configId: 'effort', value: 'ludicrous' })).rejects.toThrow()
++  const { configOptions: picked } = await agent.request('session/set_config_option', { sessionId, configId: 'effort', value: 'xhigh' })
++  expect(picked.find(option => option.id === 'effort')).toMatchObject({ currentValue: 'xhigh' })
++  const first = agent.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'hi' }] })
++  await until(() => lines('launched').length)
++  const launched = JSON.parse(lines('launched')[0]!)
++  expect(launched[launched.indexOf('--effort') + 1]).toBe('xhigh')
++  expect(launched).not.toContain('--model')
++  const saved = join(dir, 'config', 'projects', project.replace(/[^a-zA-Z0-9]/g, '-'))
++  mkdirSync(saved, { recursive: true })
++  writeFileSync(join(saved, `${SESSION}.jsonl`), '')
++  const hex = await session(sessionId)
++  await until(() => existsSync(join(dir, 'state', 'threads.json')) && readFileSync(join(dir, 'state', 'threads.json'), 'utf8').includes(SESSION))
++  hex.busy()
++  await Bun.sleep(100)
++  hex.write(prompt, reply, done)
++  expect(await first).toEqual({ stopReason: 'end_turn' })
++  const pid = Number(Bun.spawnSync(['sh', '-c', 'sleep 60 >/dev/null 2>&1 & echo $!']).stdout.toString())
++  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid, status: 'idle' }]))
++  await agent.request('session/set_config_option', { sessionId, configId: 'model', value: 'claude-fable-5-1' })
++  agent.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'again' }] }).catch(() => {})
++  await until(() => lines('launched').length === 2)
++  const again = JSON.parse(lines('launched')[1]!)
++  expect([again[again.indexOf('--model') + 1], again[again.indexOf('--effort') + 1], again[again.indexOf('--resume') + 1]]).toEqual(['claude-fable-5-1', 'xhigh', SESSION])
++  expect(lines('claude')).toContain(JSON.stringify(['stop', SESSION.slice(0, 8)]))
++  const fresh = await session(sessionId)
++  await until(() => fresh.inbound.length)
++  expect(fresh.inbound[0]).toMatchObject({ type: 'inbound', content: 'again' })
++  expect(JSON.parse(readFileSync(join(dir, 'state', 'threads.json'), 'utf8'))[sessionId]).toMatchObject({ model: 'claude-fable-5-1', effort: 'xhigh' })
++})
++
 +test('a known thread resumes and an unknown one is not found', async () => {
 +  const { agent } = await t3()
 +  const { sessionId } = await agent.request('session/new', { cwd: project, mcpServers: [] })
-+  expect(await agent.request('session/resume', { sessionId, cwd: project, mcpServers: [] })).toEqual({})
++  expect(await agent.request('session/resume', { sessionId, cwd: project, mcpServers: [] })).toMatchObject({ configOptions: [{ id: 'model' }, { id: 'effort' }] })
 +  expect(agent.request('session/resume', { sessionId: 'nope', cwd: project, mcpServers: [] })).rejects.toThrow('Resource not found')
 +})
 +
@@ -358,10 +418,10 @@ index 0000000000000000000000000000000000000000..1407e8e2b6e2fa9e42cadbddcab7321c
 +})
 diff --git a/external_plugins/t3/bot.ts b/external_plugins/t3/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..a9b8f52e01bf0a7f130a49b0b0204105f3c5d897
+index 0000000000000000000000000000000000000000..9aa371c89fc9cbe2d05fe6d0083ae886de1be1b7
 --- /dev/null
 +++ b/external_plugins/t3/bot.ts
-@@ -0,0 +1,222 @@
+@@ -0,0 +1,267 @@
 +#!/usr/bin/env bun
 +import { createServer, type Socket } from 'net'
 +import { Readable, Writable } from 'stream'
@@ -370,7 +430,7 @@ index 0000000000000000000000000000000000000000..a9b8f52e01bf0a7f130a49b0b0204105
 +import { basename, join } from 'path'
 +import { fileURLToPath } from 'url'
 +import { randomUUID } from 'crypto'
-+import { agent, ndJsonStream, PROTOCOL_VERSION, RequestError, type AgentContext, type ContentBlock, type McpServer, type PromptResponse, type SessionNotification, type StopReason } from '@agentclientprotocol/sdk'
++import { agent, ndJsonStream, PROTOCOL_VERSION, RequestError, type AgentContext, type ContentBlock, type McpServer, type PromptResponse, type SessionConfigOption, type SessionNotification, type StopReason } from '@agentclientprotocol/sdk'
 +import { startHub } from '../../hub/hub.ts'
 +import { follow, transcriptPath } from './transcript.ts'
 +import { version } from './package.json'
@@ -383,6 +443,19 @@ index 0000000000000000000000000000000000000000..a9b8f52e01bf0a7f130a49b0b0204105
 +const SCRATCH = join(HOME, '.t3', 'scratch')
 +const CLAUDE_JSON = join(HOME, '.claude.json')
 +const COMMANDS = [{ name: 'compact', description: 'Summarize the conversation so far to free up context' }]
++const MODELS = [
++  { value: 'claude-opus-5-5', name: 'Opus 5.5', alias: 'opus' },
++  { value: 'claude-sonnet-5-5', name: 'Sonnet 5.5', alias: 'sonnet' },
++  { value: 'claude-haiku-5-5', name: 'Haiku 5.5', alias: 'haiku' },
++  { value: 'claude-fable-5-1', name: 'Fable 5.1', alias: 'fable' },
++]
++const EFFORTS = [
++  { value: 'low', name: 'Low' },
++  { value: 'medium', name: 'Medium' },
++  { value: 'high', name: 'High' },
++  { value: 'xhigh', name: 'Extra High' },
++  { value: 'max', name: 'Max' },
++]
 +
 +type Turn = {
 +  client: AgentContext
@@ -399,7 +472,6 @@ index 0000000000000000000000000000000000000000..a9b8f52e01bf0a7f130a49b0b0204105
 +// T3 Code hands each thread its own MCP servers, with tools like html_render, preview
 +// and delegate_task. A session loads them as it starts, so it starts again when they change.
 +const servers = new Map<string, string>()
-+const started = new Map<string, string | undefined>()
 +
 +mkdirSync(INBOX_DIR, { recursive: true, mode: 0o700 })
 +
@@ -423,7 +495,6 @@ index 0000000000000000000000000000000000000000..a9b8f52e01bf0a7f130a49b0b0204105
 +  },
 +  args: thread => {
 +    const config = servers.get(thread)
-+    started.set(thread, config)
 +    return config ? ['--mcp-config', config] : []
 +  },
 +  hexDir: HEX_DIR,
@@ -478,7 +549,9 @@ index 0000000000000000000000000000000000000000..a9b8f52e01bf0a7f130a49b0b0204105
 +  return thread
 +}
 +
-+function prompt(thread: string, blocks: ContentBlock[], client: AgentContext): Promise<PromptResponse> {
++// T3's MCP credentials live only in its running server, so when T3 quits or restarts
++// mid-turn (the prompt's request aborts) the session's T3 tools are dead: it stops like a cancel.
++function prompt(thread: string, blocks: ContentBlock[], client: AgentContext, signal: AbortSignal): Promise<PromptResponse> {
 +  const name = hub.name(known(thread))!
 +  if (turns.has(thread)) throw RequestError.invalidRequest(undefined, 'this thread is already working on a prompt')
 +  const session = hub.session(thread)
@@ -488,14 +561,45 @@ index 0000000000000000000000000000000000000000..a9b8f52e01bf0a7f130a49b0b0204105
 +  return new Promise((resolve, reject) => {
 +    const turn: Turn = { client, sent: Promise.resolve(), resolve, reject, ...(compact && { compaction: randomUUID() }) }
 +    turns.set(thread, turn)
++    signal.addEventListener('abort', () => turns.get(thread) === turn && cancel(thread), { once: true })
 +    if (session) turn.reader = reader(thread, session, turn, false)
 +    if (!compact) {
 +      const message = { content: render(blocks), meta: { ts: new Date().toISOString() } }
-+      return servers.get(thread) === started.get(thread) ? hub.deliver(thread, name, message) : hub.refresh(thread, message)
++      return hub.deliver(thread, name, message)
 +    }
 +    compaction(turn, thread, 'in_progress')
 +    hub.command(thread, '/compact')
 +  })
++}
++
++// T3 shows these as its model and effort pickers. A thread with no choice of its own
++// runs on what hex's settings say, so that's what they show.
++function options(thread: string): SessionConfigOption[] {
++  const chosen = hub.settings(thread)
++  const defaults = settings()
++  const model = chosen.model ?? MODELS.find(model => defaults.model === model.alias || defaults.model?.startsWith(model.value))?.value ?? MODELS[0]!.value
++  const effort = chosen.effort ?? EFFORTS.find(effort => effort.value === defaults.effortLevel)?.value ?? 'medium'
++  return [
++    { type: 'select', id: 'model', name: 'Model', category: 'model', currentValue: model, options: MODELS.map(({ value, name }) => ({ value, name })) },
++    { type: 'select', id: 'effort', name: 'Effort', category: 'thought_level', currentValue: effort, options: EFFORTS },
++  ]
++}
++
++function settings(): { model?: string; effortLevel?: string } {
++  try {
++    return JSON.parse(readFileSync(join(HEX_DIR, '.claude', 'settings.json'), 'utf8'))
++  } catch {
++    return {}
++  }
++}
++
++// The thread's session starts again with the new choice at its next prompt.
++function configure(thread: string, id: string, value: unknown) {
++  const choices = id === 'model' ? MODELS : id === 'effort' ? EFFORTS : undefined
++  if (!choices) throw RequestError.invalidParams(undefined, `no option ${id}`)
++  if (!choices.some(choice => choice.value === value)) throw RequestError.invalidParams(undefined, `${id} can't be ${value}`)
++  hub.configure(known(thread), { [id]: value as string })
++  return { configOptions: options(thread) }
 +}
 +
 +// Sent once the session/new or session/resume answer is out, so the client knows the session.
@@ -569,14 +673,15 @@ index 0000000000000000000000000000000000000000..a9b8f52e01bf0a7f130a49b0b0204105
 +      remember(thread, params.mcpServers)
 +      hub.register(thread, basename(folder ?? HEX_DIR), folder)
 +      advertise(client, thread)
-+      return { sessionId: thread }
++      return { sessionId: thread, configOptions: options(thread) }
 +    })
 +    .onRequest('session/resume', ({ params, client }) => {
 +      remember(known(params.sessionId), params.mcpServers)
 +      advertise(client, params.sessionId)
-+      return {}
++      return { configOptions: options(params.sessionId) }
 +    })
-+    .onRequest('session/prompt', ({ params, client }) => prompt(params.sessionId, params.prompt, client))
++    .onRequest('session/set_config_option', ({ params }) => configure(params.sessionId, params.configId, params.value))
++    .onRequest('session/prompt', ({ params, client, signal }) => prompt(params.sessionId, params.prompt, client, signal))
 +    .onNotification('session/cancel', ({ params }) => cancel(params.sessionId))
 +    .connect(ndJsonStream(Writable.toWeb(socket) as WritableStream<Uint8Array>, Readable.toWeb(socket) as ReadableStream<Uint8Array>))
 +  socket.on('error', () => {})

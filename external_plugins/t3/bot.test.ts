@@ -80,7 +80,7 @@ async function t3() {
     .connect(ndJsonStream(Writable.toWeb(socket) as WritableStream<Uint8Array>, Readable.toWeb(socket) as ReadableStream<Uint8Array>))
   const agent = connection.agent
   await agent.request('initialize', { protocolVersion: 1, clientCapabilities: {} })
-  return { agent, updates }
+  return { agent, updates, socket }
 }
 
 // The hex session's side: its channel saying hello on the hub socket, and its hooks.
@@ -201,6 +201,30 @@ test('a session gets T3\'s MCP servers, and starts again with them when they cha
   const fresh = await session(sessionId)
   await until(() => fresh.inbound.length)
   expect(fresh.inbound[0]).toMatchObject({ type: 'inbound', content: 'again' })
+})
+
+test('a turn whose T3 connection closes stops its session, and a reconnected T3 starts it again with its new tools', async () => {
+  const first = await t3()
+  const { sessionId } = await first.agent.request('session/new', { cwd: project, mcpServers: [t3Tools('one')] })
+  first.agent.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'hi' }] }).catch(() => {})
+  await until(() => lines('launched').length)
+  const saved = join(dir, 'config', 'projects', project.replace(/[^a-zA-Z0-9]/g, '-'))
+  mkdirSync(saved, { recursive: true })
+  writeFileSync(join(saved, `${SESSION}.jsonl`), '')
+  const hex = await session(sessionId)
+  await until(() => existsSync(join(dir, 'state', 'threads.json')) && readFileSync(join(dir, 'state', 'threads.json'), 'utf8').includes(SESSION))
+  hex.busy()
+  const pid = Number(Bun.spawnSync(['sh', '-c', 'sleep 60 >/dev/null 2>&1 & echo $!']).stdout.toString())
+  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid, status: 'busy' }]))
+  first.socket.destroy()
+  await until(() => lines('claude').includes(JSON.stringify(['stop', SESSION.slice(0, 8)])) && !existsSync(join(dir, 'agents')))
+  const second = await t3()
+  await second.agent.request('session/resume', { sessionId, cwd: project, mcpServers: [t3Tools('two')] })
+  second.agent.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'hi' }] }).catch(() => {})
+  await until(() => lines('launched').some(line => line.includes('two')))
+  const fresh = await session(sessionId)
+  await until(() => fresh.inbound.length)
+  expect(fresh.inbound[0]).toMatchObject({ type: 'inbound', content: 'hi' })
 })
 
 test('a thread offers T3 model and effort pickers, and its session starts again with what was picked', async () => {

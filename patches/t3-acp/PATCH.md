@@ -4,7 +4,7 @@ id: t3-acp
 summary: Serve the agent to T3 Code as an ACP agent, where every T3 thread is its own Claude Code session in that thread's project, through the thread hub.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: t3-acp.patch
-patch_sha256: 765ebfc2f9beac732ca708bef676f7b6586e1a36a102606105fbd5ac7f331e9b
+patch_sha256: b92fbc0b6360647ec7bcfc406a3e84b433132b3408d3b8d28e74dcf2abaf4b12
 ---
 
 ## Intent
@@ -29,7 +29,11 @@ agent's work itself, so the session's own output is the conversation:
   converter), from where it ends when the prompt is sent, or from its start for a
   new session. Channel prompts are skipped: T3 already shows what it sent.
 - `session/cancel` stops the session and answers `cancelled`; the next prompt
-  resumes it. `session/resume` accepts any thread the hub knows.
+  resumes it. So does a prompt whose request aborts because its connection
+  closed, as when T3 quits or restarts: T3's MCP credentials live only in its
+  running server, so the session's T3 tools are dead, and the turn's old
+  connection would otherwise hold the thread so T3's next prompt is refused.
+  `session/resume` accepts any thread the hub knows.
 - The MCP servers T3 sends with `session/new` and `session/resume` (its own
   `t3-code` server: html_render, preview, delegate_task and the rest) reach the
   session as `--mcp-config`. A session loads them only as it starts, so when they
@@ -53,15 +57,16 @@ agent's work itself, so the session's own output is the conversation:
    Stop hook can run before the last reply is on disk and never ends a turn.
 3. One prompt per thread at a time; a second is refused.
 4. No timer stands in for state: the transcript is followed by watching its
-   folder, and a turn waits for its own end, a cancel, or a failed start.
+   folder, and a turn waits for its own end, a cancel, its connection closing, or a
+   failed start.
 
 ## Verification
 
 `bun test external_plugins/t3` follows transcripts (where a turn starts and
 ends, partial lines) and drives `bot.ts` as a subprocess over a real ACP
 connection with a fake launcher and session: a new thread starting in its
-project, a prompt streamed to its end, resume, cancel, a failed start, and
-attachments. Run `scripts/verify`.
+project, a prompt streamed to its end, resume, cancel, a turn whose connection
+closes, a failed start, and attachments. Run `scripts/verify`.
 
 ## Removal
 
