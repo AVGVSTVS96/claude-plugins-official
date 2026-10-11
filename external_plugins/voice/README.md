@@ -57,6 +57,12 @@ Claude to stop that task.
    VOICE_PORT=8790    # the call page's local port
    ```
 
+   Who the voice is goes in `~/.claude/channels/voice/instructions.md`, the
+   first lines of its prompt (a generic assistant if the file is missing),
+   for example its name and the person it talks with. Everything else it
+   learns from the session: when a call starts, Claude sends it what's going
+   on now, and questions about the caller are handed to Claude.
+
 2. Start a session with the channel:
 
    ```sh

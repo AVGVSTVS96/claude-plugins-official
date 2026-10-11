@@ -24,7 +24,17 @@ const API = 'https://api.openai.com/v1/live/sessions'
 const HUB = process.env.HEX_HUB
 const THREAD = process.env.HEX_CHANNEL?.startsWith('plugin:voice@') ? process.env.HEX_THREAD : undefined
 
-const VOICE_PROMPT = `You are the voice of a personal assistant, talking with the person it works for. Speak warmly and naturally, like a sharp friend: plain words, short answers.
+const IDENTITY = (() => {
+  try {
+    return readFileSync(process.env.VOICE_INSTRUCTIONS ?? join(STATE_DIR, 'instructions.md'), 'utf8').trim()
+  } catch {
+    return 'You are the voice of a personal assistant, talking with the person it works for.'
+  }
+})()
+
+const VOICE_PROMPT = `${IDENTITY}
+
+Speak warmly and naturally, like a sharp friend: plain words, short answers. Everything you know about the user, their life and their work lives in the backend, so you find it out by delegating.
 
 Backchannel policy: Use light backchannels. Acknowledge naturally without competing with the main response.
 
@@ -35,12 +45,13 @@ Backend tools:
 - Assistant: an agent with the user's files, machines, projects, memory, messages, email, calendar and the web. It can look things up, take actions and run long tasks in the background.
 
 Delegate to the backend when:
+- The user asks about themselves, the people in their life, their work, what you know about them, or what's going on.
 - The request needs anything from the user's world or the web: their files, projects, messages, accounts, schedule, or current facts.
 - The user asks you to do, check, build, send, change or remember something.
 - A correction or addition changes work already requested.
 
 Do not delegate to the backend when:
-- You can answer from the conversation or a result the backend already gave you.
+- You can answer from the conversation, your instructions, or a result the backend already gave you.
 - The user asks how a task is going: answer from the task board.
 - You need a brief clarification to understand the request.
 
@@ -59,6 +70,8 @@ const mcp = new Server(
   {
     capabilities: { tools: {}, experimental: { 'claude/channel': {} } },
     instructions: `This channel is a live voice call. A fast voice model (OpenAI gpt-live-1) talks with the caller in real time and hands work to you; you do the real work with your tools. The caller hears only the voice model, never your transcript output.
+
+When a call starts you get a "call started" message: send the voice, with note, what it should know right away about the caller and what's going on now, in a few short lines.
 
 Each handoff arrives as <channel source="voice" delegation_id="..."> with the transcript since the last handoff, oldest first, timestamped from the start of the call: "you" is the caller, "voice" is the voice model. Speech transcripts can mishear words, and the latest correction wins. A late line can belong before one you already got; its timestamp places it.
 
@@ -172,6 +185,7 @@ function attach(id: string) {
   const socket = new WebSocket(`${API}/${id}/attach`, { headers: { Authorization: `Bearer ${KEY}` } } as any)
   const call: Live = { id, socket, call: new Call(), pending: new Map(), rings: [] }
   live = call
+  deliver('A call started. Send the voice what it should know right away, with note.', { call: id, started: 'true' })
   socket.onmessage = ({ data }) => {
     const event = JSON.parse(String(data))
     switch (event.type) {

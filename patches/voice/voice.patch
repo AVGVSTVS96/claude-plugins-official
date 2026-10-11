@@ -1,13 +1,13 @@
 diff --git a/external_plugins/voice/.claude-plugin/plugin.json b/external_plugins/voice/.claude-plugin/plugin.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..e4fd77c281c6faea0f315415fc722d3ef6e55301
+index 0000000000000000000000000000000000000000..2a3288bfa4daceab772c642ed9d43aa264d2adbf
 --- /dev/null
 +++ b/external_plugins/voice/.claude-plugin/plugin.json
 @@ -0,0 +1,6 @@
 +{
 +  "name": "voice",
 +  "description": "Live voice calls for Claude Code: OpenAI's gpt-live-1 talks with you in real time and hands the real work to your Claude Code session.",
-+  "version": "0.1.0",
++  "version": "0.2.0",
 +  "keywords": ["voice", "openai", "gpt-live", "channel", "mcp"]
 +}
 diff --git a/external_plugins/voice/.gitignore b/external_plugins/voice/.gitignore
@@ -33,10 +33,10 @@ index 0000000000000000000000000000000000000000..07fdedd6c4bc9e7072f8d860f7eadd42
 +}
 diff --git a/external_plugins/voice/README.md b/external_plugins/voice/README.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..598816f1cf2797e53f26dbffdde252fed9de36ac
+index 0000000000000000000000000000000000000000..ab2806061963f3e41cab4f17e47fa269e1473efc
 --- /dev/null
 +++ b/external_plugins/voice/README.md
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,97 @@
 +# voice
 +
 +Live voice calls for Claude Code. OpenAI's `gpt-live-1` talks with you in real
@@ -95,6 +95,12 @@ index 0000000000000000000000000000000000000000..598816f1cf2797e53f26dbffdde252fe
 +   VOICE=marin        # one of OpenAI's built-in voices; OpenAI's default if unset
 +   VOICE_PORT=8790    # the call page's local port
 +   ```
++
++   Who the voice is goes in `~/.claude/channels/voice/instructions.md`, the
++   first lines of its prompt (a generic assistant if the file is missing),
++   for example its name and the person it talks with. Everything else it
++   learns from the session: when a call starts, Claude sends it what's going
++   on now, and questions about the caller are handed to Claude.
 +
 +2. Start a session with the channel:
 +
@@ -467,13 +473,13 @@ index 0000000000000000000000000000000000000000..48caa54c9ff740a272644dc45c23790b
 +}
 diff --git a/external_plugins/voice/package.json b/external_plugins/voice/package.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..dd59e483eeee52db2d274efe6588d23602a89e4a
+index 0000000000000000000000000000000000000000..e63d073da4c60ac1f1f1d0728265f43f910ca5aa
 --- /dev/null
 +++ b/external_plugins/voice/package.json
 @@ -0,0 +1,15 @@
 +{
 +  "name": "claude-channel-voice",
-+  "version": "0.1.0",
++  "version": "0.2.0",
 +  "license": "Apache-2.0",
 +  "type": "module",
 +  "scripts": {
@@ -597,10 +603,10 @@ index 0000000000000000000000000000000000000000..6fb7ade3ee476a5787d80414f42063b4
 +</html>
 diff --git a/external_plugins/voice/server.ts b/external_plugins/voice/server.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..41a337b50e5a6f936e7dc9ad58c9ba87929900ac
+index 0000000000000000000000000000000000000000..e2c34c6f63e664b7da6dce3405c811d8f8acf504
 --- /dev/null
 +++ b/external_plugins/voice/server.ts
-@@ -0,0 +1,263 @@
+@@ -0,0 +1,277 @@
 +#!/usr/bin/env bun
 +import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 +import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
@@ -627,7 +633,17 @@ index 0000000000000000000000000000000000000000..41a337b50e5a6f936e7dc9ad58c9ba87
 +const HUB = process.env.HEX_HUB
 +const THREAD = process.env.HEX_CHANNEL?.startsWith('plugin:voice@') ? process.env.HEX_THREAD : undefined
 +
-+const VOICE_PROMPT = `You are the voice of a personal assistant, talking with the person it works for. Speak warmly and naturally, like a sharp friend: plain words, short answers.
++const IDENTITY = (() => {
++  try {
++    return readFileSync(process.env.VOICE_INSTRUCTIONS ?? join(STATE_DIR, 'instructions.md'), 'utf8').trim()
++  } catch {
++    return 'You are the voice of a personal assistant, talking with the person it works for.'
++  }
++})()
++
++const VOICE_PROMPT = `${IDENTITY}
++
++Speak warmly and naturally, like a sharp friend: plain words, short answers. Everything you know about the user, their life and their work lives in the backend, so you find it out by delegating.
 +
 +Backchannel policy: Use light backchannels. Acknowledge naturally without competing with the main response.
 +
@@ -638,12 +654,13 @@ index 0000000000000000000000000000000000000000..41a337b50e5a6f936e7dc9ad58c9ba87
 +- Assistant: an agent with the user's files, machines, projects, memory, messages, email, calendar and the web. It can look things up, take actions and run long tasks in the background.
 +
 +Delegate to the backend when:
++- The user asks about themselves, the people in their life, their work, what you know about them, or what's going on.
 +- The request needs anything from the user's world or the web: their files, projects, messages, accounts, schedule, or current facts.
 +- The user asks you to do, check, build, send, change or remember something.
 +- A correction or addition changes work already requested.
 +
 +Do not delegate to the backend when:
-+- You can answer from the conversation or a result the backend already gave you.
++- You can answer from the conversation, your instructions, or a result the backend already gave you.
 +- The user asks how a task is going: answer from the task board.
 +- You need a brief clarification to understand the request.
 +
@@ -662,6 +679,8 @@ index 0000000000000000000000000000000000000000..41a337b50e5a6f936e7dc9ad58c9ba87
 +  {
 +    capabilities: { tools: {}, experimental: { 'claude/channel': {} } },
 +    instructions: `This channel is a live voice call. A fast voice model (OpenAI gpt-live-1) talks with the caller in real time and hands work to you; you do the real work with your tools. The caller hears only the voice model, never your transcript output.
++
++When a call starts you get a "call started" message: send the voice, with note, what it should know right away about the caller and what's going on now, in a few short lines.
 +
 +Each handoff arrives as <channel source="voice" delegation_id="..."> with the transcript since the last handoff, oldest first, timestamped from the start of the call: "you" is the caller, "voice" is the voice model. Speech transcripts can mishear words, and the latest correction wins. A late line can belong before one you already got; its timestamp places it.
 +
@@ -775,6 +794,7 @@ index 0000000000000000000000000000000000000000..41a337b50e5a6f936e7dc9ad58c9ba87
 +  const socket = new WebSocket(`${API}/${id}/attach`, { headers: { Authorization: `Bearer ${KEY}` } } as any)
 +  const call: Live = { id, socket, call: new Call(), pending: new Map(), rings: [] }
 +  live = call
++  deliver('A call started. Send the voice what it should know right away, with note.', { call: id, started: 'true' })
 +  socket.onmessage = ({ data }) => {
 +    const event = JSON.parse(String(data))
 +    switch (event.type) {
