@@ -20,11 +20,15 @@
     background: var(--fg); color: var(--bg); transition: transform 120ms ease-out, background 160ms ease-out; touch-action: manipulation; }
   #call:active { transform: scale(0.97); }
   #call.live { background: var(--accent); color: #fff; }
-  #call:disabled { opacity: 0.5; }
+  #call:disabled, #phone:disabled { opacity: 0.5; }
+  #phone { margin: -8px 0 20px; height: 48px; border: 1px solid var(--line); border-radius: 24px; background: none; color: var(--fg);
+    font: 600 16px/1 inherit; font-family: inherit; touch-action: manipulation; transition: transform 120ms ease-out; }
+  #phone:active { transform: scale(0.97); }
 </style>
 <header><h1>voice</h1><span id="status">ready</span></header>
 <main id="log"></main>
 <button id="call">Start call</button>
+<button id="phone">Call my phone</button>
 <audio id="speaker" autoplay></audio>
 <script type="module">
   const button = document.getElementById('call')
@@ -91,6 +95,14 @@
     if (!response.ok) throw new Error(await response.text())
     const { transport } = await response.json()
     await peer.setRemoteDescription({ type: 'answer', sdp: transport.sdp })
+  }
+
+  const phone = document.getElementById('phone')
+  phone.onclick = async () => {
+    phone.disabled = true
+    const response = await fetch('phone', { method: 'POST' })
+    say(await response.text())
+    phone.disabled = false
   }
 
   button.onclick = () => {

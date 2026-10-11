@@ -89,6 +89,36 @@ Claude to stop that task.
 
 The page listens on `127.0.0.1` only, and the API key never leaves the plugin.
 
+## Phone calls
+
+The plugin can also ring a phone through [Twilio](https://www.twilio.com):
+Claude's `phone` tool, or **Call my phone** on the call page. Twilio places
+the call and streams its audio (G.711 μ-law, passed through untouched) to a
+`gpt-live-1` session over a WebSocket; handoffs, `say`, `note` and the board
+work exactly as on the page.
+
+```
+phone ◄── PSTN ──► Twilio ── Media Stream (wss) ──► plugin /twilio/<one-time token>
+                                                        │
+                                                        ▼
+                                           gpt-live-1 (audio/pcmu, 8 kHz) ◄─► Claude
+```
+
+Add to `~/.claude/channels/voice/.env`:
+
+```sh
+TWILIO_ACCOUNT_SID=AC...
+TWILIO_AUTH_TOKEN=...
+TWILIO_NUMBER=+1...                       # your Twilio number, the caller ID
+CALLER_NUMBER=+1...                       # who "call me" rings
+VOICE_PUBLIC_URL=host.example.com         # public HTTPS host that reaches /twilio on VOICE_PORT
+```
+
+Twilio has to reach `/twilio` from the internet, for example with
+`tailscale funnel --bg --https=8443 --set-path=/twilio http://127.0.0.1:8790/twilio`
+(`VOICE_PUBLIC_URL=<host>.<tailnet>.ts.net:8443`). Each call's stream URL
+carries a one-time token, so nothing else gets through.
+
 ## Limits
 
 - Each update to the voice is capped at 500 tokens by OpenAI. Long results

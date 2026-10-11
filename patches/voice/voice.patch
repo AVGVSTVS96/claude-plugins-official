@@ -33,10 +33,10 @@ index 0000000000000000000000000000000000000000..07fdedd6c4bc9e7072f8d860f7eadd42
 +}
 diff --git a/external_plugins/voice/README.md b/external_plugins/voice/README.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..37c4d955297f055a730e38ce38fae973a4ef93d9
+index 0000000000000000000000000000000000000000..082549cd4ea9239ce7193362d80b9e8e4fd27117
 --- /dev/null
 +++ b/external_plugins/voice/README.md
-@@ -0,0 +1,99 @@
+@@ -0,0 +1,129 @@
 +# voice
 +
 +Live voice calls for Claude Code. OpenAI's `gpt-live-1` talks with you in real
@@ -127,6 +127,36 @@ index 0000000000000000000000000000000000000000..37c4d955297f055a730e38ce38fae973
 +     then `https://<host>.<tailnet>.ts.net:8790`.
 +
 +The page listens on `127.0.0.1` only, and the API key never leaves the plugin.
++
++## Phone calls
++
++The plugin can also ring a phone through [Twilio](https://www.twilio.com):
++Claude's `phone` tool, or **Call my phone** on the call page. Twilio places
++the call and streams its audio (G.711 μ-law, passed through untouched) to a
++`gpt-live-1` session over a WebSocket; handoffs, `say`, `note` and the board
++work exactly as on the page.
++
++```
++phone ◄── PSTN ──► Twilio ── Media Stream (wss) ──► plugin /twilio/<one-time token>
++                                                        │
++                                                        ▼
++                                           gpt-live-1 (audio/pcmu, 8 kHz) ◄─► Claude
++```
++
++Add to `~/.claude/channels/voice/.env`:
++
++```sh
++TWILIO_ACCOUNT_SID=AC...
++TWILIO_AUTH_TOKEN=...
++TWILIO_NUMBER=+1...                       # your Twilio number, the caller ID
++CALLER_NUMBER=+1...                       # who "call me" rings
++VOICE_PUBLIC_URL=host.example.com         # public HTTPS host that reaches /twilio on VOICE_PORT
++```
++
++Twilio has to reach `/twilio` from the internet, for example with
++`tailscale funnel --bg --https=8443 --set-path=/twilio http://127.0.0.1:8790/twilio`
++(`VOICE_PUBLIC_URL=<host>.<tailnet>.ts.net:8443`). Each call's stream URL
++carries a one-time token, so nothing else gets through.
 +
 +## Limits
 +
@@ -496,10 +526,10 @@ index 0000000000000000000000000000000000000000..e63d073da4c60ac1f1f1d0728265f43f
 +}
 diff --git a/external_plugins/voice/page.html b/external_plugins/voice/page.html
 new file mode 100644
-index 0000000000000000000000000000000000000000..6fb7ade3ee476a5787d80414f42063b44343a2ad
+index 0000000000000000000000000000000000000000..0502c4c9398edaa47623afcbbecf912a58a29998
 --- /dev/null
 +++ b/external_plugins/voice/page.html
-@@ -0,0 +1,103 @@
+@@ -0,0 +1,115 @@
 +<!doctype html>
 +<html lang="en">
 +<meta charset="utf-8">
@@ -522,11 +552,15 @@ index 0000000000000000000000000000000000000000..6fb7ade3ee476a5787d80414f42063b4
 +    background: var(--fg); color: var(--bg); transition: transform 120ms ease-out, background 160ms ease-out; touch-action: manipulation; }
 +  #call:active { transform: scale(0.97); }
 +  #call.live { background: var(--accent); color: #fff; }
-+  #call:disabled { opacity: 0.5; }
++  #call:disabled, #phone:disabled { opacity: 0.5; }
++  #phone { margin: -8px 0 20px; height: 48px; border: 1px solid var(--line); border-radius: 24px; background: none; color: var(--fg);
++    font: 600 16px/1 inherit; font-family: inherit; touch-action: manipulation; transition: transform 120ms ease-out; }
++  #phone:active { transform: scale(0.97); }
 +</style>
 +<header><h1>voice</h1><span id="status">ready</span></header>
 +<main id="log"></main>
 +<button id="call">Start call</button>
++<button id="phone">Call my phone</button>
 +<audio id="speaker" autoplay></audio>
 +<script type="module">
 +  const button = document.getElementById('call')
@@ -595,6 +629,14 @@ index 0000000000000000000000000000000000000000..6fb7ade3ee476a5787d80414f42063b4
 +    await peer.setRemoteDescription({ type: 'answer', sdp: transport.sdp })
 +  }
 +
++  const phone = document.getElementById('phone')
++  phone.onclick = async () => {
++    phone.disabled = true
++    const response = await fetch('phone', { method: 'POST' })
++    say(await response.text())
++    phone.disabled = false
++  }
++
 +  button.onclick = () => {
 +    if (!peer) return call().catch(error => hangUp(error.message))
 +    button.disabled = true
@@ -605,10 +647,10 @@ index 0000000000000000000000000000000000000000..6fb7ade3ee476a5787d80414f42063b4
 +</html>
 diff --git a/external_plugins/voice/server.ts b/external_plugins/voice/server.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..3a15b81b1c824921a378bed7de82868630a0e321
+index 0000000000000000000000000000000000000000..ed364095249e92758502d3ab9cdeb4a8afc7c824
 --- /dev/null
 +++ b/external_plugins/voice/server.ts
-@@ -0,0 +1,273 @@
+@@ -0,0 +1,359 @@
 +#!/usr/bin/env bun
 +import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 +import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
@@ -632,6 +674,11 @@ index 0000000000000000000000000000000000000000..3a15b81b1c824921a378bed7de828686
 +const VOICE = process.env.VOICE
 +const PORT = Number(process.env.VOICE_PORT ?? 8790)
 +const API = 'https://api.openai.com/v1/live/sessions'
++const TWILIO_SID = process.env.TWILIO_ACCOUNT_SID
++const TWILIO_TOKEN = process.env.TWILIO_AUTH_TOKEN
++const TWILIO_NUMBER = process.env.TWILIO_NUMBER
++const CALLER_NUMBER = process.env.CALLER_NUMBER
++const PUBLIC_URL = process.env.VOICE_PUBLIC_URL
 +const HUB = process.env.HEX_HUB
 +const THREAD = process.env.HEX_CHANNEL?.startsWith('plugin:voice@') ? process.env.HEX_THREAD : undefined
 +
@@ -667,10 +714,12 @@ index 0000000000000000000000000000000000000000..3a15b81b1c824921a378bed7de828686
 +
 +type Pending = { resolve: () => void; reject: (error: Error) => void }
 +type Ring = { delegation: string; offset: number }
-+type Live = { id: string; socket: WebSocket; call: Call; pending: Map<string, Pending>; rings: Ring[] }
++type Live = { id: string; socket: WebSocket; call: Call; pending: Map<string, Pending>; rings: Ring[]; speak?: (audio: string) => void }
++type Phone = { openai?: WebSocket; stream?: string; started?: true }
 +
 +let live: Live | undefined
 +let seq = 0
++const dials = new Set<string>()
 +
 +const mcp = new Server(
 +  { name: 'voice', version: '0.1.0' },
@@ -685,6 +734,8 @@ index 0000000000000000000000000000000000000000..3a15b81b1c824921a378bed7de828686
 +Answer every handoff with say(delegation_id, text): the voice says only what you give it, so you are the one talking. It paraphrases aloud, so write one or two plain spoken sentences, no markdown. Use note for facts the voice should know without saying them yet.
 +
 +Keep each turn quick so the next handoff reaches you fast. Run anything longer than a quick lookup as a background subagent, put it on the board with task (running, then done or failed), and say its result when it arrives. Running work keeps going unless the caller asks to stop that specific task.
++
++phone rings the caller's phone and holds the same kind of call there, for when you're asked to call them.
 +
 +A result too long to speak goes wherever the caller reads, if this session has another channel to reach them; say where you sent it. Voice page: http://localhost:${PORT}.`,
 +  },
@@ -723,12 +774,18 @@ index 0000000000000000000000000000000000000000..3a15b81b1c824921a378bed7de828686
 +        required: ['id', 'state', 'text'],
 +      },
 +    },
++    {
++      name: 'phone',
++      description: "Ring a phone and hold the call there: the caller's own number unless to is given (E.164, like +14155550123).",
++      inputSchema: { type: 'object', properties: { to: { type: 'string' } } },
++    },
 +  ],
 +}))
 +
 +mcp.setRequestHandler(CallToolRequestSchema, async request => {
 +  const args = (request.params.arguments ?? {}) as Record<string, string>
 +  try {
++    if (request.params.name === 'phone') return done(await dial(args.to))
 +    if (!live) throw new Error('no call is live')
 +    switch (request.params.name) {
 +      case 'say':
@@ -787,10 +844,9 @@ index 0000000000000000000000000000000000000000..3a15b81b1c824921a378bed7de828686
 +  call.socket.close()
 +}
 +
-+function attach(id: string) {
++function follow(id: string, socket: WebSocket, speak?: Live['speak']) {
 +  if (live) finish(live, 'replaced by a new call')
-+  const socket = new WebSocket(`${API}/${id}/attach`, { headers: { Authorization: `Bearer ${KEY}` } } as any)
-+  const call: Live = { id, socket, call: new Call(), pending: new Map(), rings: [] }
++  const call: Live = { id, socket, call: new Call(), pending: new Map(), rings: [], speak }
 +  live = call
 +  deliver('A call started. Send the voice what it should know right away, with note.', { call: id, started: 'true' })
 +  socket.onmessage = ({ data }) => {
@@ -815,11 +871,79 @@ index 0000000000000000000000000000000000000000..3a15b81b1c824921a378bed7de828686
 +        if (failed) return failed.reject(new Error(event.error?.message ?? JSON.stringify(event)))
 +        return process.stderr.write(`voice: ${JSON.stringify(event)}\n`)
 +      }
++      case 'session.output_audio.delta':
++        return call.speak?.(event.delta)
 +      case 'session.closed':
 +        return finish(call, event.reason ?? 'closed')
 +    }
 +  }
 +  socket.onclose = () => finish(call, 'connection closed')
++}
++
++function attach(id: string) {
++  follow(id, new WebSocket(`${API}/${id}/attach`, { headers: { Authorization: `Bearer ${KEY}` } } as any))
++}
++
++function session(extra: object = {}) {
++  return {
++    model: 'gpt-live-1',
++    instructions: VOICE_PROMPT,
++    delegation: { type: 'client' },
++    ...extra,
++  }
++}
++
++async function dial(to = CALLER_NUMBER) {
++  if (!KEY || !TWILIO_SID || !TWILIO_TOKEN || !TWILIO_NUMBER || !PUBLIC_URL)
++    throw new Error(`phone calls need TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_NUMBER and VOICE_PUBLIC_URL in ${join(STATE_DIR, '.env')}`)
++  if (!to) throw new Error('no number to call: pass to, or set CALLER_NUMBER')
++  const token = crypto.randomUUID()
++  dials.add(token)
++  const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Calls.json`, {
++    method: 'POST',
++    headers: { Authorization: `Basic ${btoa(`${TWILIO_SID}:${TWILIO_TOKEN}`)}` },
++    body: new URLSearchParams({
++      To: to,
++      From: TWILIO_NUMBER,
++      Twiml: `<Response><Connect><Stream url="wss://${PUBLIC_URL.replace(/^\w+:\/\//, '')}/twilio/${token}" /></Connect></Response>`,
++    }),
++  })
++  if (!response.ok) {
++    dials.delete(token)
++    throw new Error(`Twilio: ${await response.text()}`)
++  }
++  return `ringing ${to}`
++}
++
++function answer(twilio: Bun.ServerWebSocket<Phone>) {
++  const openai = new WebSocket(API, { headers: { Authorization: `Bearer ${KEY}` } } as any)
++  twilio.data.openai = openai
++  openai.onopen = () =>
++    openai.send(JSON.stringify({
++      type: 'session.start',
++      session: session({ audio: { format: { type: 'audio/pcmu', rate: 8000 }, ...(VOICE ? { output: { voice: VOICE } } : {}) } }),
++    }))
++  openai.addEventListener('message', ({ data }) => {
++    const event = JSON.parse(String(data))
++    if (event.type !== 'session.started') return
++    twilio.data.started = true
++    follow(event.session.id, openai, audio => twilio.send(JSON.stringify({ event: 'media', streamSid: twilio.data.stream, media: { payload: audio } })))
++    openai.send(JSON.stringify({ type: 'session.instructions.append', delegation_id: null, content: 'You placed this phone call. Greet them briefly first, then listen.' }))
++  })
++  openai.addEventListener('close', () => twilio.close())
++}
++
++function hearPhone(twilio: Bun.ServerWebSocket<Phone>, raw: string | Buffer) {
++  const message = JSON.parse(String(raw))
++  if (message.event === 'start') twilio.data.stream = message.start.streamSid
++  if (message.event === 'media' && twilio.data.started)
++    twilio.data.openai?.send(JSON.stringify({ type: 'session.input_audio.append', audio: message.media.payload }))
++  if (message.event === 'stop') hangUp(twilio)
++}
++
++function hangUp(twilio: Bun.ServerWebSocket<Phone>) {
++  const openai = twilio.data.openai
++  if (openai?.readyState === WebSocket.OPEN) openai.send(JSON.stringify({ type: 'session.close' }))
 +}
 +
 +async function start(request: Request) {
@@ -830,12 +954,7 @@ index 0000000000000000000000000000000000000000..3a15b81b1c824921a378bed7de828686
 +    method: 'POST',
 +    headers: { Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json' },
 +    body: JSON.stringify({
-+      session: {
-+        model: 'gpt-live-1',
-+        instructions: VOICE_PROMPT,
-+        delegation: { type: 'client' },
-+        ...(VOICE ? { audio: { output: { voice: VOICE } } } : {}),
-+      },
++      session: session(VOICE ? { audio: { output: { voice: VOICE } } } : {}),
 +      transport: { type: 'webrtc', sdp },
 +    }),
 +  })
@@ -872,13 +991,22 @@ index 0000000000000000000000000000000000000000..3a15b81b1c824921a378bed7de828686
 +process.stdin.on('end', () => process.exit(0))
 +process.stdin.on('close', () => process.exit(0))
 +
-+Bun.serve({
++Bun.serve<Phone>({
 +  port: PORT,
 +  hostname: '127.0.0.1',
-+  fetch(request) {
++  fetch(request, server) {
 +    const { pathname } = new URL(request.url)
++    const token = pathname.match(/^\/twilio\/([\w-]+)$/)?.[1]
++    if (token && dials.delete(token)) return server.upgrade(request, { data: {} }) ? undefined : new Response('upgrade failed', { status: 400 })
 +    if (pathname === '/') return new Response(page, { headers: { 'content-type': 'text/html; charset=utf-8' } })
 +    if (pathname === '/session' && request.method === 'POST') return start(request)
++    if (pathname === '/phone' && request.method === 'POST')
++      return dial().then(text => new Response(text), error => new Response(error.message, { status: 502 }))
 +    return new Response('404', { status: 404 })
++  },
++  websocket: {
++    open: answer,
++    message: hearPhone,
++    close: hangUp,
 +  },
 +})

@@ -21,6 +21,11 @@ const KEY = process.env.OPENAI_API_KEY
 const VOICE = process.env.VOICE
 const PORT = Number(process.env.VOICE_PORT ?? 8790)
 const API = 'https://api.openai.com/v1/live/sessions'
+const TWILIO_SID = process.env.TWILIO_ACCOUNT_SID
+const TWILIO_TOKEN = process.env.TWILIO_AUTH_TOKEN
+const TWILIO_NUMBER = process.env.TWILIO_NUMBER
+const CALLER_NUMBER = process.env.CALLER_NUMBER
+const PUBLIC_URL = process.env.VOICE_PUBLIC_URL
 const HUB = process.env.HEX_HUB
 const THREAD = process.env.HEX_CHANNEL?.startsWith('plugin:voice@') ? process.env.HEX_THREAD : undefined
 
@@ -56,10 +61,12 @@ Backend work keeps running while you talk, and several tasks can run at once. A 
 
 type Pending = { resolve: () => void; reject: (error: Error) => void }
 type Ring = { delegation: string; offset: number }
-type Live = { id: string; socket: WebSocket; call: Call; pending: Map<string, Pending>; rings: Ring[] }
+type Live = { id: string; socket: WebSocket; call: Call; pending: Map<string, Pending>; rings: Ring[]; speak?: (audio: string) => void }
+type Phone = { openai?: WebSocket; stream?: string; started?: true }
 
 let live: Live | undefined
 let seq = 0
+const dials = new Set<string>()
 
 const mcp = new Server(
   { name: 'voice', version: '0.1.0' },
@@ -74,6 +81,8 @@ Each handoff arrives as <channel source="voice" delegation_id="..."> with the tr
 Answer every handoff with say(delegation_id, text): the voice says only what you give it, so you are the one talking. It paraphrases aloud, so write one or two plain spoken sentences, no markdown. Use note for facts the voice should know without saying them yet.
 
 Keep each turn quick so the next handoff reaches you fast. Run anything longer than a quick lookup as a background subagent, put it on the board with task (running, then done or failed), and say its result when it arrives. Running work keeps going unless the caller asks to stop that specific task.
+
+phone rings the caller's phone and holds the same kind of call there, for when you're asked to call them.
 
 A result too long to speak goes wherever the caller reads, if this session has another channel to reach them; say where you sent it. Voice page: http://localhost:${PORT}.`,
   },
@@ -112,12 +121,18 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ['id', 'state', 'text'],
       },
     },
+    {
+      name: 'phone',
+      description: "Ring a phone and hold the call there: the caller's own number unless to is given (E.164, like +14155550123).",
+      inputSchema: { type: 'object', properties: { to: { type: 'string' } } },
+    },
   ],
 }))
 
 mcp.setRequestHandler(CallToolRequestSchema, async request => {
   const args = (request.params.arguments ?? {}) as Record<string, string>
   try {
+    if (request.params.name === 'phone') return done(await dial(args.to))
     if (!live) throw new Error('no call is live')
     switch (request.params.name) {
       case 'say':
@@ -176,10 +191,9 @@ function finish(call: Live, reason: string) {
   call.socket.close()
 }
 
-function attach(id: string) {
+function follow(id: string, socket: WebSocket, speak?: Live['speak']) {
   if (live) finish(live, 'replaced by a new call')
-  const socket = new WebSocket(`${API}/${id}/attach`, { headers: { Authorization: `Bearer ${KEY}` } } as any)
-  const call: Live = { id, socket, call: new Call(), pending: new Map(), rings: [] }
+  const call: Live = { id, socket, call: new Call(), pending: new Map(), rings: [], speak }
   live = call
   deliver('A call started. Send the voice what it should know right away, with note.', { call: id, started: 'true' })
   socket.onmessage = ({ data }) => {
@@ -204,11 +218,79 @@ function attach(id: string) {
         if (failed) return failed.reject(new Error(event.error?.message ?? JSON.stringify(event)))
         return process.stderr.write(`voice: ${JSON.stringify(event)}\n`)
       }
+      case 'session.output_audio.delta':
+        return call.speak?.(event.delta)
       case 'session.closed':
         return finish(call, event.reason ?? 'closed')
     }
   }
   socket.onclose = () => finish(call, 'connection closed')
+}
+
+function attach(id: string) {
+  follow(id, new WebSocket(`${API}/${id}/attach`, { headers: { Authorization: `Bearer ${KEY}` } } as any))
+}
+
+function session(extra: object = {}) {
+  return {
+    model: 'gpt-live-1',
+    instructions: VOICE_PROMPT,
+    delegation: { type: 'client' },
+    ...extra,
+  }
+}
+
+async function dial(to = CALLER_NUMBER) {
+  if (!KEY || !TWILIO_SID || !TWILIO_TOKEN || !TWILIO_NUMBER || !PUBLIC_URL)
+    throw new Error(`phone calls need TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_NUMBER and VOICE_PUBLIC_URL in ${join(STATE_DIR, '.env')}`)
+  if (!to) throw new Error('no number to call: pass to, or set CALLER_NUMBER')
+  const token = crypto.randomUUID()
+  dials.add(token)
+  const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Calls.json`, {
+    method: 'POST',
+    headers: { Authorization: `Basic ${btoa(`${TWILIO_SID}:${TWILIO_TOKEN}`)}` },
+    body: new URLSearchParams({
+      To: to,
+      From: TWILIO_NUMBER,
+      Twiml: `<Response><Connect><Stream url="wss://${PUBLIC_URL.replace(/^\w+:\/\//, '')}/twilio/${token}" /></Connect></Response>`,
+    }),
+  })
+  if (!response.ok) {
+    dials.delete(token)
+    throw new Error(`Twilio: ${await response.text()}`)
+  }
+  return `ringing ${to}`
+}
+
+function answer(twilio: Bun.ServerWebSocket<Phone>) {
+  const openai = new WebSocket(API, { headers: { Authorization: `Bearer ${KEY}` } } as any)
+  twilio.data.openai = openai
+  openai.onopen = () =>
+    openai.send(JSON.stringify({
+      type: 'session.start',
+      session: session({ audio: { format: { type: 'audio/pcmu', rate: 8000 }, ...(VOICE ? { output: { voice: VOICE } } : {}) } }),
+    }))
+  openai.addEventListener('message', ({ data }) => {
+    const event = JSON.parse(String(data))
+    if (event.type !== 'session.started') return
+    twilio.data.started = true
+    follow(event.session.id, openai, audio => twilio.send(JSON.stringify({ event: 'media', streamSid: twilio.data.stream, media: { payload: audio } })))
+    openai.send(JSON.stringify({ type: 'session.instructions.append', delegation_id: null, content: 'You placed this phone call. Greet them briefly first, then listen.' }))
+  })
+  openai.addEventListener('close', () => twilio.close())
+}
+
+function hearPhone(twilio: Bun.ServerWebSocket<Phone>, raw: string | Buffer) {
+  const message = JSON.parse(String(raw))
+  if (message.event === 'start') twilio.data.stream = message.start.streamSid
+  if (message.event === 'media' && twilio.data.started)
+    twilio.data.openai?.send(JSON.stringify({ type: 'session.input_audio.append', audio: message.media.payload }))
+  if (message.event === 'stop') hangUp(twilio)
+}
+
+function hangUp(twilio: Bun.ServerWebSocket<Phone>) {
+  const openai = twilio.data.openai
+  if (openai?.readyState === WebSocket.OPEN) openai.send(JSON.stringify({ type: 'session.close' }))
 }
 
 async function start(request: Request) {
@@ -219,12 +301,7 @@ async function start(request: Request) {
     method: 'POST',
     headers: { Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      session: {
-        model: 'gpt-live-1',
-        instructions: VOICE_PROMPT,
-        delegation: { type: 'client' },
-        ...(VOICE ? { audio: { output: { voice: VOICE } } } : {}),
-      },
+      session: session(VOICE ? { audio: { output: { voice: VOICE } } } : {}),
       transport: { type: 'webrtc', sdp },
     }),
   })
@@ -261,13 +338,22 @@ await mcp.connect(new StdioServerTransport())
 process.stdin.on('end', () => process.exit(0))
 process.stdin.on('close', () => process.exit(0))
 
-Bun.serve({
+Bun.serve<Phone>({
   port: PORT,
   hostname: '127.0.0.1',
-  fetch(request) {
+  fetch(request, server) {
     const { pathname } = new URL(request.url)
+    const token = pathname.match(/^\/twilio\/([\w-]+)$/)?.[1]
+    if (token && dials.delete(token)) return server.upgrade(request, { data: {} }) ? undefined : new Response('upgrade failed', { status: 400 })
     if (pathname === '/') return new Response(page, { headers: { 'content-type': 'text/html; charset=utf-8' } })
     if (pathname === '/session' && request.method === 'POST') return start(request)
+    if (pathname === '/phone' && request.method === 'POST')
+      return dial().then(text => new Response(text), error => new Response(error.message, { status: 502 }))
     return new Response('404', { status: 404 })
+  },
+  websocket: {
+    open: answer,
+    message: hearPhone,
+    close: hangUp,
   },
 })
