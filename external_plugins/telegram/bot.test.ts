@@ -11,6 +11,7 @@ const DESK = `${FORUM}:5`
 const owner = { id: OWNER, is_bot: false, first_name: 'Bassim', username: 'bassim' }
 const hex = { id: 1000, is_bot: true, first_name: 'hex', username: 'hex_bot' }
 const forum = { id: FORUM, type: 'supergroup', title: 'hex', is_forum: true }
+const TRANSCRIBER = 'http://transcriber/v1/audio/transcriptions'
 
 type Call = { method: string; payload: Record<string, any> }
 const calls: Call[] = []
@@ -85,8 +86,12 @@ async function update(fields: Record<string, any>) {
 beforeAll(async () => {
   writeFileSync(join(state, 'access.json'), JSON.stringify({ allowFrom: [String(OWNER)] }))
   writeFileSync(join(state, 'threads.json'), JSON.stringify({ [DESK]: { name: 'desk' }, [`${FORUM}:6`]: { name: 'notes' } }))
-  Object.assign(process.env, { TELEGRAM_STATE_DIR: state, TELEGRAM_BOT_TOKEN: 'token', HEX_LAUNCHER: 'false', HEX_MAIN_THREAD: String(FORUM) })
-  globalThis.fetch = (async () => new Response('jpeg')) as any
+  Object.assign(process.env, { TELEGRAM_STATE_DIR: state, TELEGRAM_BOT_TOKEN: 'token', HEX_LAUNCHER: 'false', HEX_MAIN_THREAD: String(FORUM), TRANSCRIBE_URL: TRANSCRIBER, TRANSCRIBE_MODEL: 'whisper' })
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    if (url !== TRANSCRIBER) return new Response('jpeg')
+    const form = init!.body as FormData
+    return Response.json({ text: form.get('model') === 'whisper' ? ' anchors ship friday ' : 'wrong model' })
+  }) as any
   await import('./bot.ts')
   const socket = connect(join(state, 'hub.sock'))
   let buffer = ''
@@ -265,6 +270,16 @@ test('an album arrives as one message with every photo and the caption', async (
   const album = await inbound(line => line.meta.message_id === String(first.message_id))
   expect(album.content).toBe('the anchors')
   expect(album.meta.image_path.split('; ').map((path: string) => path.replace(/.*\d-/, ''))).toEqual(['one.jpg', 'two.jpg'])
+})
+
+test('a voice message arrives as its transcript, with the recording still attached', async () => {
+  const voice = { file_id: 'v1', file_unique_id: 'v1', duration: 3, mime_type: 'audio/ogg' }
+  const plain = message({ voice })
+  const captioned = message({ voice, caption: 'for the desk' })
+  await update({ message: plain })
+  await update({ message: captioned })
+  expect(await inbound(line => line.meta.message_id === String(plain.message_id))).toMatchObject({ content: '(voice message) anchors ship friday', meta: { attachment_kind: 'voice', attachment_file_id: 'v1' } })
+  expect((await inbound(line => line.meta.message_id === String(captioned.message_id))).content).toBe('for the desk\n\n(voice message) anchors ship friday')
 })
 
 test('polls, dice and games arrive as readable lines', async () => {

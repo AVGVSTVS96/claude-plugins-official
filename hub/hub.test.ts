@@ -3,7 +3,7 @@ import { connect, createServer, type Socket } from 'net'
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, chmodSync, existsSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { startHub, tappable, type Message, type Permission } from './hub.ts'
+import { startHub, tappable, transcribe, type Message, type Permission } from './hub.ts'
 
 const CHANNEL = 'plugin:telegram@hex'
 const SESSION = '0a1b2c3d-0000-4000-8000-000000000000'
@@ -109,6 +109,14 @@ function settingsOf(args: string[]) {
 function registry() {
   return JSON.parse(readFileSync(join(dir, 'threads.json'), 'utf8'))
 }
+
+test('without a transcriber set up, a recording is never fetched or sent anywhere', async () => {
+  delete process.env.TRANSCRIBE_URL
+  delete process.env.TRANSCRIBE_MODEL
+  let fetched = false
+  expect(await transcribe(async () => (fetched = true, 'voice.oga'))).toBeUndefined()
+  expect(fetched).toBe(false)
+})
 
 test('a message for a new thread starts a session bound to that thread', async () => {
   start()

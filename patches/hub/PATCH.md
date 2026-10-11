@@ -4,7 +4,7 @@ id: hub
 summary: Add a client-agnostic hub that gives every chat thread its own Claude Code session and moves threads between clients.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: hub.patch
-patch_sha256: fb2c0c4e8156b28a872cb085ffdecab6441074189e3cb1e07bda70f611419b87
+patch_sha256: 3e16262151674576404a025e80b31595bba9736266f821efcfb9a19a9ffd4add
 ---
 
 ## Intent
@@ -35,7 +35,10 @@ start is reported before the thread goes idle, so a client still waiting on the
 start sees why. A client can open a thread with a prompt, close one (its
 session stops once idle and the thread is forgotten), stop a thread's session
 now (its next message resumes it), find threads by name and rename them. `title` is the one rule
-for thread names every client enforces: one word. A
+for thread names every client enforces: one word. `transcribe` turns a
+recording into text through any OpenAI-compatible transcriptions endpoint set by
+`TRANSCRIBE_URL` and `TRANSCRIBE_MODEL` (and `TRANSCRIBE_API_KEY` if it needs one),
+and fetches nothing and returns nothing without them, so clients fall back to what they did before. A
 local program can hand a thread a message over the socket (`inbound`), as if it
 came from the app. A session's permission prompt (`permission_request`) reaches
 the client with the session's thread, and the client's `answer` goes back to

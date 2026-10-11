@@ -286,10 +286,10 @@ index d72dbc1a759e601dd0188cc7a8c3b58edc04373c..3ecbd0bfb8cc26bae0b85f8a1a1c44e8
 +The bot token lives in `~/.claude/channels/hex/telegram/.env` as `TELEGRAM_BOT_TOKEN=…`, and `access.json` there holds `allowFrom`, the Telegram user ids allowed to talk to it.
 diff --git a/external_plugins/telegram/bot.test.ts b/external_plugins/telegram/bot.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..4486f907176ced9251ed152d6042954c51b3bfdb
+index 0000000000000000000000000000000000000000..eae46ef27e744dc63f3d281746c0becb9b80a5d5
 --- /dev/null
 +++ b/external_plugins/telegram/bot.test.ts
-@@ -0,0 +1,325 @@
+@@ -0,0 +1,340 @@
 +import { beforeAll, expect, mock, test } from 'bun:test'
 +import { connect } from 'net'
 +import { mkdtempSync, writeFileSync } from 'fs'
@@ -303,6 +303,7 @@ index 0000000000000000000000000000000000000000..4486f907176ced9251ed152d6042954c
 +const owner = { id: OWNER, is_bot: false, first_name: 'Bassim', username: 'bassim' }
 +const hex = { id: 1000, is_bot: true, first_name: 'hex', username: 'hex_bot' }
 +const forum = { id: FORUM, type: 'supergroup', title: 'hex', is_forum: true }
++const TRANSCRIBER = 'http://transcriber/v1/audio/transcriptions'
 +
 +type Call = { method: string; payload: Record<string, any> }
 +const calls: Call[] = []
@@ -377,8 +378,12 @@ index 0000000000000000000000000000000000000000..4486f907176ced9251ed152d6042954c
 +beforeAll(async () => {
 +  writeFileSync(join(state, 'access.json'), JSON.stringify({ allowFrom: [String(OWNER)] }))
 +  writeFileSync(join(state, 'threads.json'), JSON.stringify({ [DESK]: { name: 'desk' }, [`${FORUM}:6`]: { name: 'notes' } }))
-+  Object.assign(process.env, { TELEGRAM_STATE_DIR: state, TELEGRAM_BOT_TOKEN: 'token', HEX_LAUNCHER: 'false', HEX_MAIN_THREAD: String(FORUM) })
-+  globalThis.fetch = (async () => new Response('jpeg')) as any
++  Object.assign(process.env, { TELEGRAM_STATE_DIR: state, TELEGRAM_BOT_TOKEN: 'token', HEX_LAUNCHER: 'false', HEX_MAIN_THREAD: String(FORUM), TRANSCRIBE_URL: TRANSCRIBER, TRANSCRIBE_MODEL: 'whisper' })
++  globalThis.fetch = (async (url: string, init?: RequestInit) => {
++    if (url !== TRANSCRIBER) return new Response('jpeg')
++    const form = init!.body as FormData
++    return Response.json({ text: form.get('model') === 'whisper' ? ' anchors ship friday ' : 'wrong model' })
++  }) as any
 +  await import('./bot.ts')
 +  const socket = connect(join(state, 'hub.sock'))
 +  let buffer = ''
@@ -559,6 +564,16 @@ index 0000000000000000000000000000000000000000..4486f907176ced9251ed152d6042954c
 +  expect(album.meta.image_path.split('; ').map((path: string) => path.replace(/.*\d-/, ''))).toEqual(['one.jpg', 'two.jpg'])
 +})
 +
++test('a voice message arrives as its transcript, with the recording still attached', async () => {
++  const voice = { file_id: 'v1', file_unique_id: 'v1', duration: 3, mime_type: 'audio/ogg' }
++  const plain = message({ voice })
++  const captioned = message({ voice, caption: 'for the desk' })
++  await update({ message: plain })
++  await update({ message: captioned })
++  expect(await inbound(line => line.meta.message_id === String(plain.message_id))).toMatchObject({ content: '(voice message) anchors ship friday', meta: { attachment_kind: 'voice', attachment_file_id: 'v1' } })
++  expect((await inbound(line => line.meta.message_id === String(captioned.message_id))).content).toBe('for the desk\n\n(voice message) anchors ship friday')
++})
++
 +test('polls, dice and games arrive as readable lines', async () => {
 +  await update({ message: message({ poll: { id: 'p', question: 'Lunch?', options: [{ text: 'tacos', voter_count: 0 }, { text: 'pho', voter_count: 0 }] } }) })
 +  await update({ message: message({ dice: { emoji: '🎲', value: 4 } }) })
@@ -617,17 +632,17 @@ index 0000000000000000000000000000000000000000..4486f907176ced9251ed152d6042954c
 +})
 diff --git a/external_plugins/telegram/bot.ts b/external_plugins/telegram/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..3437c32b1dd9ec0d314e0884fe60bbc4696fdd72
+index 0000000000000000000000000000000000000000..f8bb846afd11d22c0a94d038271a603ca3d383f0
 --- /dev/null
 +++ b/external_plugins/telegram/bot.ts
-@@ -0,0 +1,883 @@
+@@ -0,0 +1,894 @@
 +#!/usr/bin/env bun
 +import { Bot, GrammyError, InputFile, type Context } from 'grammy'
 +import type { Chat, MessageEntity, MessageOrigin, ReactionTypeEmoji } from 'grammy/types'
 +import { readFileSync, writeFileSync, mkdirSync, statSync, realpathSync, chmodSync } from 'fs'
 +import { homedir } from 'os'
 +import { basename, join, extname, sep } from 'path'
-+import { startHub, clients, move, tappable, title, type Message, type Permission } from '../../hub/hub.ts'
++import { startHub, clients, move, tappable, title, transcribe, type Message, type Permission } from '../../hub/hub.ts'
 +
 +const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'hex', 'telegram')
 +const ACCESS_FILE = join(STATE_DIR, 'access.json')
@@ -1180,9 +1195,20 @@ index 0000000000000000000000000000000000000000..3437c32b1dd9ec0d314e0884fe60bbc4
 +  })
 +})
 +
++// Transcribed on arrival, so the words are the message itself and land in the conversation's log.
++async function hear(file_id: string, uniqueId: string): Promise<string | undefined> {
++  try {
++    return await transcribe(() => download(file_id, uniqueId))
++  } catch (err) {
++    process.stderr.write(`telegram hub: voice transcription failed: ${err}\n`)
++  }
++}
++
 +bot.on('message:voice', async ctx => {
 +  const voice = ctx.message.voice
-+  const text = ctx.message.caption ?? '(voice message)'
++  const heard = allowed(ctx.from) ? await hear(voice.file_id, voice.file_unique_id) : undefined
++  const said = heard ? `(voice message) ${heard}` : '(voice message)'
++  const text = ctx.message.caption ? `${ctx.message.caption}\n\n${said}` : said
 +  await handleInbound(ctx, text, undefined, {
 +    kind: 'voice',
 +    file_id: voice.file_id,

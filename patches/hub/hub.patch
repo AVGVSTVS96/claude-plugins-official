@@ -1,15 +1,15 @@
 diff --git a/hub/hub.test.ts b/hub/hub.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..75bd75e89cbd069635159e646f820f0620cc8f0b
+index 0000000000000000000000000000000000000000..7465d30401220424df3291ff7fe6600c0610355c
 --- /dev/null
 +++ b/hub/hub.test.ts
-@@ -0,0 +1,664 @@
+@@ -0,0 +1,672 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { connect, createServer, type Socket } from 'net'
 +import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, chmodSync, existsSync } from 'fs'
 +import { tmpdir } from 'os'
 +import { join } from 'path'
-+import { startHub, tappable, type Message, type Permission } from './hub.ts'
++import { startHub, tappable, transcribe, type Message, type Permission } from './hub.ts'
 +
 +const CHANNEL = 'plugin:telegram@hex'
 +const SESSION = '0a1b2c3d-0000-4000-8000-000000000000'
@@ -115,6 +115,14 @@ index 0000000000000000000000000000000000000000..75bd75e89cbd069635159e646f820f06
 +function registry() {
 +  return JSON.parse(readFileSync(join(dir, 'threads.json'), 'utf8'))
 +}
++
++test('without a transcriber set up, a recording is never fetched or sent anywhere', async () => {
++  delete process.env.TRANSCRIBE_URL
++  delete process.env.TRANSCRIBE_MODEL
++  let fetched = false
++  expect(await transcribe(async () => (fetched = true, 'voice.oga'))).toBeUndefined()
++  expect(fetched).toBe(false)
++})
 +
 +test('a message for a new thread starts a session bound to that thread', async () => {
 +  start()
@@ -670,16 +678,16 @@ index 0000000000000000000000000000000000000000..75bd75e89cbd069635159e646f820f06
 +})
 diff --git a/hub/hub.ts b/hub/hub.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..8fc3f85f6d18b906d9c714dbea88b3a3499c79ff
+index 0000000000000000000000000000000000000000..c22bd9d858a4a26c4a8dee34d5cd62d888829573
 --- /dev/null
 +++ b/hub/hub.ts
-@@ -0,0 +1,473 @@
+@@ -0,0 +1,486 @@
 +import { createServer, type Socket } from 'net'
 +import { execFile, spawn } from 'child_process'
 +import { createHash } from 'crypto'
 +import { existsSync, readFileSync, writeFileSync, renameSync, rmSync, watch, type FSWatcher } from 'fs'
 +import { homedir } from 'os'
-+import { join } from 'path'
++import { basename, join } from 'path'
 +
 +export type Message = { content: string; meta: Record<string, string> }
 +export type Call = (thread: string, tool: string, args: Record<string, unknown>) => Promise<string>
@@ -699,6 +707,19 @@ index 0000000000000000000000000000000000000000..8fc3f85f6d18b906d9c714dbea88b3a3
 +// Chat apps only link web addresses, so a buzz:// link goes through a page on hex's site that opens it.
 +export function tappable(text: string): string {
 +  return text.replace(/buzz:\/\/[^\s)>\]\\]*[^\s)>\]\\.,;:!?'"]/g, url => `https://hex-sand.vercel.app/open.html#${encodeURIComponent(url)}`)
++}
++
++// TRANSCRIBE_URL is any OpenAI-compatible /audio/transcriptions endpoint.
++export async function transcribe(recording: () => Promise<string>): Promise<string | undefined> {
++  const { TRANSCRIBE_URL: url, TRANSCRIBE_MODEL: model, TRANSCRIBE_API_KEY: key } = process.env
++  if (!url || !model) return
++  const path = await recording()
++  const form = new FormData()
++  form.append('file', Bun.file(path), basename(path))
++  form.append('model', model)
++  const res = await fetch(url, { method: 'POST', body: form, headers: key ? { authorization: `Bearer ${key}` } : {} })
++  if (!res.ok) throw new Error(`transcription failed: HTTP ${res.status}`)
++  return ((await res.json()) as { text?: string }).text?.trim() || undefined
 +}
 +
 +const CLAUDE = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude')

@@ -4,7 +4,7 @@ import type { Chat, MessageEntity, MessageOrigin, ReactionTypeEmoji } from 'gram
 import { readFileSync, writeFileSync, mkdirSync, statSync, realpathSync, chmodSync } from 'fs'
 import { homedir } from 'os'
 import { basename, join, extname, sep } from 'path'
-import { startHub, clients, move, tappable, title, type Message, type Permission } from '../../hub/hub.ts'
+import { startHub, clients, move, tappable, title, transcribe, type Message, type Permission } from '../../hub/hub.ts'
 
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'hex', 'telegram')
 const ACCESS_FILE = join(STATE_DIR, 'access.json')
@@ -557,9 +557,20 @@ bot.on('message:document', async ctx => {
   })
 })
 
+// Transcribed on arrival, so the words are the message itself and land in the conversation's log.
+async function hear(file_id: string, uniqueId: string): Promise<string | undefined> {
+  try {
+    return await transcribe(() => download(file_id, uniqueId))
+  } catch (err) {
+    process.stderr.write(`telegram hub: voice transcription failed: ${err}\n`)
+  }
+}
+
 bot.on('message:voice', async ctx => {
   const voice = ctx.message.voice
-  const text = ctx.message.caption ?? '(voice message)'
+  const heard = allowed(ctx.from) ? await hear(voice.file_id, voice.file_unique_id) : undefined
+  const said = heard ? `(voice message) ${heard}` : '(voice message)'
+  const text = ctx.message.caption ? `${ctx.message.caption}\n\n${said}` : said
   await handleInbound(ctx, text, undefined, {
     kind: 'voice',
     file_id: voice.file_id,

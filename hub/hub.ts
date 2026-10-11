@@ -3,7 +3,7 @@ import { execFile, spawn } from 'child_process'
 import { createHash } from 'crypto'
 import { existsSync, readFileSync, writeFileSync, renameSync, rmSync, watch, type FSWatcher } from 'fs'
 import { homedir } from 'os'
-import { join } from 'path'
+import { basename, join } from 'path'
 
 export type Message = { content: string; meta: Record<string, string> }
 export type Call = (thread: string, tool: string, args: Record<string, unknown>) => Promise<string>
@@ -23,6 +23,19 @@ export const clients = new Map<string, { hub: Hub; place: (name: string, where?:
 // Chat apps only link web addresses, so a buzz:// link goes through a page on hex's site that opens it.
 export function tappable(text: string): string {
   return text.replace(/buzz:\/\/[^\s)>\]\\]*[^\s)>\]\\.,;:!?'"]/g, url => `https://hex-sand.vercel.app/open.html#${encodeURIComponent(url)}`)
+}
+
+// TRANSCRIBE_URL is any OpenAI-compatible /audio/transcriptions endpoint.
+export async function transcribe(recording: () => Promise<string>): Promise<string | undefined> {
+  const { TRANSCRIBE_URL: url, TRANSCRIBE_MODEL: model, TRANSCRIBE_API_KEY: key } = process.env
+  if (!url || !model) return
+  const path = await recording()
+  const form = new FormData()
+  form.append('file', Bun.file(path), basename(path))
+  form.append('model', model)
+  const res = await fetch(url, { method: 'POST', body: form, headers: key ? { authorization: `Bearer ${key}` } : {} })
+  if (!res.ok) throw new Error(`transcription failed: HTTP ${res.status}`)
+  return ((await res.json()) as { text?: string }).text?.trim() || undefined
 }
 
 const CLAUDE = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude')

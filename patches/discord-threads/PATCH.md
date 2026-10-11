@@ -4,7 +4,7 @@ id: discord-threads
 summary: Rework the Discord channel so every thread in a server is its own Claude Code session, Claude-tag style, through the thread hub.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: discord-threads.patch
-patch_sha256: d7e36a05ce68944714119348550831d17f807b4d7feb1f5777145e706a75e08d
+patch_sha256: 4861a7f20c71d736002153f46ad3f40c4a0c3ef68182162d2d3551380636ed1b
 ---
 
 ## Intent
@@ -62,6 +62,9 @@ Discord is the place for deeper work, Claude-tag style:
   author, text and attachments.
 - An edit reaches the session again, marked `edited`. A forward carries the
   forwarded message's text and attachments, marked `forwarded`.
+- A voice message arrives as its transcript, `(voice message) <words>`, when the
+  hub has a transcriber (`transcribe`); otherwise as before. The recording stays
+  listed in the attachment meta.
 - Stickers arrive with their names and image URLs, and polls with their
   question and options.
 - The sender's reactions, added or removed, and deleted messages reach a

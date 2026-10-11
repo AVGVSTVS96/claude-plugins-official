@@ -36,7 +36,7 @@ import {
 import { readFileSync, writeFileSync, mkdirSync, statSync, realpathSync, chmodSync } from 'fs'
 import { homedir } from 'os'
 import { basename, join, sep } from 'path'
-import { startHub, clients, move, tappable, title, type Message } from '../../hub/hub.ts'
+import { startHub, clients, move, tappable, title, transcribe, type Message } from '../../hub/hub.ts'
 
 const STATE_DIR = process.env.DISCORD_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'hex', 'discord')
 const ACCESS_FILE = join(STATE_DIR, 'access.json')
@@ -193,6 +193,16 @@ async function downloadAttachment(att: Attachment): Promise<string> {
   mkdirSync(INBOX_DIR, { recursive: true })
   writeFileSync(path, buf)
   return path
+}
+
+// Transcribed on arrival, so the words are the message itself and land in the conversation's log.
+async function hear(att: Attachment | undefined): Promise<string | undefined> {
+  if (!att) return
+  try {
+    return await transcribe(() => downloadAttachment(att))
+  } catch (err) {
+    process.stderr.write(`discord hub: voice transcription failed: ${err}\n`)
+  }
 }
 
 function serve(token: string) {
@@ -516,9 +526,10 @@ function serve(token: string) {
     const atts = listed(source.attachments)
     const stickers = source.stickers.map(s => `${s.name} (${s.url})`)
     const poll = msg.poll
+    const heard = source.flags.has(MessageFlags.IsVoiceMessage) ? await hear(source.attachments.first()) : undefined
 
     const message: Message = {
-      content: source.content.replace(/<@[!&]?\d+>/g, '').trim() || (atts.length > 0 ? '(attachment)' : stickers.length > 0 ? '(sticker)' : poll ? '(poll)' : ''),
+      content: heard ? `(voice message) ${heard}` : source.content.replace(/<@[!&]?\d+>/g, '').trim() || (atts.length > 0 ? '(attachment)' : stickers.length > 0 ? '(sticker)' : poll ? '(poll)' : ''),
       meta: {
         chat_id: ch.id,
         message_id: msg.id,

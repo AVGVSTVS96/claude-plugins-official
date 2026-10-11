@@ -290,10 +290,10 @@ index ad04f6fa437bfa013f72f71de2b460f3eedeeeee..ba2d961c0f87a99cc5f532545276a240
 +The bot token lives in `~/.claude/channels/hex/discord/.env` as `DISCORD_BOT_TOKEN=…`, and `access.json` there holds `allowFrom`, the Discord user ids allowed to talk to it. The bot needs the Message Content intent, and in its server: View Channels, Send Messages, Send Messages in Threads, Create Public Threads, Manage Threads, Read Message History, Attach Files and Add Reactions.
 diff --git a/external_plugins/discord/bot.test.ts b/external_plugins/discord/bot.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..82e17b896cf26da6a9cbe9b29cc2bbe179a2f11e
+index 0000000000000000000000000000000000000000..f62b03d681eae223df3da6d8652c73b95ea76344
 --- /dev/null
 +++ b/external_plugins/discord/bot.test.ts
-@@ -0,0 +1,436 @@
+@@ -0,0 +1,452 @@
 +import { beforeAll, expect, mock, test } from 'bun:test'
 +import { connect } from 'net'
 +import { mkdirSync, mkdtempSync, writeFileSync } from 'fs'
@@ -301,7 +301,8 @@ index 0000000000000000000000000000000000000000..82e17b896cf26da6a9cbe9b29cc2bbe1
 +import { join } from 'path'
 +import * as discord from 'discord.js'
 +
-+const { ChannelType, Collection, MessageType, SnowflakeUtil } = discord
++const { ChannelType, Collection, MessageFlags, MessageFlagsBitField, MessageType, SnowflakeUtil } = discord
++const TRANSCRIBER = 'http://transcriber/v1/audio/transcriptions'
 +const BOT = '1000'
 +const OWNER = '2000'
 +const GUILD = '3000'
@@ -363,6 +364,7 @@ index 0000000000000000000000000000000000000000..82e17b896cf26da6a9cbe9b29cc2bbe1
 +    author: owner,
 +    channel: where,
 +    channelId: where.id,
++    flags: new MessageFlagsBitField(),
 +    attachments: new Collection(),
 +    messageSnapshots: new Collection(),
 +    stickers: new Collection(),
@@ -442,7 +444,13 @@ index 0000000000000000000000000000000000000000..82e17b896cf26da6a9cbe9b29cc2bbe1
 +
 +beforeAll(async () => {
 +  writeFileSync(join(state, 'access.json'), JSON.stringify({ allowFrom: [OWNER] }))
-+  Object.assign(process.env, { DISCORD_STATE_DIR: state, DISCORD_BOT_TOKEN: 'token', HEX_LAUNCHER: 'false' })
++  Object.assign(process.env, { DISCORD_STATE_DIR: state, DISCORD_BOT_TOKEN: 'token', HEX_LAUNCHER: 'false', TRANSCRIBE_URL: TRANSCRIBER, TRANSCRIBE_MODEL: 'whisper' })
++  const fetch = globalThis.fetch
++  globalThis.fetch = (async (url: string, init?: RequestInit) => {
++    if (url === 'https://cdn.discord/voice-message.ogg') return new Response('ogg')
++    if (url !== TRANSCRIBER) return fetch(url, init)
++    return Response.json({ text: (init!.body as FormData).get('model') === 'whisper' ? ' anchors ship friday ' : 'wrong model' })
++  }) as any
 +  await import('./bot.ts')
 +  ;({ received, call } = await session(here.id))
 +})
@@ -491,11 +499,19 @@ index 0000000000000000000000000000000000000000..82e17b896cf26da6a9cbe9b29cc2bbe1
 +  expect(edit.content).toBe('the right ones')
 +  expect(edit.meta.new_thread).toBeUndefined()
 +
-+  const forward = { ...say(here, 9, ''), ...live(here), messageSnapshots: new Collection([['1', { content: 'ship it friday', attachments: new Collection(), stickers: new Collection() }]]) }
++  const forward = { ...say(here, 9, ''), ...live(here), messageSnapshots: new Collection([['1', { content: 'ship it friday', flags: new MessageFlagsBitField(), attachments: new Collection(), stickers: new Collection() }]]) }
 +  handlers.get('messageCreate')!(forward)
 +  const forwarded = await inbound(forward.id)
 +  expect(forwarded.content).toBe('ship it friday')
 +  expect(forwarded.meta.forwarded).toBe('true')
++})
++
++test('a voice message arrives as its transcript, with the recording still listed', async () => {
++  const recording = { id: '61', name: 'voice-message.ogg', url: 'https://cdn.discord/voice-message.ogg', contentType: 'audio/ogg', size: 2048 }
++  const voice = { ...say(here, 40, ''), ...live(here), flags: new MessageFlagsBitField(MessageFlags.IsVoiceMessage), attachments: new Collection([[recording.id, recording]]) }
++  handlers.get('messageCreate')!(voice)
++  const heard = await until(() => received.find(line => line.type === 'inbound' && line.meta.message_id === voice.id))
++  expect(heard).toMatchObject({ content: '(voice message) anchors ship friday', meta: { attachments: 'voice-message.ogg (audio/ogg, 2KB)' } })
 +})
 +
 +test('fetch_messages reads a channel\'s top-level messages oldest-first, with each thread\'s replies, and pages back', async () => {
@@ -732,10 +748,10 @@ index 0000000000000000000000000000000000000000..82e17b896cf26da6a9cbe9b29cc2bbe1
 +})
 diff --git a/external_plugins/discord/bot.ts b/external_plugins/discord/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..12294ec68ab3ea3d1ba0350e7dbff20d4233bd97
+index 0000000000000000000000000000000000000000..957d124ba39b25a0d4a80378b4ceb425ca04f16c
 --- /dev/null
 +++ b/external_plugins/discord/bot.ts
-@@ -0,0 +1,692 @@
+@@ -0,0 +1,703 @@
 +#!/usr/bin/env bun
 +import {
 +  Client,
@@ -774,7 +790,7 @@ index 0000000000000000000000000000000000000000..12294ec68ab3ea3d1ba0350e7dbff20d
 +import { readFileSync, writeFileSync, mkdirSync, statSync, realpathSync, chmodSync } from 'fs'
 +import { homedir } from 'os'
 +import { basename, join, sep } from 'path'
-+import { startHub, clients, move, tappable, title, type Message } from '../../hub/hub.ts'
++import { startHub, clients, move, tappable, title, transcribe, type Message } from '../../hub/hub.ts'
 +
 +const STATE_DIR = process.env.DISCORD_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'hex', 'discord')
 +const ACCESS_FILE = join(STATE_DIR, 'access.json')
@@ -931,6 +947,16 @@ index 0000000000000000000000000000000000000000..12294ec68ab3ea3d1ba0350e7dbff20d
 +  mkdirSync(INBOX_DIR, { recursive: true })
 +  writeFileSync(path, buf)
 +  return path
++}
++
++// Transcribed on arrival, so the words are the message itself and land in the conversation's log.
++async function hear(att: Attachment | undefined): Promise<string | undefined> {
++  if (!att) return
++  try {
++    return await transcribe(() => downloadAttachment(att))
++  } catch (err) {
++    process.stderr.write(`discord hub: voice transcription failed: ${err}\n`)
++  }
 +}
 +
 +function serve(token: string) {
@@ -1254,9 +1280,10 @@ index 0000000000000000000000000000000000000000..12294ec68ab3ea3d1ba0350e7dbff20d
 +    const atts = listed(source.attachments)
 +    const stickers = source.stickers.map(s => `${s.name} (${s.url})`)
 +    const poll = msg.poll
++    const heard = source.flags.has(MessageFlags.IsVoiceMessage) ? await hear(source.attachments.first()) : undefined
 +
 +    const message: Message = {
-+      content: source.content.replace(/<@[!&]?\d+>/g, '').trim() || (atts.length > 0 ? '(attachment)' : stickers.length > 0 ? '(sticker)' : poll ? '(poll)' : ''),
++      content: heard ? `(voice message) ${heard}` : source.content.replace(/<@[!&]?\d+>/g, '').trim() || (atts.length > 0 ? '(attachment)' : stickers.length > 0 ? '(sticker)' : poll ? '(poll)' : ''),
 +      meta: {
 +        chat_id: ch.id,
 +        message_id: msg.id,

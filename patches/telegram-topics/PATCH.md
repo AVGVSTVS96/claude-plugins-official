@@ -4,7 +4,7 @@ id: telegram-topics
 summary: Rework the Telegram channel so every forum topic in a group is its own Claude Code session, through the thread hub.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: telegram-topics.patch
-patch_sha256: f208ca166482f03924e32b7b2070efb7d63f1585ce484ae5432f5008a121b231
+patch_sha256: de813e75af85cd40c8ca3dc05b7ef81d7f0ce878268c4fcece915527fbd6559f
 ---
 
 ## Intent
@@ -57,6 +57,9 @@ On top of upstream:
   reaction on a forum message it never saw is dropped.
 - A reply to a message in another topic or chat (`external_reply`) fills
   the same `reply_to_*` meta, with its text when the hub saw it.
+- A voice message arrives as its transcript, `(voice message) <words>` after any
+  caption, when the hub has a transcriber (`transcribe`); without one, or if it
+  fails, it arrives as `(voice message)`. The recording stays in the attachment meta.
 - A photo album arrives as one message with every file and the caption.
   Telegram sends no event when an album is complete, so the hub waits a
   second after its last item.

@@ -5,7 +5,8 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import * as discord from 'discord.js'
 
-const { ChannelType, Collection, MessageType, SnowflakeUtil } = discord
+const { ChannelType, Collection, MessageFlags, MessageFlagsBitField, MessageType, SnowflakeUtil } = discord
+const TRANSCRIBER = 'http://transcriber/v1/audio/transcriptions'
 const BOT = '1000'
 const OWNER = '2000'
 const GUILD = '3000'
@@ -67,6 +68,7 @@ function say(where: Channel, minute: number, content: string, fields: Channel = 
     author: owner,
     channel: where,
     channelId: where.id,
+    flags: new MessageFlagsBitField(),
     attachments: new Collection(),
     messageSnapshots: new Collection(),
     stickers: new Collection(),
@@ -146,7 +148,13 @@ async function until<T>(check: () => T | undefined, timeout = 3000): Promise<T> 
 
 beforeAll(async () => {
   writeFileSync(join(state, 'access.json'), JSON.stringify({ allowFrom: [OWNER] }))
-  Object.assign(process.env, { DISCORD_STATE_DIR: state, DISCORD_BOT_TOKEN: 'token', HEX_LAUNCHER: 'false' })
+  Object.assign(process.env, { DISCORD_STATE_DIR: state, DISCORD_BOT_TOKEN: 'token', HEX_LAUNCHER: 'false', TRANSCRIBE_URL: TRANSCRIBER, TRANSCRIBE_MODEL: 'whisper' })
+  const fetch = globalThis.fetch
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    if (url === 'https://cdn.discord/voice-message.ogg') return new Response('ogg')
+    if (url !== TRANSCRIBER) return fetch(url, init)
+    return Response.json({ text: (init!.body as FormData).get('model') === 'whisper' ? ' anchors ship friday ' : 'wrong model' })
+  }) as any
   await import('./bot.ts')
   ;({ received, call } = await session(here.id))
 })
@@ -195,11 +203,19 @@ test('a reply says which message it answers, an edit comes back marked edited, a
   expect(edit.content).toBe('the right ones')
   expect(edit.meta.new_thread).toBeUndefined()
 
-  const forward = { ...say(here, 9, ''), ...live(here), messageSnapshots: new Collection([['1', { content: 'ship it friday', attachments: new Collection(), stickers: new Collection() }]]) }
+  const forward = { ...say(here, 9, ''), ...live(here), messageSnapshots: new Collection([['1', { content: 'ship it friday', flags: new MessageFlagsBitField(), attachments: new Collection(), stickers: new Collection() }]]) }
   handlers.get('messageCreate')!(forward)
   const forwarded = await inbound(forward.id)
   expect(forwarded.content).toBe('ship it friday')
   expect(forwarded.meta.forwarded).toBe('true')
+})
+
+test('a voice message arrives as its transcript, with the recording still listed', async () => {
+  const recording = { id: '61', name: 'voice-message.ogg', url: 'https://cdn.discord/voice-message.ogg', contentType: 'audio/ogg', size: 2048 }
+  const voice = { ...say(here, 40, ''), ...live(here), flags: new MessageFlagsBitField(MessageFlags.IsVoiceMessage), attachments: new Collection([[recording.id, recording]]) }
+  handlers.get('messageCreate')!(voice)
+  const heard = await until(() => received.find(line => line.type === 'inbound' && line.meta.message_id === voice.id))
+  expect(heard).toMatchObject({ content: '(voice message) anchors ship friday', meta: { attachments: 'voice-message.ogg (audio/ogg, 2KB)' } })
 })
 
 test('fetch_messages reads a channel\'s top-level messages oldest-first, with each thread\'s replies, and pages back', async () => {
