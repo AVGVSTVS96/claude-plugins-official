@@ -4,7 +4,7 @@ id: telegram-topics
 summary: Rework the Telegram channel so every forum topic in a group is its own Claude Code session, through the thread hub.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: telegram-topics.patch
-patch_sha256: d06e86c6e4b70bcf16f2362537fafaf9ac853cd1e479e555a22586523fce202e
+patch_sha256: 1cc72a0ba147e6f0ac28c31379148ac7efbaee282dc5f746547171148dcb2b32
 ---
 
 ## Intent
@@ -69,6 +69,13 @@ On top of upstream:
 - `poll` sends a poll whose votes come back as messages; `delete_message`,
   `pin`, `forward` into a topic by name, and `react` with `remove`.
   `edit_message` changes a file's caption, or replaces the file.
+- Permission prompts relay to the session's own topic (`claude/channel/permission`):
+  what will run, with Allow and Deny buttons. Only an allowlisted user's tap
+  answers, and it goes to Claude Code as the verdict rather than to the session
+  as a message; the message keeps the chosen button, disabled. Claude Code takes
+  whichever answer comes first and says nothing when the prompt is answered in
+  the session itself, but a turn can't end while one is open, so a prompt still
+  open when its session goes idle shows it is no longer waiting.
 - `rename_thread` renames a topic or changes its icon in Telegram. Every
   new topic gets a random icon from Telegram's topic icon set.
 - A new topic starts with the request that asked for it and the session's
@@ -87,7 +94,8 @@ On top of upstream:
    the server and never signals it.
 5. Deliberately dropped from upstream, never ported back: pairing and
    `/telegram:access` (single user; `access.json` holds `allowFrom`), bot
-   commands, permission relay, and the `bot.pid` takeover.
+   commands, upstream's permission relay to every allowlisted DM (prompts go
+   to the asking session's own topic instead), and the `bot.pid` takeover.
 6. Inside a topic, Telegram makes every message a reply to the topic's
    creation message; those carry no `reply_to_*` meta.
 7. Keep upstream's wording and structure wherever code is shared, so heals

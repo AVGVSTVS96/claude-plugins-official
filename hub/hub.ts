@@ -8,6 +8,7 @@ export type Message = { content: string; meta: Record<string, string> }
 export type Call = (thread: string, tool: string, args: Record<string, unknown>) => Promise<string>
 export type State = (thread: string, busy: boolean) => void
 export type Failed = (thread: string, reason: string) => void
+export type Permission = { request_id: string; tool_name: string; description: string; input_preview: string }
 type Thread = { name: string; session?: string; cwd?: string }
 type Agent = { sessionId: string; pid?: number; status?: string }
 export type Hub = ReturnType<typeof startHub>
@@ -33,7 +34,7 @@ export function title(text: string): string {
   return title
 }
 
-export function startHub({ stateDir, channel, main, mainName = 'main', call, state, failed, args = () => [], idleStop = IDLE_STOP, relaunch = RELAUNCH, jobsDir = JOBS, hexDir = process.cwd(), projectsDir = join(CLAUDE, 'projects'), launcher = 'claude' }: {
+export function startHub({ stateDir, channel, main, mainName = 'main', call, state, failed, permission, args = () => [], idleStop = IDLE_STOP, relaunch = RELAUNCH, jobsDir = JOBS, hexDir = process.cwd(), projectsDir = join(CLAUDE, 'projects'), launcher = 'claude' }: {
   stateDir: string
   channel: string
   main?: string
@@ -41,6 +42,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
   call: Call
   state: State
   failed: Failed
+  permission?: (thread: string, request: Permission) => void
   args?: (thread: string) => string[]
   idleStop?: number
   relaunch?: number
@@ -359,6 +361,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
       if (request.type === 'hello') welcome(thread = request.thread, request.session, socket)
       if (request.type === 'state') setState(request.thread, request.busy)
       if (request.type === 'open') launch(request.thread, request.name, request.prompt)
+      if (request.type === 'permission_request') permission?.(thread, request)
       if (request.type === 'inbound') deliver(request.thread, threads[request.thread]?.name ?? request.thread, { content: request.content, meta: request.meta })
       if (request.type === 'call') {
         call(thread, request.tool, request.args ?? {}).then(
@@ -398,6 +401,10 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
     name: (thread: string) => threads[thread]?.name,
     cwd: (thread: string) => threads[thread]?.cwd,
     stop,
+    answer: (thread: string, request_id: string, behavior: 'allow' | 'deny') => {
+      const socket = live.get(thread)
+      if (socket) send(socket, { type: 'permission', request_id, behavior })
+    },
     release,
     adopt,
     retire,

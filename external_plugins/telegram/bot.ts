@@ -4,7 +4,7 @@ import type { Chat, MessageEntity, MessageOrigin, ReactionTypeEmoji } from 'gram
 import { readFileSync, writeFileSync, mkdirSync, statSync, realpathSync, chmodSync } from 'fs'
 import { homedir } from 'os'
 import { basename, join, extname, sep } from 'path'
-import { startHub, clients, move, tappable, title, type Message } from '../../hub/hub.ts'
+import { startHub, clients, move, tappable, title, type Message, type Permission } from '../../hub/hub.ts'
 
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'hex', 'telegram')
 const ACCESS_FILE = join(STATE_DIR, 'access.json')
@@ -210,6 +210,47 @@ function showTyping(thread: string, busy: boolean): void {
   if (!busy) return
   sendTyping(thread)
   typing.set(thread, setInterval(() => sendTyping(thread), 4000))
+}
+
+// Claude Code sends no event when a prompt is answered in the session itself, but a
+// turn can't end while one is open, so whatever is still asking by then is moot.
+const asking = new Map<string, Set<number>>()
+
+async function ask(thread: string, { request_id, tool_name, description, input_preview }: Permission): Promise<void> {
+  const { chat_id, extra } = target(thread)
+  const text = `🔐 ${tool_name}: ${description}\n\n${preview(input_preview, description)}`.slice(0, MAX_CHUNK_LIMIT)
+  const sent = await bot.api.sendMessage(chat_id, text, {
+    ...extra,
+    reply_markup: { inline_keyboard: [[
+      { text: 'Allow', callback_data: `perm:allow:${request_id}` },
+      { text: 'Deny', callback_data: `perm:deny:${request_id}` },
+    ]] },
+  })
+  remember(thread, sent.message_id, { text, user: me() })
+  asking.set(thread, (asking.get(thread) ?? new Set()).add(sent.message_id))
+}
+
+function preview(input: string, description: string): string {
+  try {
+    return Object.entries(JSON.parse(input))
+      .filter(([, value]) => value !== description)
+      .map(([key, value]) => `${key}: ${typeof value === 'string' ? value : JSON.stringify(value)}`)
+      .join('\n')
+  } catch {
+    return input
+  }
+}
+
+function settle(thread: string, busy: boolean): void {
+  showTyping(thread, busy)
+  if (busy) return
+  const { chat_id } = target(thread)
+  for (const id of asking.get(thread) ?? []) {
+    void bot.api.editMessageReplyMarkup(chat_id, id, {
+      reply_markup: { inline_keyboard: [[{ text: 'No longer waiting', disabled: {} }]] },
+    }).catch(() => {})
+  }
+  asking.delete(thread)
 }
 
 async function icons() {
@@ -449,7 +490,8 @@ const hub = startHub({
   launcher: process.env.HEX_LAUNCHER,
   mainName: process.env.HEX_NAME,
   call: callOrForget,
-  state: showTyping,
+  state: settle,
+  permission: (thread, request) => void ask(thread, request).catch(err => process.stderr.write(`telegram hub: couldn't relay a permission prompt to ${thread}: ${err}\n`)),
   failed: (thread, reason) => {
     const { chat_id, extra } = target(thread)
     void bot.api.sendMessage(chat_id, `Couldn't start this topic's session: ${reason}`, extra).catch(() => {})
@@ -613,13 +655,18 @@ function plainThread(chat: Chat): string | undefined {
 
 bot.on('callback_query:data', async ctx => {
   await ctx.answerCallbackQuery().catch(() => {})
-  const message = ctx.callbackQuery.message
-  const label = message && 'reply_markup' in message ? message.reply_markup?.inline_keyboard.flat()[Number(ctx.callbackQuery.data)]?.text : undefined
+  const { data, message } = ctx.callbackQuery
+  const label = message && 'reply_markup' in message ? message.reply_markup?.inline_keyboard.flat().find(button => 'callback_data' in button && button.callback_data === data)?.text : undefined
   if (!message || !label || !allowed(ctx.from)) return
   await bot.api.editMessageReplyMarkup(message.chat.id, message.message_id, {
     reply_markup: { inline_keyboard: [[{ text: `✓ ${label}`, disabled: {} }]] },
   }).catch(err => process.stderr.write(`telegram hub: couldn't mark the tapped button: ${err}\n`))
   const thread = threadOf(ctx)
+  const verdict = data.match(/^perm:(allow|deny):([a-km-z]{5})$/)
+  if (verdict) {
+    asking.get(thread)?.delete(message.message_id)
+    return hub.answer(thread, verdict[2]!, verdict[1] as 'allow' | 'deny')
+  }
   hub.deliver(thread, nameOf(ctx, thread), {
     content: label,
     meta: {

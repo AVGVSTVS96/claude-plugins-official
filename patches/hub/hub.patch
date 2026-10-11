@@ -1,15 +1,15 @@
 diff --git a/hub/hub.test.ts b/hub/hub.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..595b662093ba7c8e208b95f03d036a4ee98c0d12
+index 0000000000000000000000000000000000000000..191065845410acafe653ea950fa8bee976fd789f
 --- /dev/null
 +++ b/hub/hub.test.ts
-@@ -0,0 +1,557 @@
+@@ -0,0 +1,583 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { connect, type Socket } from 'net'
 +import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, chmodSync, existsSync } from 'fs'
 +import { tmpdir } from 'os'
 +import { join } from 'path'
-+import { startHub, tappable, type Message } from './hub.ts'
++import { startHub, tappable, type Message, type Permission } from './hub.ts'
 +
 +const CHANNEL = 'plugin:telegram@hex'
 +const SESSION = '0a1b2c3d-0000-4000-8000-000000000000'
@@ -19,6 +19,7 @@ index 0000000000000000000000000000000000000000..595b662093ba7c8e208b95f03d036a4e
 +let hub: ReturnType<typeof startHub>
 +let states: [string, boolean][]
 +let failures: [string, string][]
++let prompts: [string, Permission][]
 +const sockets: Socket[] = []
 +
 +beforeEach(() => {
@@ -47,6 +48,7 @@ index 0000000000000000000000000000000000000000..595b662093ba7c8e208b95f03d036a4e
 +  if (options.agents) writeFileSync(join(dir, 'agents'), JSON.stringify(options.agents))
 +  const seen: [string, boolean][] = (states = [])
 +  const failedSeen: [string, string][] = (failures = [])
++  const asked: [string, Permission][] = (prompts = [])
 +  hub = startHub({
 +    stateDir: dir,
 +    channel: CHANNEL,
@@ -54,6 +56,7 @@ index 0000000000000000000000000000000000000000..595b662093ba7c8e208b95f03d036a4e
 +    call: async (thread, tool) => `${tool} in ${thread}`,
 +    state: (thread, busy) => void seen.push([thread, busy]),
 +    failed: (thread, reason) => void failedSeen.push([thread, reason]),
++    permission: (thread, request) => void asked.push([thread, request]),
 +    jobsDir: join(dir, 'jobs'),
 +    hexDir: join(dir, 'hex'),
 +    projectsDir: join(dir, 'projects'),
@@ -226,6 +229,21 @@ index 0000000000000000000000000000000000000000..595b662093ba7c8e208b95f03d036a4e
 +  expect(received[0]).toEqual({ type: 'result', id: 1, text: 'reply in chat:9' })
 +})
 +
++test('a permission prompt reaches the client with its thread, and the answer goes back to that session alone', async () => {
++  start()
++  const desk = await session('chat:9')
++  const other = await session('chat:10')
++  const request = { request_id: 'abcde', tool_name: 'Bash', description: 'List files', input_preview: '{"command":"ls"}' }
++  desk.send({ type: 'permission_request', ...request })
++  const [thread, asked] = await until(() => prompts[0])
++  expect(thread).toBe('chat:9')
++  expect(asked).toMatchObject(request)
++  hub.answer('chat:9', 'abcde', 'allow')
++  await until(() => desk.received.length)
++  expect(desk.received).toEqual([{ type: 'permission', request_id: 'abcde', behavior: 'allow' }])
++  expect(other.received).toEqual([])
++})
++
 +test('busy and idle from session hooks reach the client, and a dropped session is idle', async () => {
 +  start()
 +  const { socket } = await session('chat:9')
@@ -253,6 +271,14 @@ index 0000000000000000000000000000000000000000..595b662093ba7c8e208b95f03d036a4e
 +  send({ type: 'state', thread: 'chat:7', busy: false })
 +  const stop = await until(() => calls().find(args => args[0] === 'stop'))
 +  expect(stop).toEqual(['stop', SESSION.slice(0, 8)])
++})
++
++test('a session that starts without a prompt is stopped once idle', async () => {
++  start({ idleStop: 50 })
++  hub.open('chat:8', 'OpenAI')
++  await launched()
++  await session('chat:8')
++  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
 +})
 +
 +test('an idle thread whose session Claude still reports busy is not stopped until it goes idle again', async () => {
@@ -563,10 +589,10 @@ index 0000000000000000000000000000000000000000..595b662093ba7c8e208b95f03d036a4e
 +})
 diff --git a/hub/hub.ts b/hub/hub.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..8ed7756fc89bada598f435542629b915a2c3632a
+index 0000000000000000000000000000000000000000..d0896438ede7de15eb14999331fca64332e82f71
 --- /dev/null
 +++ b/hub/hub.ts
-@@ -0,0 +1,415 @@
+@@ -0,0 +1,433 @@
 +import { createServer, type Socket } from 'net'
 +import { execFile, spawn } from 'child_process'
 +import { existsSync, readFileSync, writeFileSync, renameSync, rmSync, watch, type FSWatcher } from 'fs'
@@ -577,6 +603,7 @@ index 0000000000000000000000000000000000000000..8ed7756fc89bada598f435542629b915
 +export type Call = (thread: string, tool: string, args: Record<string, unknown>) => Promise<string>
 +export type State = (thread: string, busy: boolean) => void
 +export type Failed = (thread: string, reason: string) => void
++export type Permission = { request_id: string; tool_name: string; description: string; input_preview: string }
 +type Thread = { name: string; session?: string; cwd?: string }
 +type Agent = { sessionId: string; pid?: number; status?: string }
 +export type Hub = ReturnType<typeof startHub>
@@ -602,7 +629,7 @@ index 0000000000000000000000000000000000000000..8ed7756fc89bada598f435542629b915
 +  return title
 +}
 +
-+export function startHub({ stateDir, channel, main, mainName = 'main', call, state, failed, args = () => [], idleStop = IDLE_STOP, relaunch = RELAUNCH, jobsDir = JOBS, hexDir = process.cwd(), projectsDir = join(CLAUDE, 'projects'), launcher = 'claude' }: {
++export function startHub({ stateDir, channel, main, mainName = 'main', call, state, failed, permission, args = () => [], idleStop = IDLE_STOP, relaunch = RELAUNCH, jobsDir = JOBS, hexDir = process.cwd(), projectsDir = join(CLAUDE, 'projects'), launcher = 'claude' }: {
 +  stateDir: string
 +  channel: string
 +  main?: string
@@ -610,6 +637,7 @@ index 0000000000000000000000000000000000000000..8ed7756fc89bada598f435542629b915
 +  call: Call
 +  state: State
 +  failed: Failed
++  permission?: (thread: string, request: Permission) => void
 +  args?: (thread: string) => string[]
 +  idleStop?: number
 +  relaunch?: number
@@ -661,11 +689,16 @@ index 0000000000000000000000000000000000000000..8ed7756fc89bada598f435542629b915
 +  function setState(thread: string, working: boolean) {
 +    state(thread, working)
 +    claim(thread)
-+    clearTimeout(idle.get(thread))
-+    idle.delete(thread)
 +    if (working) busy.add(thread)
 +    else busy.delete(thread)
-+    if (working || thread === main || !live.has(thread)) return
++    rest(thread)
++  }
++
++  // A running session that isn't busy stops after a while; its next message resumes it.
++  function rest(thread: string) {
++    clearTimeout(idle.get(thread))
++    idle.delete(thread)
++    if (busy.has(thread) || thread === main || !live.has(thread)) return
 +    if (retiring.has(thread)) stop(thread)
 +    else idle.set(thread, setTimeout(() => stopIfIdle(thread), idleStop))
 +  }
@@ -739,10 +772,14 @@ index 0000000000000000000000000000000000000000..8ed7756fc89bada598f435542629b915
 +    socket.write(JSON.stringify(payload) + '\n')
 +  }
 +
++  function register(thread: string, name: string, cwd?: string) {
++    return (threads[thread] ??= { name, ...(cwd && { cwd }) })
++  }
++
 +  function launch(thread: string, name: string, prompt?: string, fork?: string, cwd?: string) {
 +    if (launching.has(thread)) return
 +    retiring.delete(thread)
-+    const known = threads[thread] ?? (threads[thread] = { name, ...(cwd && { cwd }) })
++    const known = register(thread, name, cwd)
 +    claim(thread)
 +    if (prompt || queued.has(thread)) setState(thread, true)
 +    launching.set(thread, undefined)
@@ -880,6 +917,7 @@ index 0000000000000000000000000000000000000000..8ed7756fc89bada598f435542629b915
 +    claim(thread)
 +    for (const message of queued.get(thread) ?? []) send(socket, { type: 'inbound', ...message })
 +    queued.delete(thread)
++    rest(thread)
 +  }
 +
 +  // A session that dies before Claude saves its conversation can't be resumed, so the
@@ -918,6 +956,7 @@ index 0000000000000000000000000000000000000000..8ed7756fc89bada598f435542629b915
 +      if (request.type === 'hello') welcome(thread = request.thread, request.session, socket)
 +      if (request.type === 'state') setState(request.thread, request.busy)
 +      if (request.type === 'open') launch(request.thread, request.name, request.prompt)
++      if (request.type === 'permission_request') permission?.(thread, request)
 +      if (request.type === 'inbound') deliver(request.thread, threads[request.thread]?.name ?? request.thread, { content: request.content, meta: request.meta })
 +      if (request.type === 'call') {
 +        call(thread, request.tool, request.args ?? {}).then(
@@ -949,6 +988,7 @@ index 0000000000000000000000000000000000000000..8ed7756fc89bada598f435542629b915
 +    deliver,
 +    command: restart,
 +    refresh,
++    register: (thread: string, name: string, cwd?: string) => void register(thread, name, cwd),
 +    open: (thread: string, name: string, prompt?: string, cwd?: string) => launch(thread, name, prompt, undefined, cwd),
 +    fork: (thread: string, name: string, session: string, prompt: string, cwd?: string) => launch(thread, name, prompt, session, cwd),
 +    main,
@@ -956,6 +996,10 @@ index 0000000000000000000000000000000000000000..8ed7756fc89bada598f435542629b915
 +    name: (thread: string) => threads[thread]?.name,
 +    cwd: (thread: string) => threads[thread]?.cwd,
 +    stop,
++    answer: (thread: string, request_id: string, behavior: 'allow' | 'deny') => {
++      const socket = live.get(thread)
++      if (socket) send(socket, { type: 'permission', request_id, behavior })
++    },
 +    release,
 +    adopt,
 +    retire,

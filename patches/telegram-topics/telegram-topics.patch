@@ -286,10 +286,10 @@ index d72dbc1a759e601dd0188cc7a8c3b58edc04373c..3ecbd0bfb8cc26bae0b85f8a1a1c44e8
 +The bot token lives in `~/.claude/channels/hex/telegram/.env` as `TELEGRAM_BOT_TOKEN=…`, and `access.json` there holds `allowFrom`, the Telegram user ids allowed to talk to it.
 diff --git a/external_plugins/telegram/bot.test.ts b/external_plugins/telegram/bot.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..0df78dac9f21fe59ca9c4ca44c1c2eaa4fc3430c
+index 0000000000000000000000000000000000000000..4486f907176ced9251ed152d6042954c51b3bfdb
 --- /dev/null
 +++ b/external_plugins/telegram/bot.test.ts
-@@ -0,0 +1,296 @@
+@@ -0,0 +1,325 @@
 +import { beforeAll, expect, mock, test } from 'bun:test'
 +import { connect } from 'net'
 +import { mkdtempSync, writeFileSync } from 'fs'
@@ -442,6 +442,35 @@ index 0000000000000000000000000000000000000000..0df78dac9f21fe59ca9c4ca44c1c2eaa
 +  expect(tap.meta.button_message_id).toBe(String(id))
 +})
 +
++test('a permission prompt asks in its own topic, and the owner\'s tap answers the session instead of reaching it as a message', async () => {
++  session({ type: 'permission_request', request_id: 'abcde', tool_name: 'Bash', description: 'Delete the build folder', input_preview: '{"command":"rm -rf build","description":"Delete the build folder"}' })
++  const prompt = await called('sendMessage', p => p.text?.startsWith('🔐'))
++  const markup = { inline_keyboard: [[{ text: 'Allow', callback_data: 'perm:allow:abcde' }, { text: 'Deny', callback_data: 'perm:deny:abcde' }]] }
++  expect(prompt).toMatchObject({ chat_id: String(FORUM), message_thread_id: 5, text: '🔐 Bash: Delete the build folder\n\ncommand: rm -rf build', reply_markup: markup })
++  const id = nextMessage
++  const tap = (from: object) => update({ callback_query: { id: 'perm', from, chat_instance: 'x', data: 'perm:deny:abcde', message: message({ message_id: id, from: hex, text: prompt.text, reply_markup: markup }) } })
++
++  await tap({ id: 3000, is_bot: false, first_name: 'Someone' })
++  await Bun.sleep(100)
++  expect(received.find(line => line.type === 'permission')).toBeUndefined()
++
++  const before = received.length
++  await tap(owner)
++  expect(await until(() => received.find(line => line.type === 'permission'))).toEqual({ type: 'permission', request_id: 'abcde', behavior: 'deny' })
++  expect(await called('editMessageReplyMarkup', p => p.message_id === id)).toMatchObject({ reply_markup: { inline_keyboard: [[{ text: '✓ Deny', disabled: {} }]] } })
++  await Bun.sleep(100)
++  expect(received.slice(before).filter(line => line.type === 'inbound')).toEqual([])
++})
++
++test('a prompt still open when the turn ends, answered in the session itself, stops offering its buttons', async () => {
++  session({ type: 'permission_request', request_id: 'fghij', tool_name: 'Write', description: 'Write notes.md', input_preview: '{"file_path":"/tmp/notes.md","content":"hi"}' })
++  expect((await called('sendMessage', p => p.text?.startsWith('🔐 Write'))).text).toBe('🔐 Write: Write notes.md\n\nfile_path: /tmp/notes.md\ncontent: hi')
++  const id = nextMessage
++  session({ type: 'state', thread: DESK, busy: true })
++  session({ type: 'state', thread: DESK, busy: false })
++  expect(await called('editMessageReplyMarkup', p => p.message_id === id)).toMatchObject({ reply_markup: { inline_keyboard: [[{ text: 'No longer waiting', disabled: {} }]] } })
++})
++
 +test('delete, unreact, pin, unpin and forward act on the message they name', async () => {
 +  await call('delete_message', { message_id: '7' })
 +  expect(await called('deleteMessage')).toMatchObject({ chat_id: String(FORUM), message_id: 7 })
@@ -588,17 +617,17 @@ index 0000000000000000000000000000000000000000..0df78dac9f21fe59ca9c4ca44c1c2eaa
 +})
 diff --git a/external_plugins/telegram/bot.ts b/external_plugins/telegram/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..dff33c4368b84114bcc3ef6a5b3d08c5ccc4ba68
+index 0000000000000000000000000000000000000000..2428b2cd46be165831c2c060c72f54fa68562d50
 --- /dev/null
 +++ b/external_plugins/telegram/bot.ts
-@@ -0,0 +1,835 @@
+@@ -0,0 +1,882 @@
 +#!/usr/bin/env bun
 +import { Bot, GrammyError, InputFile, type Context } from 'grammy'
 +import type { Chat, MessageEntity, MessageOrigin, ReactionTypeEmoji } from 'grammy/types'
 +import { readFileSync, writeFileSync, mkdirSync, statSync, realpathSync, chmodSync } from 'fs'
 +import { homedir } from 'os'
 +import { basename, join, extname, sep } from 'path'
-+import { startHub, clients, move, tappable, title, type Message } from '../../hub/hub.ts'
++import { startHub, clients, move, tappable, title, type Message, type Permission } from '../../hub/hub.ts'
 +
 +const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'hex', 'telegram')
 +const ACCESS_FILE = join(STATE_DIR, 'access.json')
@@ -804,6 +833,47 @@ index 0000000000000000000000000000000000000000..dff33c4368b84114bcc3ef6a5b3d08c5
 +  if (!busy) return
 +  sendTyping(thread)
 +  typing.set(thread, setInterval(() => sendTyping(thread), 4000))
++}
++
++// Claude Code sends no event when a prompt is answered in the session itself, but a
++// turn can't end while one is open, so whatever is still asking by then is moot.
++const asking = new Map<string, Set<number>>()
++
++async function ask(thread: string, { request_id, tool_name, description, input_preview }: Permission): Promise<void> {
++  const { chat_id, extra } = target(thread)
++  const text = `🔐 ${tool_name}: ${description}\n\n${preview(input_preview, description)}`.slice(0, MAX_CHUNK_LIMIT)
++  const sent = await bot.api.sendMessage(chat_id, text, {
++    ...extra,
++    reply_markup: { inline_keyboard: [[
++      { text: 'Allow', callback_data: `perm:allow:${request_id}` },
++      { text: 'Deny', callback_data: `perm:deny:${request_id}` },
++    ]] },
++  })
++  remember(thread, sent.message_id, { text, user: me() })
++  asking.set(thread, (asking.get(thread) ?? new Set()).add(sent.message_id))
++}
++
++function preview(input: string, description: string): string {
++  try {
++    return Object.entries(JSON.parse(input))
++      .filter(([, value]) => value !== description)
++      .map(([key, value]) => `${key}: ${typeof value === 'string' ? value : JSON.stringify(value)}`)
++      .join('\n')
++  } catch {
++    return input
++  }
++}
++
++function settle(thread: string, busy: boolean): void {
++  showTyping(thread, busy)
++  if (busy) return
++  const { chat_id } = target(thread)
++  for (const id of asking.get(thread) ?? []) {
++    void bot.api.editMessageReplyMarkup(chat_id, id, {
++      reply_markup: { inline_keyboard: [[{ text: 'No longer waiting', disabled: {} }]] },
++    }).catch(() => {})
++  }
++  asking.delete(thread)
 +}
 +
 +async function icons() {
@@ -1043,7 +1113,8 @@ index 0000000000000000000000000000000000000000..dff33c4368b84114bcc3ef6a5b3d08c5
 +  launcher: process.env.HEX_LAUNCHER,
 +  mainName: process.env.HEX_NAME,
 +  call: callOrForget,
-+  state: showTyping,
++  state: settle,
++  permission: (thread, request) => void ask(thread, request).catch(err => process.stderr.write(`telegram hub: couldn't relay a permission prompt to ${thread}: ${err}\n`)),
 +  failed: (thread, reason) => {
 +    const { chat_id, extra } = target(thread)
 +    void bot.api.sendMessage(chat_id, `Couldn't start this topic's session: ${reason}`, extra).catch(() => {})
@@ -1207,13 +1278,18 @@ index 0000000000000000000000000000000000000000..dff33c4368b84114bcc3ef6a5b3d08c5
 +
 +bot.on('callback_query:data', async ctx => {
 +  await ctx.answerCallbackQuery().catch(() => {})
-+  const message = ctx.callbackQuery.message
-+  const label = message && 'reply_markup' in message ? message.reply_markup?.inline_keyboard.flat()[Number(ctx.callbackQuery.data)]?.text : undefined
++  const { data, message } = ctx.callbackQuery
++  const label = message && 'reply_markup' in message ? message.reply_markup?.inline_keyboard.flat().find(button => 'callback_data' in button && button.callback_data === data)?.text : undefined
 +  if (!message || !label || !allowed(ctx.from)) return
 +  await bot.api.editMessageReplyMarkup(message.chat.id, message.message_id, {
 +    reply_markup: { inline_keyboard: [[{ text: `✓ ${label}`, disabled: {} }]] },
 +  }).catch(err => process.stderr.write(`telegram hub: couldn't mark the tapped button: ${err}\n`))
 +  const thread = threadOf(ctx)
++  const verdict = data.match(/^perm:(allow|deny):([a-km-z]{5})$/)
++  if (verdict) {
++    asking.get(thread)?.delete(message.message_id)
++    return hub.answer(thread, verdict[2]!, verdict[1] as 'allow' | 'deny')
++  }
 +  hub.deliver(thread, nameOf(ctx, thread), {
 +    content: label,
 +    meta: {
@@ -1447,7 +1523,7 @@ index b80fcea0f4f395012586cf5fac3682270e7fb14f..a8d061bfa3c603151ab2491dc06af4fa
    "dependencies": {
      "@modelcontextprotocol/sdk": "^1.0.0",
 diff --git a/external_plugins/telegram/server.ts b/external_plugins/telegram/server.ts
-index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..f8ad8464e5cdab158474b939df14b7b911e4be0d 100644
+index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..60cfdcc6c115339ff39ae2f1b07d03164bfb672d 100644
 --- a/external_plugins/telegram/server.ts
 +++ b/external_plugins/telegram/server.ts
 @@ -1,467 +1,51 @@
@@ -1685,7 +1761,9 @@ index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..f8ad8464e5cdab158474b939df14b7b9
 -  | { action: 'deliver'; access: Access }
 -  | { action: 'drop' }
 -  | { action: 'pair'; code: string; isResend: boolean }
--
++import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
++import { connect, type Socket } from 'net'
+ 
 -function gate(ctx: Context): GateResult {
 -  const access = loadAccess()
 -  const pruned = pruneExpired(access)
@@ -1745,9 +1823,7 @@ index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..f8ad8464e5cdab158474b939df14b7b9
 -
 -  return { action: 'drop' }
 -}
-+import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
-+import { connect, type Socket } from 'net'
- 
+-
 -// Like gate() but for bot commands: no pairing side effects, just allow/drop.
 -function dmCommandGate(ctx: Context): { access: Access; senderId: string } | null {
 -  if (ctx.chat?.type !== 'private') return null
@@ -1860,7 +1936,7 @@ index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..f8ad8464e5cdab158474b939df14b7b9
 -        'claude/channel/permission': {},
 -      },
 -    },
-+    capabilities: { tools: {}, experimental: { 'claude/channel': {} } },
++    capabilities: { tools: {}, experimental: { 'claude/channel': {}, 'claude/channel/permission': {} } },
      instructions: [
 -      'The sender reads Telegram, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat.',
 +      'The sender reads Telegram, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat. Nobody watches this terminal either, so once your reply is sent, end the turn instead of summarizing it here.',
@@ -1978,7 +2054,7 @@ index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..f8ad8464e5cdab158474b939df14b7b9
        },
      },
      {
-@@ -506,540 +91,187 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
+@@ -506,540 +91,197 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
      },
      {
        name: 'edit_message',
@@ -2021,8 +2097,7 @@ index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..f8ad8464e5cdab158474b939df14b7b9
 +        properties: {
 +          message_id: { type: 'string' },
 +          unpin: { type: 'boolean' },
-         },
--        required: ['chat_id', 'message_id', 'text'],
++        },
 +        required: ['message_id'],
 +      },
 +    },
@@ -2096,7 +2171,8 @@ index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..f8ad8464e5cdab158474b939df14b7b9
 +          to: { type: 'string', enum: ['discord', 'buzz'] },
 +          title: titleProperty,
 +          channel: { type: 'string', description: 'Channel to open it in, by name. Default: the server\'s first channel.' },
-+        },
+         },
+-        required: ['chat_id', 'message_id', 'text'],
 +        required: ['to'],
        },
      },
@@ -2262,7 +2338,9 @@ index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..f8ad8464e5cdab158474b939df14b7b9
 -  // may take up to its long-poll timeout to return. Force-exit after 2s.
 -  setTimeout(() => process.exit(0), 2000)
 -  void Promise.resolve(bot.stop()).finally(() => process.exit(0))
--}
++mcp.fallbackNotificationHandler = async ({ method, params }) => {
++  if (method === 'notifications/claude/channel/permission_request') hub?.write(JSON.stringify({ type: 'permission_request', ...params }) + '\n')
+ }
 -process.stdin.on('end', shutdown)
 -process.stdin.on('close', shutdown)
 -process.on('SIGTERM', shutdown)
@@ -2315,7 +2393,7 @@ index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..f8ad8464e5cdab158474b939df14b7b9
 -    await ctx.reply(`Paired as ${name}.`)
 -    return
 -  }
--
+ 
 -  for (const [code, p] of Object.entries(access.pending)) {
 -    if (p.senderId === senderId) {
 -      await ctx.reply(
@@ -2433,6 +2511,12 @@ index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..f8ad8464e5cdab158474b939df14b7b9
 +          method: 'notifications/claude/channel',
 +          params: { content: event.content, meta: event.meta },
 +        }).catch(err => process.stderr.write(`telegram channel: failed to deliver inbound to Claude: ${err}\n`))
++      }
++      if (event.type === 'permission') {
++        mcp.notification({
++          method: 'notifications/claude/channel/permission',
++          params: { request_id: event.request_id, behavior: event.behavior },
++        }).catch(err => process.stderr.write(`telegram channel: failed to deliver a permission answer to Claude: ${err}\n`))
 +      }
 +      if (event.type === 'result') {
 +        const waiter = pending.get(event.id)

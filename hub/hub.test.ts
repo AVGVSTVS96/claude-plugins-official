@@ -3,7 +3,7 @@ import { connect, type Socket } from 'net'
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, chmodSync, existsSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { startHub, tappable, type Message } from './hub.ts'
+import { startHub, tappable, type Message, type Permission } from './hub.ts'
 
 const CHANNEL = 'plugin:telegram@hex'
 const SESSION = '0a1b2c3d-0000-4000-8000-000000000000'
@@ -13,6 +13,7 @@ let dir: string
 let hub: ReturnType<typeof startHub>
 let states: [string, boolean][]
 let failures: [string, string][]
+let prompts: [string, Permission][]
 const sockets: Socket[] = []
 
 beforeEach(() => {
@@ -41,6 +42,7 @@ function start(options: { main?: string; idleStop?: number; relaunch?: number; l
   if (options.agents) writeFileSync(join(dir, 'agents'), JSON.stringify(options.agents))
   const seen: [string, boolean][] = (states = [])
   const failedSeen: [string, string][] = (failures = [])
+  const asked: [string, Permission][] = (prompts = [])
   hub = startHub({
     stateDir: dir,
     channel: CHANNEL,
@@ -48,6 +50,7 @@ function start(options: { main?: string; idleStop?: number; relaunch?: number; l
     call: async (thread, tool) => `${tool} in ${thread}`,
     state: (thread, busy) => void seen.push([thread, busy]),
     failed: (thread, reason) => void failedSeen.push([thread, reason]),
+    permission: (thread, request) => void asked.push([thread, request]),
     jobsDir: join(dir, 'jobs'),
     hexDir: join(dir, 'hex'),
     projectsDir: join(dir, 'projects'),
@@ -218,6 +221,21 @@ test('tool calls act on the calling session\'s own thread', async () => {
   send({ type: 'call', id: 1, tool: 'reply', args: { text: 'yo' } })
   await until(() => received.length)
   expect(received[0]).toEqual({ type: 'result', id: 1, text: 'reply in chat:9' })
+})
+
+test('a permission prompt reaches the client with its thread, and the answer goes back to that session alone', async () => {
+  start()
+  const desk = await session('chat:9')
+  const other = await session('chat:10')
+  const request = { request_id: 'abcde', tool_name: 'Bash', description: 'List files', input_preview: '{"command":"ls"}' }
+  desk.send({ type: 'permission_request', ...request })
+  const [thread, asked] = await until(() => prompts[0])
+  expect(thread).toBe('chat:9')
+  expect(asked).toMatchObject(request)
+  hub.answer('chat:9', 'abcde', 'allow')
+  await until(() => desk.received.length)
+  expect(desk.received).toEqual([{ type: 'permission', request_id: 'abcde', behavior: 'allow' }])
+  expect(other.received).toEqual([])
 })
 
 test('busy and idle from session hooks reach the client, and a dropped session is idle', async () => {

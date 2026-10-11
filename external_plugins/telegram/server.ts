@@ -10,7 +10,7 @@ const THREAD = process.env.HEX_CHANNEL?.startsWith('plugin:telegram@') ? process
 const mcp = new Server(
   { name: 'telegram', version: '1.0.0' },
   {
-    capabilities: { tools: {}, experimental: { 'claude/channel': {} } },
+    capabilities: { tools: {}, experimental: { 'claude/channel': {}, 'claude/channel/permission': {} } },
     instructions: [
       'The sender reads Telegram, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat. Nobody watches this terminal either, so once your reply is sent, end the turn instead of summarizing it here.',
       '',
@@ -228,6 +228,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
   }
 })
 
+mcp.fallbackNotificationHandler = async ({ method, params }) => {
+  if (method === 'notifications/claude/channel/permission_request') hub?.write(JSON.stringify({ type: 'permission_request', ...params }) + '\n')
+}
+
 function connectHub(): void {
   const socket = connect(SOCKET!)
   let buffer = ''
@@ -249,6 +253,12 @@ function connectHub(): void {
           method: 'notifications/claude/channel',
           params: { content: event.content, meta: event.meta },
         }).catch(err => process.stderr.write(`telegram channel: failed to deliver inbound to Claude: ${err}\n`))
+      }
+      if (event.type === 'permission') {
+        mcp.notification({
+          method: 'notifications/claude/channel/permission',
+          params: { request_id: event.request_id, behavior: event.behavior },
+        }).catch(err => process.stderr.write(`telegram channel: failed to deliver a permission answer to Claude: ${err}\n`))
       }
       if (event.type === 'result') {
         const waiter = pending.get(event.id)

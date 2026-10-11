@@ -150,6 +150,35 @@ test('buttons come back as a tap with the label, and the message keeps only the 
   expect(tap.meta.button_message_id).toBe(String(id))
 })
 
+test('a permission prompt asks in its own topic, and the owner\'s tap answers the session instead of reaching it as a message', async () => {
+  session({ type: 'permission_request', request_id: 'abcde', tool_name: 'Bash', description: 'Delete the build folder', input_preview: '{"command":"rm -rf build","description":"Delete the build folder"}' })
+  const prompt = await called('sendMessage', p => p.text?.startsWith('🔐'))
+  const markup = { inline_keyboard: [[{ text: 'Allow', callback_data: 'perm:allow:abcde' }, { text: 'Deny', callback_data: 'perm:deny:abcde' }]] }
+  expect(prompt).toMatchObject({ chat_id: String(FORUM), message_thread_id: 5, text: '🔐 Bash: Delete the build folder\n\ncommand: rm -rf build', reply_markup: markup })
+  const id = nextMessage
+  const tap = (from: object) => update({ callback_query: { id: 'perm', from, chat_instance: 'x', data: 'perm:deny:abcde', message: message({ message_id: id, from: hex, text: prompt.text, reply_markup: markup }) } })
+
+  await tap({ id: 3000, is_bot: false, first_name: 'Someone' })
+  await Bun.sleep(100)
+  expect(received.find(line => line.type === 'permission')).toBeUndefined()
+
+  const before = received.length
+  await tap(owner)
+  expect(await until(() => received.find(line => line.type === 'permission'))).toEqual({ type: 'permission', request_id: 'abcde', behavior: 'deny' })
+  expect(await called('editMessageReplyMarkup', p => p.message_id === id)).toMatchObject({ reply_markup: { inline_keyboard: [[{ text: '✓ Deny', disabled: {} }]] } })
+  await Bun.sleep(100)
+  expect(received.slice(before).filter(line => line.type === 'inbound')).toEqual([])
+})
+
+test('a prompt still open when the turn ends, answered in the session itself, stops offering its buttons', async () => {
+  session({ type: 'permission_request', request_id: 'fghij', tool_name: 'Write', description: 'Write notes.md', input_preview: '{"file_path":"/tmp/notes.md","content":"hi"}' })
+  expect((await called('sendMessage', p => p.text?.startsWith('🔐 Write'))).text).toBe('🔐 Write: Write notes.md\n\nfile_path: /tmp/notes.md\ncontent: hi')
+  const id = nextMessage
+  session({ type: 'state', thread: DESK, busy: true })
+  session({ type: 'state', thread: DESK, busy: false })
+  expect(await called('editMessageReplyMarkup', p => p.message_id === id)).toMatchObject({ reply_markup: { inline_keyboard: [[{ text: 'No longer waiting', disabled: {} }]] } })
+})
+
 test('delete, unreact, pin, unpin and forward act on the message they name', async () => {
   await call('delete_message', { message_id: '7' })
   expect(await called('deleteMessage')).toMatchObject({ chat_id: String(FORUM), message_id: 7 })

@@ -4,7 +4,7 @@ id: hub
 summary: Add a client-agnostic hub that gives every chat thread its own Claude Code session and moves threads between clients.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: hub.patch
-patch_sha256: 004270f5b8360a88f8ac21ee8f7230ecb65a612a58faef4e4bd488d4d3d1fa80
+patch_sha256: 9389840b8da17b8b086e275c16eb7e9dc134f87deb0da2084cdfd5f0d7762f11
 ---
 
 ## Intent
@@ -35,7 +35,9 @@ session stops once idle and the thread is forgotten), stop a thread's session
 now (its next message resumes it), find threads by name and rename them. `title` is the one rule
 for thread names every client enforces: one word. A
 local program can hand a thread a message over the socket (`inbound`), as if it
-came from the app. A client can add launch arguments per thread, and hand a
+came from the app. A session's permission prompt (`permission_request`) reaches
+the client with the session's thread, and the client's `answer` goes back to
+that session alone (`permission`). A client can add launch arguments per thread, and hand a
 message to a fresh start of a thread's session so it picks up new ones (a session
 busy with background work keeps running and takes it as it is). Each session's
 settings enable only its client's plugin.
@@ -84,7 +86,7 @@ instead (`fork`, `--fork-session`).
 `bun test hub` drives routing, queueing, resume, folders, running sessions, the main
 thread (started with the hub, kept running, revived), the launcher and its
 environment, failed starts, busy and idle, idle stops, stopping, closing, naming and
-handoffs (release, adopt, fork) and bad input against a fake `claude`. Run `scripts/verify`.
+handoffs (release, adopt, fork), permission prompts and bad input against a fake `claude`. Run `scripts/verify`.
 
 ## Removal
 
