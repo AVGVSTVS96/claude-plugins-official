@@ -4,7 +4,7 @@ id: t3-acp
 summary: Serve the agent to T3 Code as an ACP agent, where every T3 thread is its own Claude Code session in that thread's project, through the thread hub.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: t3-acp.patch
-patch_sha256: b92fbc0b6360647ec7bcfc406a3e84b433132b3408d3b8d28e74dcf2abaf4b12
+patch_sha256: e472f6511bb005ba15239c5e2cf85138f70e403aa7056933ccdbe32e4e70f68b
 ---
 
 ## Intent
@@ -52,9 +52,16 @@ agent's work itself, so the session's own output is the conversation:
 ## Invariants
 
 1. Updates go out in order, and a prompt is answered only after its last update.
-2. A turn ends where the transcript says: the first `turn_duration` after the
-   turn's channel prompt. Claude Code writes the transcript in batches, so the
-   Stop hook can run before the last reply is on disk and never ends a turn.
+2. A turn ends when the session's work does: the session's Stop hook reports
+   no background agent or workflow still working (`background_tasks`), and the
+   transcript has a `turn_duration` after the turn's channel prompt with no turn
+   after it. A background agent's result comes back as a turn of its own, which
+   streams into the same T3 turn, so T3 shows it and T3's tools stay usable.
+   Claude Code writes the transcript in batches, so the Stop hook can run before
+   the last reply is on disk. Claude Code's own status isn't used: it reads idle
+   for a moment between a background agent finishing and its result's turn.
+   Background shells and monitors don't hold the turn, as Claude Code doesn't
+   count them as the session working, and a dev server would hold it for good.
 3. One prompt per thread at a time; a second is refused.
 4. No timer stands in for state: the transcript is followed by watching its
    folder, and a turn waits for its own end, a cancel, its connection closing, or a
@@ -63,9 +70,9 @@ agent's work itself, so the session's own output is the conversation:
 ## Verification
 
 `bun test external_plugins/t3` follows transcripts (where a turn starts and
-ends, partial lines) and drives `bot.ts` as a subprocess over a real ACP
-connection with a fake launcher and session: a new thread starting in its
-project, a prompt streamed to its end, resume, cancel, a turn whose connection
+ends, background work, partial lines) and drives `bot.ts` as a subprocess over
+a real ACP connection with a fake launcher and session: a turn held open by a
+background agent, a new thread starting in its project, a prompt streamed to its end, resume, cancel, a turn whose connection
 closes, a failed start, and attachments. Run `scripts/verify`.
 
 ## Removal

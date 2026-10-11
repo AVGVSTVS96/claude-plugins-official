@@ -45,7 +45,7 @@ index 0000000000000000000000000000000000000000..214c29d1395919ce175f26d140526368
 +registry=https://registry.npmjs.org/
 diff --git a/external_plugins/t3/README.md b/external_plugins/t3/README.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..4fa1426f54c50902a1342025081e9c338a2541ba
+index 0000000000000000000000000000000000000000..4f0342fd149947516e7884cffd54fff6f9de66da
 --- /dev/null
 +++ b/external_plugins/t3/README.md
 @@ -0,0 +1,12 @@
@@ -54,7 +54,7 @@ index 0000000000000000000000000000000000000000..4fa1426f54c50902a1342025081e9c33
 +A channel that serves the agent to [T3 Code](https://github.com/pingdotgg/t3code) as an [ACP](https://agentclientprotocol.com) agent. Pick it in T3's agent picker, in any project, and that T3 thread is its own Claude Code session working in that project, run by the hub like every Telegram topic or Buzz thread. Its intent, invariants and design live in [`patches/t3-acp/PATCH.md`](../../patches/t3-acp/PATCH.md).
 +
 +- `bot.ts` runs in the hub service (`bun hub/serve.ts`) next to Telegram, Discord and Buzz. It embeds the hub and serves ACP on `acp.sock`: `session/new` opens a thread in the request's `cwd`, `session/prompt` delivers the message and streams the turn back, `session/cancel` or T3 quitting mid-turn stops it, `session/resume` picks a thread up again after T3 restarts, and `session/set_config_option` sets the thread's model and effort from T3's pickers.
-+- `transcript.ts` turns a session's Claude Code transcript into ACP `session/update` notifications: text, thinking, tool calls and their results.
++- `transcript.ts` turns a session's Claude Code transcript into ACP `session/update` notifications: text, thinking, tool calls and their results. A turn ends when the session's work does: background agents keep it open, and the turns their results start stream into it, until a Stop hook reports no background agent still working.
 +- `server.ts` is the channel each session loads. It only delivers T3's messages: the session's own output is what T3 shows, so it has no reply tool.
 +- `acp.ts` is what T3 starts. It relays stdio to `acp.sock`, so T3 reaches the agent that's already running instead of starting one.
 +
@@ -89,10 +89,10 @@ index 0000000000000000000000000000000000000000..c12bf015726ea411ac246ded94d2493c
 +socket.on('close', () => process.exit(0))
 diff --git a/external_plugins/t3/bot.test.ts b/external_plugins/t3/bot.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..e85c9684bd25728cbfdbe29ea8a45ba1a28395a7
+index 0000000000000000000000000000000000000000..1fde50e431a6449a31a3c0274810608ca8b3301f
 --- /dev/null
 +++ b/external_plugins/t3/bot.test.ts
-@@ -0,0 +1,323 @@
+@@ -0,0 +1,350 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { connect, type Socket } from 'net'
 +import { Readable, Writable } from 'stream'
@@ -196,6 +196,7 @@ index 0000000000000000000000000000000000000000..e85c9684bd25728cbfdbe29ea8a45ba1
 +  return {
 +    inbound,
 +    busy: () => socket.write(JSON.stringify({ type: 'state', thread, busy: true }) + '\n'),
++    idle: (background = false) => socket.write(JSON.stringify({ type: 'state', thread, busy: false, ...(background && { background }) }) + '\n'),
 +    write: (...entries: object[]) => appendFileSync(transcript, entries.map(entry => JSON.stringify(entry) + '\n').join('')),
 +  }
 +}
@@ -218,8 +219,32 @@ index 0000000000000000000000000000000000000000..e85c9684bd25728cbfdbe29ea8a45ba1
 +  hex.busy()
 +  await Bun.sleep(100)
 +  hex.write(prompt, reply, done)
++  hex.idle()
 +  expect(await answer).toEqual({ stopReason: 'end_turn' })
 +  expect(updates.filter(update => update.sessionUpdate !== 'available_commands_update')).toEqual([expect.objectContaining({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'hi from hex' } })])
++})
++
++test('a turn whose session stops with a background agent still working stays open through the turn its result starts', async () => {
++  const { agent, updates } = await t3()
++  const { sessionId } = await agent.request('session/new', { cwd: project, mcpServers: [] })
++  let answered = false
++  const answer = agent.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'hi' }] }).finally(() => (answered = true))
++  await until(() => lines('cwd').length)
++  const hex = await session(sessionId)
++  hex.busy()
++  await Bun.sleep(100)
++  hex.write(prompt, { type: 'assistant', message: { id: 'm1', content: [{ type: 'text', text: 'started an agent' }] } }, done)
++  hex.idle(true)
++  await Bun.sleep(200)
++  expect(answered).toBe(false)
++  hex.write({ type: 'user', origin: { kind: 'task-notification' }, message: { content: '<task-notification>ok</task-notification>' } })
++  await Bun.sleep(100)
++  hex.idle()
++  await Bun.sleep(200)
++  expect(answered).toBe(false)
++  hex.write({ type: 'assistant', message: { id: 'm2', content: [{ type: 'text', text: 'the agent says ok' }] } }, done)
++  expect(await answer).toEqual({ stopReason: 'end_turn' })
++  expect(updates.filter(update => update.sessionUpdate === 'agent_message_chunk').map(update => (update as any).content.text)).toEqual(['started an agent', 'the agent says ok'])
 +})
 +
 +test('a session advertises /compact once T3 knows it', async () => {
@@ -284,6 +309,7 @@ index 0000000000000000000000000000000000000000..e85c9684bd25728cbfdbe29ea8a45ba1
 +  hex.busy()
 +  await Bun.sleep(100)
 +  hex.write(prompt, reply, done)
++  hex.idle()
 +  expect(await first).toEqual({ stopReason: 'end_turn' })
 +  // Not this test's child, so it's reaped once killed and the hub sees it go, as with a real session.
 +  const pid = Number(Bun.spawnSync(['sh', '-c', 'sleep 60 >/dev/null 2>&1 & echo $!']).stdout.toString())
@@ -343,6 +369,7 @@ index 0000000000000000000000000000000000000000..e85c9684bd25728cbfdbe29ea8a45ba1
 +  hex.busy()
 +  await Bun.sleep(100)
 +  hex.write(prompt, reply, done)
++  hex.idle()
 +  expect(await first).toEqual({ stopReason: 'end_turn' })
 +  const pid = Number(Bun.spawnSync(['sh', '-c', 'sleep 60 >/dev/null 2>&1 & echo $!']).stdout.toString())
 +  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid, status: 'idle' }]))
@@ -418,10 +445,10 @@ index 0000000000000000000000000000000000000000..e85c9684bd25728cbfdbe29ea8a45ba1
 +})
 diff --git a/external_plugins/t3/bot.ts b/external_plugins/t3/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..9aa371c89fc9cbe2d05fe6d0083ae886de1be1b7
+index 0000000000000000000000000000000000000000..c86b060b4b63d7cfb0e8aece288d669a7769692d
 --- /dev/null
 +++ b/external_plugins/t3/bot.ts
-@@ -0,0 +1,267 @@
+@@ -0,0 +1,273 @@
 +#!/usr/bin/env bun
 +import { createServer, type Socket } from 'net'
 +import { Readable, Writable } from 'stream'
@@ -461,6 +488,7 @@ index 0000000000000000000000000000000000000000..9aa371c89fc9cbe2d05fe6d0083ae886
 +  client: AgentContext
 +  reader?: ReturnType<typeof follow>
 +  sent: Promise<unknown>
++  done: boolean
 +  compaction?: string
 +  resolve: (response: PromptResponse) => void
 +  reject: (error: Error) => void
@@ -482,10 +510,14 @@ index 0000000000000000000000000000000000000000..9aa371c89fc9cbe2d05fe6d0083ae886
 +    throw new Error(`unknown tool: ${tool}`)
 +  },
 +  // A new thread's session starts with its first prompt and is only known once it says hello.
-+  state: (thread, busy) => {
++  // Its turn is done once a stop leaves no background agent working.
++  state: (thread, busy, background) => {
 +    const turn = turns.get(thread)
++    if (!turn) return
++    turn.done = !busy && !background
 +    const session = hub.session(thread)
-+    if (busy && turn && session && !turn.reader) turn.reader = reader(thread, session, turn, true)
++    if (busy && session && !turn.reader) turn.reader = reader(thread, session, turn, true)
++    turn.reader?.settle()
 +  },
 +  failed: (thread, reason) => {
 +    const turn = turns.get(thread)
@@ -522,6 +554,7 @@ index 0000000000000000000000000000000000000000..9aa371c89fc9cbe2d05fe6d0083ae886
 +    sessionId: thread,
 +    cwd,
 +    fresh,
++    done: () => turn.done,
 +    end: error => finish(thread, 'end_turn', error),
 +    emit: notification => send(turn, notification),
 +  })
@@ -559,7 +592,7 @@ index 0000000000000000000000000000000000000000..9aa371c89fc9cbe2d05fe6d0083ae886
 +  const compact = blocks[0]?.type === 'text' && blocks[0].text.trim() === '/compact'
 +  if (compact && !session) throw RequestError.invalidRequest(undefined, 'this thread has nothing to compact yet')
 +  return new Promise((resolve, reject) => {
-+    const turn: Turn = { client, sent: Promise.resolve(), resolve, reject, ...(compact && { compaction: randomUUID() }) }
++    const turn: Turn = { client, sent: Promise.resolve(), done: false, resolve, reject, ...(compact && { compaction: randomUUID() }) }
 +    turns.set(thread, turn)
 +    signal.addEventListener('abort', () => turns.get(thread) === turn && cancel(thread), { once: true })
 +    if (session) turn.reader = reader(thread, session, turn, false)
@@ -1032,10 +1065,10 @@ index 0000000000000000000000000000000000000000..958c2871abf3049e772d8f95686bf2ef
 +process.stdin.on('close', () => process.exit(0))
 diff --git a/external_plugins/t3/transcript.test.ts b/external_plugins/t3/transcript.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..038a2700eaeb5d2c0efa2db379d8cdda19949214
+index 0000000000000000000000000000000000000000..a64ab2fd4c1baf1520a69dd876ea438574bb3e00
 --- /dev/null
 +++ b/external_plugins/t3/transcript.test.ts
-@@ -0,0 +1,78 @@
+@@ -0,0 +1,96 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { appendFileSync, mkdtempSync, writeFileSync } from 'fs'
 +import { tmpdir } from 'os'
@@ -1048,6 +1081,7 @@ index 0000000000000000000000000000000000000000..038a2700eaeb5d2c0efa2db379d8cdda
 +let updates: SessionNotification['update'][]
 +let ended: number
 +let reader: ReturnType<typeof follow> | undefined
++let stopped: boolean
 +
 +const prompt = { type: 'user', origin: { kind: 'channel' }, isMeta: true, message: { content: '<channel source="t3">hi</channel>' } }
 +const text = (id: string, words: string) => ({ type: 'assistant', message: { id, content: [{ type: 'text', text: words }] } })
@@ -1060,6 +1094,7 @@ index 0000000000000000000000000000000000000000..038a2700eaeb5d2c0efa2db379d8cdda
 +  path = join(dir, 'session.jsonl')
 +  updates = []
 +  ended = 0
++  stopped = true
 +})
 +
 +afterEach(() => reader?.close())
@@ -1069,7 +1104,7 @@ index 0000000000000000000000000000000000000000..038a2700eaeb5d2c0efa2db379d8cdda
 +}
 +
 +function start(fresh: boolean) {
-+  reader = follow({ path, sessionId: 'thread', cwd: '/work', fresh, emit: n => void updates.push(n.update), end: () => void ended++ })
++  reader = follow({ path, sessionId: 'thread', cwd: '/work', fresh, done: () => stopped, emit: n => void updates.push(n.update), end: () => void ended++ })
 +}
 +
 +async function until(check: () => unknown, timeout = 3000) {
@@ -1114,12 +1149,28 @@ index 0000000000000000000000000000000000000000..038a2700eaeb5d2c0efa2db379d8cdda
 +  await until(() => updates.length)
 +  expect(updates[0]).toMatchObject({ content: { text: 'whole' } })
 +})
++
++test('a turn whose session is still working past its turn_duration ends once the session stops with no turn after it', async () => {
++  stopped = false
++  start(true)
++  write(prompt, text('m1', 'started a background agent'), done)
++  await until(() => updates.length)
++  write({ type: 'user', origin: { kind: 'task-notification' }, message: { content: '<task-notification>ok</task-notification>' } })
++  await Bun.sleep(100)
++  stopped = true
++  reader!.settle()
++  await Bun.sleep(100)
++  expect(ended).toBe(0)
++  write(text('m2', 'the agent says ok'), done)
++  await until(() => ended)
++  expect(updates.at(-1)).toMatchObject({ content: { text: 'the agent says ok' } })
++})
 diff --git a/external_plugins/t3/transcript.ts b/external_plugins/t3/transcript.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..b7396b2e3acd6df88e007d6c6ec73d385cbbda32
+index 0000000000000000000000000000000000000000..1ee50b35a9496a8c9fd61f436599aa37e9f5c53e
 --- /dev/null
 +++ b/external_plugins/t3/transcript.ts
-@@ -0,0 +1,110 @@
+@@ -0,0 +1,124 @@
 +import { closeSync, fstatSync, mkdirSync, openSync, readSync, statSync, watch } from 'fs'
 +import { homedir } from 'os'
 +import { basename, dirname, join } from 'path'
@@ -1137,14 +1188,18 @@ index 0000000000000000000000000000000000000000..b7396b2e3acd6df88e007d6c6ec73d38
 +// Streams one turn of a session's transcript as ACP session/update notifications,
 +// from where it ends now, or from its start when the session is new. Channel
 +// prompts and slash commands are skipped: the client already shows what it sent.
-+// Claude Code writes the transcript in batches, so the Stop hook can run before
-+// the last reply is on disk; the turn ends at the transcript's own turn_duration
-+// after the prompt. A /compact turn ends at its compaction, or with its error.
-+export function follow({ path, sessionId, cwd, fresh, emit, end }: {
++// The turn ends when the session's work does: its Stop hook says no background
++// agent is still working (done), and the transcript has caught up to that stop,
++// a turn_duration after the prompt with no turn after it. Claude Code writes the
++// transcript in batches, so the Stop hook can run before the last reply is on disk,
++// and a background agent's result comes back as a turn of its own, streamed here
++// too. A /compact turn ends at its compaction, or with its error.
++export function follow({ path, sessionId, cwd, fresh, done, emit, end }: {
 +  path: string
 +  sessionId: string
 +  cwd: string
 +  fresh: boolean
++  done: () => boolean
 +  emit: (notification: SessionNotification) => void
 +  end: (error?: string) => void
 +}) {
@@ -1153,6 +1208,7 @@ index 0000000000000000000000000000000000000000..b7396b2e3acd6df88e007d6c6ec73d38
 +  let offset = fresh ? 0 : sizeOf(path)
 +  let rest = Buffer.alloc(0)
 +  let asked = false
++  let open = false
 +  let ended = false
 +
 +  mkdirSync(dirname(path), { recursive: true })
@@ -1190,11 +1246,15 @@ index 0000000000000000000000000000000000000000..b7396b2e3acd6df88e007d6c6ec73d38
 +      return
 +    }
 +    if (entry.type === 'user' && entry.origin?.kind === 'channel') asked = true
-+    if (asked && entry.type === 'system' && entry.subtype === 'turn_duration') return stop()
++    if (entry.type === 'system' && entry.subtype === 'turn_duration') {
++      open = false
++      return settle()
++    }
 +    if (entry.type === 'system' && entry.subtype === 'compact_boundary' && entry.compactMetadata?.trigger === 'manual') return stop()
 +    const failed = entry.type === 'system' && entry.subtype === 'local_command' && entry.content?.match(/<local-command-stderr>([\s\S]*)<\/local-command-stderr>/)?.[1]
 +    if (failed) return stop(failed)
 +    if ((entry.type !== 'assistant' && entry.type !== 'user') || entry.isSidechain) return
++    open = true
 +    if (entry.type === 'user' && (entry.isMeta || entry.origin || /^\/\S/.test(entry.message?.content))) return
 +    const content = entry.type === 'user' ? stripLocalCommandMetadata(entry.message?.content) : entry.message?.content
 +    if (content == null) return
@@ -1209,6 +1269,10 @@ index 0000000000000000000000000000000000000000..b7396b2e3acd6df88e007d6c6ec73d38
 +    for (const notification of notifications) emit(notification)
 +  }
 +
++  function settle() {
++    if (!ended && asked && !open && done()) stop()
++  }
++
 +  function stop(error?: string) {
 +    ended = true
 +    watcher.close()
@@ -1216,6 +1280,7 @@ index 0000000000000000000000000000000000000000..b7396b2e3acd6df88e007d6c6ec73d38
 +  }
 +
 +  return {
++    settle,
 +    close() {
 +      ended = true
 +      watcher.close()

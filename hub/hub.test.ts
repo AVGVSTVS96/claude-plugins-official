@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { connect, type Socket } from 'net'
+import { connect, createServer, type Socket } from 'net'
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, chmodSync, existsSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -597,4 +597,19 @@ test('a buzz:// link becomes a web link that opens it, in plain text and in Mark
   expect(tappable(`open ${link}?`)).toBe(`open ${web}?`)
   expect(tappable(`[the thread](${link})`)).toBe(`[the thread](${web})`)
   expect(tappable('no links here')).toBe('no links here')
+})
+
+test("a session's stop hook reports whether background agents are still working, which shells don't count as", async () => {
+  const socket = join(dir, 'state.sock')
+  const received: object[] = []
+  const server = createServer(client => client.on('data', chunk => received.push(JSON.parse(String(chunk))))).listen(socket)
+  const stop = async (tasks: object[]) => {
+    const hook = Bun.spawn(['bun', join(import.meta.dir, 'state.ts'), 'idle'], { env: { ...process.env, HEX_HUB: socket, HEX_THREAD: 't1' }, stdin: new Blob([JSON.stringify({ hook_event_name: 'Stop', background_tasks: tasks })]) })
+    await hook.exited
+  }
+  await stop([{ type: 'subagent', status: 'running' }])
+  await stop([{ type: 'shell', status: 'running' }])
+  await until(() => received.length === 2 || undefined)
+  server.close()
+  expect(received).toEqual([{ type: 'state', thread: 't1', busy: false, background: true }, { type: 'state', thread: 't1', busy: false }])
 })

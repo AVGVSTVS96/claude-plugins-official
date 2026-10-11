@@ -15,14 +15,18 @@ export function transcriptPath(cwd: string, session: string) {
 // Streams one turn of a session's transcript as ACP session/update notifications,
 // from where it ends now, or from its start when the session is new. Channel
 // prompts and slash commands are skipped: the client already shows what it sent.
-// Claude Code writes the transcript in batches, so the Stop hook can run before
-// the last reply is on disk; the turn ends at the transcript's own turn_duration
-// after the prompt. A /compact turn ends at its compaction, or with its error.
-export function follow({ path, sessionId, cwd, fresh, emit, end }: {
+// The turn ends when the session's work does: its Stop hook says no background
+// agent is still working (done), and the transcript has caught up to that stop,
+// a turn_duration after the prompt with no turn after it. Claude Code writes the
+// transcript in batches, so the Stop hook can run before the last reply is on disk,
+// and a background agent's result comes back as a turn of its own, streamed here
+// too. A /compact turn ends at its compaction, or with its error.
+export function follow({ path, sessionId, cwd, fresh, done, emit, end }: {
   path: string
   sessionId: string
   cwd: string
   fresh: boolean
+  done: () => boolean
   emit: (notification: SessionNotification) => void
   end: (error?: string) => void
 }) {
@@ -31,6 +35,7 @@ export function follow({ path, sessionId, cwd, fresh, emit, end }: {
   let offset = fresh ? 0 : sizeOf(path)
   let rest = Buffer.alloc(0)
   let asked = false
+  let open = false
   let ended = false
 
   mkdirSync(dirname(path), { recursive: true })
@@ -68,11 +73,15 @@ export function follow({ path, sessionId, cwd, fresh, emit, end }: {
       return
     }
     if (entry.type === 'user' && entry.origin?.kind === 'channel') asked = true
-    if (asked && entry.type === 'system' && entry.subtype === 'turn_duration') return stop()
+    if (entry.type === 'system' && entry.subtype === 'turn_duration') {
+      open = false
+      return settle()
+    }
     if (entry.type === 'system' && entry.subtype === 'compact_boundary' && entry.compactMetadata?.trigger === 'manual') return stop()
     const failed = entry.type === 'system' && entry.subtype === 'local_command' && entry.content?.match(/<local-command-stderr>([\s\S]*)<\/local-command-stderr>/)?.[1]
     if (failed) return stop(failed)
     if ((entry.type !== 'assistant' && entry.type !== 'user') || entry.isSidechain) return
+    open = true
     if (entry.type === 'user' && (entry.isMeta || entry.origin || /^\/\S/.test(entry.message?.content))) return
     const content = entry.type === 'user' ? stripLocalCommandMetadata(entry.message?.content) : entry.message?.content
     if (content == null) return
@@ -87,6 +96,10 @@ export function follow({ path, sessionId, cwd, fresh, emit, end }: {
     for (const notification of notifications) emit(notification)
   }
 
+  function settle() {
+    if (!ended && asked && !open && done()) stop()
+  }
+
   function stop(error?: string) {
     ended = true
     watcher.close()
@@ -94,6 +107,7 @@ export function follow({ path, sessionId, cwd, fresh, emit, end }: {
   }
 
   return {
+    settle,
     close() {
       ended = true
       watcher.close()

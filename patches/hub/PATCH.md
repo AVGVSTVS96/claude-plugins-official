@@ -4,7 +4,7 @@ id: hub
 summary: Add a client-agnostic hub that gives every chat thread its own Claude Code session and moves threads between clients.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: hub.patch
-patch_sha256: c8ed905cc818312369f29e8cc00fac08f5fcb782cf10a50e7302f9c3a00099af
+patch_sha256: ab8b0b6a46166710ff01fc160ac8c146012ed2dba7b1feed610dae5b47cc9e80
 ---
 
 ## Intent
@@ -23,8 +23,10 @@ without any `*_BOT_TOKEN`, `HEX_*` or `BUZZ_*` in its environment: Claude's
 background daemon may start from it, and every later session inherits the
 daemon's environment, so a thread's binding lives only in its `--settings`. It watches each start
 through Claude's job record and reports a failed start with its reason.
-Sessions report busy and idle through hooks that run `hub/state.ts`; the
-hub hands those to the client and stops a session that stays idle, unless
+Sessions report busy and idle through hooks that run `hub/state.ts`, and an
+idle report says when the turn stopped with background agents or workflows still
+working (the Stop hook's `background_tasks`; Claude Code counts those, not shells
+or monitors, as the session working); the hub hands those to the client and stops a session that stays idle, unless
 `claude agents --json` still reports it busy (background tasks outlive the
 turn's Stop hook). A thread's session runs in the hex folder, or in a folder of
 its own that the client opened it in; `threads.json` keeps that folder, so the

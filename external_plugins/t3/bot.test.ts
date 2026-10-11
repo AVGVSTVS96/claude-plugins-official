@@ -101,6 +101,7 @@ async function session(thread: string) {
   return {
     inbound,
     busy: () => socket.write(JSON.stringify({ type: 'state', thread, busy: true }) + '\n'),
+    idle: (background = false) => socket.write(JSON.stringify({ type: 'state', thread, busy: false, ...(background && { background }) }) + '\n'),
     write: (...entries: object[]) => appendFileSync(transcript, entries.map(entry => JSON.stringify(entry) + '\n').join('')),
   }
 }
@@ -123,8 +124,32 @@ test('a new thread starts its hex session in its project on the first prompt, wh
   hex.busy()
   await Bun.sleep(100)
   hex.write(prompt, reply, done)
+  hex.idle()
   expect(await answer).toEqual({ stopReason: 'end_turn' })
   expect(updates.filter(update => update.sessionUpdate !== 'available_commands_update')).toEqual([expect.objectContaining({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'hi from hex' } })])
+})
+
+test('a turn whose session stops with a background agent still working stays open through the turn its result starts', async () => {
+  const { agent, updates } = await t3()
+  const { sessionId } = await agent.request('session/new', { cwd: project, mcpServers: [] })
+  let answered = false
+  const answer = agent.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'hi' }] }).finally(() => (answered = true))
+  await until(() => lines('cwd').length)
+  const hex = await session(sessionId)
+  hex.busy()
+  await Bun.sleep(100)
+  hex.write(prompt, { type: 'assistant', message: { id: 'm1', content: [{ type: 'text', text: 'started an agent' }] } }, done)
+  hex.idle(true)
+  await Bun.sleep(200)
+  expect(answered).toBe(false)
+  hex.write({ type: 'user', origin: { kind: 'task-notification' }, message: { content: '<task-notification>ok</task-notification>' } })
+  await Bun.sleep(100)
+  hex.idle()
+  await Bun.sleep(200)
+  expect(answered).toBe(false)
+  hex.write({ type: 'assistant', message: { id: 'm2', content: [{ type: 'text', text: 'the agent says ok' }] } }, done)
+  expect(await answer).toEqual({ stopReason: 'end_turn' })
+  expect(updates.filter(update => update.sessionUpdate === 'agent_message_chunk').map(update => (update as any).content.text)).toEqual(['started an agent', 'the agent says ok'])
 })
 
 test('a session advertises /compact once T3 knows it', async () => {
@@ -189,6 +214,7 @@ test('a session gets T3\'s MCP servers, and starts again with them when they cha
   hex.busy()
   await Bun.sleep(100)
   hex.write(prompt, reply, done)
+  hex.idle()
   expect(await first).toEqual({ stopReason: 'end_turn' })
   // Not this test's child, so it's reaped once killed and the hub sees it go, as with a real session.
   const pid = Number(Bun.spawnSync(['sh', '-c', 'sleep 60 >/dev/null 2>&1 & echo $!']).stdout.toString())
@@ -248,6 +274,7 @@ test('a thread offers T3 model and effort pickers, and its session starts again 
   hex.busy()
   await Bun.sleep(100)
   hex.write(prompt, reply, done)
+  hex.idle()
   expect(await first).toEqual({ stopReason: 'end_turn' })
   const pid = Number(Bun.spawnSync(['sh', '-c', 'sleep 60 >/dev/null 2>&1 & echo $!']).stdout.toString())
   writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid, status: 'idle' }]))

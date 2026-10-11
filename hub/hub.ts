@@ -7,7 +7,8 @@ import { join } from 'path'
 
 export type Message = { content: string; meta: Record<string, string> }
 export type Call = (thread: string, tool: string, args: Record<string, unknown>) => Promise<string>
-export type State = (thread: string, busy: boolean) => void
+// background: the session's turn ended with background agents still working.
+export type State = (thread: string, busy: boolean, background: boolean) => void
 export type Failed = (thread: string, reason: string) => void
 export type Permission = { request_id: string; tool_name: string; description: string; input_preview: string }
 export type Settings = { model?: string; effort?: string }
@@ -93,8 +94,8 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
     renameSync(`${registry}.tmp`, registry)
   }
 
-  function setState(thread: string, working: boolean) {
-    state(thread, working)
+  function setState(thread: string, working: boolean, background = false) {
+    state(thread, working, background)
     claim(thread)
     if (working) busy.add(thread)
     else busy.delete(thread)
@@ -391,7 +392,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
     })
     function handle(request: any) {
       if (request.type === 'hello') welcome(thread = request.thread, request.session, socket)
-      if (request.type === 'state') setState(request.thread, request.busy)
+      if (request.type === 'state') setState(request.thread, request.busy, request.background === true)
       if (request.type === 'open') launch(request.thread, request.name, request.prompt)
       if (request.type === 'permission_request') permission?.(thread, request)
       if (request.type === 'inbound') deliver(request.thread, threads[request.thread]?.name ?? request.thread, { content: request.content, meta: request.meta })

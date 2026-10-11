@@ -10,6 +10,7 @@ let path: string
 let updates: SessionNotification['update'][]
 let ended: number
 let reader: ReturnType<typeof follow> | undefined
+let stopped: boolean
 
 const prompt = { type: 'user', origin: { kind: 'channel' }, isMeta: true, message: { content: '<channel source="t3">hi</channel>' } }
 const text = (id: string, words: string) => ({ type: 'assistant', message: { id, content: [{ type: 'text', text: words }] } })
@@ -22,6 +23,7 @@ beforeEach(() => {
   path = join(dir, 'session.jsonl')
   updates = []
   ended = 0
+  stopped = true
 })
 
 afterEach(() => reader?.close())
@@ -31,7 +33,7 @@ function write(...entries: object[]) {
 }
 
 function start(fresh: boolean) {
-  reader = follow({ path, sessionId: 'thread', cwd: '/work', fresh, emit: n => void updates.push(n.update), end: () => void ended++ })
+  reader = follow({ path, sessionId: 'thread', cwd: '/work', fresh, done: () => stopped, emit: n => void updates.push(n.update), end: () => void ended++ })
 }
 
 async function until(check: () => unknown, timeout = 3000) {
@@ -75,4 +77,20 @@ test('a line written in two pieces is read once it is whole', async () => {
   appendFileSync(path, line.slice(20))
   await until(() => updates.length)
   expect(updates[0]).toMatchObject({ content: { text: 'whole' } })
+})
+
+test('a turn whose session is still working past its turn_duration ends once the session stops with no turn after it', async () => {
+  stopped = false
+  start(true)
+  write(prompt, text('m1', 'started a background agent'), done)
+  await until(() => updates.length)
+  write({ type: 'user', origin: { kind: 'task-notification' }, message: { content: '<task-notification>ok</task-notification>' } })
+  await Bun.sleep(100)
+  stopped = true
+  reader!.settle()
+  await Bun.sleep(100)
+  expect(ended).toBe(0)
+  write(text('m2', 'the agent says ok'), done)
+  await until(() => ended)
+  expect(updates.at(-1)).toMatchObject({ content: { text: 'the agent says ok' } })
 })

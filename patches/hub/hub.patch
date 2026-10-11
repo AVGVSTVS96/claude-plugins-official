@@ -1,11 +1,11 @@
 diff --git a/hub/hub.test.ts b/hub/hub.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..7207df06e51014b31626fc077d1959074bf86ca6
+index 0000000000000000000000000000000000000000..27db446ca850002d944a25a1b7cca9d00d41ded7
 --- /dev/null
 +++ b/hub/hub.test.ts
-@@ -0,0 +1,600 @@
+@@ -0,0 +1,615 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
-+import { connect, type Socket } from 'net'
++import { connect, createServer, type Socket } from 'net'
 +import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, chmodSync, existsSync } from 'fs'
 +import { tmpdir } from 'os'
 +import { join } from 'path'
@@ -604,12 +604,27 @@ index 0000000000000000000000000000000000000000..7207df06e51014b31626fc077d195907
 +  expect(tappable(`[the thread](${link})`)).toBe(`[the thread](${web})`)
 +  expect(tappable('no links here')).toBe('no links here')
 +})
++
++test("a session's stop hook reports whether background agents are still working, which shells don't count as", async () => {
++  const socket = join(dir, 'state.sock')
++  const received: object[] = []
++  const server = createServer(client => client.on('data', chunk => received.push(JSON.parse(String(chunk))))).listen(socket)
++  const stop = async (tasks: object[]) => {
++    const hook = Bun.spawn(['bun', join(import.meta.dir, 'state.ts'), 'idle'], { env: { ...process.env, HEX_HUB: socket, HEX_THREAD: 't1' }, stdin: new Blob([JSON.stringify({ hook_event_name: 'Stop', background_tasks: tasks })]) })
++    await hook.exited
++  }
++  await stop([{ type: 'subagent', status: 'running' }])
++  await stop([{ type: 'shell', status: 'running' }])
++  await until(() => received.length === 2 || undefined)
++  server.close()
++  expect(received).toEqual([{ type: 'state', thread: 't1', busy: false, background: true }, { type: 'state', thread: 't1', busy: false }])
++})
 diff --git a/hub/hub.ts b/hub/hub.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..858ccb82f1c8deaf3128680e0d42cfe44c8e9c24
+index 0000000000000000000000000000000000000000..bda8244a4ec7c01c8a526a5c5cef292a7da6b96e
 --- /dev/null
 +++ b/hub/hub.ts
-@@ -0,0 +1,466 @@
+@@ -0,0 +1,467 @@
 +import { createServer, type Socket } from 'net'
 +import { execFile, spawn } from 'child_process'
 +import { createHash } from 'crypto'
@@ -619,7 +634,8 @@ index 0000000000000000000000000000000000000000..858ccb82f1c8deaf3128680e0d42cfe4
 +
 +export type Message = { content: string; meta: Record<string, string> }
 +export type Call = (thread: string, tool: string, args: Record<string, unknown>) => Promise<string>
-+export type State = (thread: string, busy: boolean) => void
++// background: the session's turn ended with background agents still working.
++export type State = (thread: string, busy: boolean, background: boolean) => void
 +export type Failed = (thread: string, reason: string) => void
 +export type Permission = { request_id: string; tool_name: string; description: string; input_preview: string }
 +export type Settings = { model?: string; effort?: string }
@@ -705,8 +721,8 @@ index 0000000000000000000000000000000000000000..858ccb82f1c8deaf3128680e0d42cfe4
 +    renameSync(`${registry}.tmp`, registry)
 +  }
 +
-+  function setState(thread: string, working: boolean) {
-+    state(thread, working)
++  function setState(thread: string, working: boolean, background = false) {
++    state(thread, working, background)
 +    claim(thread)
 +    if (working) busy.add(thread)
 +    else busy.delete(thread)
@@ -1003,7 +1019,7 @@ index 0000000000000000000000000000000000000000..858ccb82f1c8deaf3128680e0d42cfe4
 +    })
 +    function handle(request: any) {
 +      if (request.type === 'hello') welcome(thread = request.thread, request.session, socket)
-+      if (request.type === 'state') setState(request.thread, request.busy)
++      if (request.type === 'state') setState(request.thread, request.busy, request.background === true)
 +      if (request.type === 'open') launch(request.thread, request.name, request.prompt)
 +      if (request.type === 'permission_request') permission?.(thread, request)
 +      if (request.type === 'inbound') deliver(request.thread, threads[request.thread]?.name ?? request.thread, { content: request.content, meta: request.meta })
@@ -1090,24 +1106,34 @@ index 0000000000000000000000000000000000000000..e548a4b258fd9dd91ce6a14a70abdfd2
 +])
 diff --git a/hub/state.ts b/hub/state.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..679d5fb40e7d3e8920c61f721751379ea3aabdb4
+index 0000000000000000000000000000000000000000..13680cbcb640b549f0cc7a61c90825746e4d2c8a
 --- /dev/null
 +++ b/hub/state.ts
-@@ -0,0 +1,17 @@
+@@ -0,0 +1,27 @@
 +import { connect } from 'net'
 +
 +const { HEX_HUB, HEX_THREAD } = process.env
 +const busy = process.argv[2] === 'busy'
 +
-+async function fromChat() {
-+  const { prompt } = JSON.parse(await Bun.stdin.text())
-+  return typeof prompt === 'string' && prompt.startsWith('<channel source=')
++// Claude Code counts a session with these running as still working, and shells or monitors as not.
++const WORKING = new Set(['subagent', 'workflow'])
++
++async function input(): Promise<{ prompt?: unknown; background_tasks?: { type?: string }[] }> {
++  try {
++    return JSON.parse(await Bun.stdin.text())
++  } catch {
++    return {}
++  }
 +}
 +
-+if (HEX_HUB && HEX_THREAD && (!busy || (await fromChat()))) {
++const { prompt, background_tasks } = await input()
++const fromChat = typeof prompt === 'string' && prompt.startsWith('<channel source=')
++const background = !busy && !!background_tasks?.some(task => WORKING.has(task.type ?? ''))
++
++if (HEX_HUB && HEX_THREAD && (!busy || fromChat)) {
 +  connect(HEX_HUB)
 +    .on('connect', function () {
-+      this.end(JSON.stringify({ type: 'state', thread: HEX_THREAD, busy }) + '\n')
++      this.end(JSON.stringify({ type: 'state', thread: HEX_THREAD, busy, ...(background && { background }) }) + '\n')
 +    })
 +    .on('error', () => {})
 +}

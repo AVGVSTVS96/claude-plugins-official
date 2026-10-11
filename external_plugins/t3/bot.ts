@@ -37,6 +37,7 @@ type Turn = {
   client: AgentContext
   reader?: ReturnType<typeof follow>
   sent: Promise<unknown>
+  done: boolean
   compaction?: string
   resolve: (response: PromptResponse) => void
   reject: (error: Error) => void
@@ -58,10 +59,14 @@ const hub = startHub({
     throw new Error(`unknown tool: ${tool}`)
   },
   // A new thread's session starts with its first prompt and is only known once it says hello.
-  state: (thread, busy) => {
+  // Its turn is done once a stop leaves no background agent working.
+  state: (thread, busy, background) => {
     const turn = turns.get(thread)
+    if (!turn) return
+    turn.done = !busy && !background
     const session = hub.session(thread)
-    if (busy && turn && session && !turn.reader) turn.reader = reader(thread, session, turn, true)
+    if (busy && session && !turn.reader) turn.reader = reader(thread, session, turn, true)
+    turn.reader?.settle()
   },
   failed: (thread, reason) => {
     const turn = turns.get(thread)
@@ -98,6 +103,7 @@ function reader(thread: string, session: string, turn: Turn, fresh: boolean) {
     sessionId: thread,
     cwd,
     fresh,
+    done: () => turn.done,
     end: error => finish(thread, 'end_turn', error),
     emit: notification => send(turn, notification),
   })
@@ -135,7 +141,7 @@ function prompt(thread: string, blocks: ContentBlock[], client: AgentContext, si
   const compact = blocks[0]?.type === 'text' && blocks[0].text.trim() === '/compact'
   if (compact && !session) throw RequestError.invalidRequest(undefined, 'this thread has nothing to compact yet')
   return new Promise((resolve, reject) => {
-    const turn: Turn = { client, sent: Promise.resolve(), resolve, reject, ...(compact && { compaction: randomUUID() }) }
+    const turn: Turn = { client, sent: Promise.resolve(), done: false, resolve, reject, ...(compact && { compaction: randomUUID() }) }
     turns.set(thread, turn)
     signal.addEventListener('abort', () => turns.get(thread) === turn && cancel(thread), { once: true })
     if (session) turn.reader = reader(thread, session, turn, false)
