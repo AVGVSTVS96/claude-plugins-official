@@ -35,6 +35,11 @@ agent's work itself, so the session's own output is the conversation:
   session as `--mcp-config`. A session loads them only as it starts, so when they
   change, the next prompt goes to a fresh start of the session, unless it is busy
   with background work.
+- `session/new` and `session/resume` advertise a `model` and an `effort` config
+  option, which T3 shows as its model and effort pickers; `session/set_config_option`
+  saves the choice as the thread's (hub `configure`), and the next prompt goes to a
+  fresh start of the session with it. A thread with no choice shows what hex's
+  settings give it.
 - A session that fails to start fails the prompt with its reason, such as a
   workspace Claude Code doesn't trust yet.
 - `server.ts` is the channel each session loads. It delivers T3's messages and

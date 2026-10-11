@@ -6,7 +6,7 @@ import { homedir } from 'os'
 import { basename, join } from 'path'
 import { fileURLToPath } from 'url'
 import { randomUUID } from 'crypto'
-import { agent, ndJsonStream, PROTOCOL_VERSION, RequestError, type AgentContext, type ContentBlock, type McpServer, type PromptResponse, type SessionNotification, type StopReason } from '@agentclientprotocol/sdk'
+import { agent, ndJsonStream, PROTOCOL_VERSION, RequestError, type AgentContext, type ContentBlock, type McpServer, type PromptResponse, type SessionConfigOption, type SessionNotification, type StopReason } from '@agentclientprotocol/sdk'
 import { startHub } from '../../hub/hub.ts'
 import { follow, transcriptPath } from './transcript.ts'
 import { version } from './package.json'
@@ -19,6 +19,19 @@ const HOME = homedir()
 const SCRATCH = join(HOME, '.t3', 'scratch')
 const CLAUDE_JSON = join(HOME, '.claude.json')
 const COMMANDS = [{ name: 'compact', description: 'Summarize the conversation so far to free up context' }]
+const MODELS = [
+  { value: 'claude-opus-5-5', name: 'Opus 5.5', alias: 'opus' },
+  { value: 'claude-sonnet-5-5', name: 'Sonnet 5.5', alias: 'sonnet' },
+  { value: 'claude-haiku-5-5', name: 'Haiku 5.5', alias: 'haiku' },
+  { value: 'claude-fable-5-1', name: 'Fable 5.1', alias: 'fable' },
+]
+const EFFORTS = [
+  { value: 'low', name: 'Low' },
+  { value: 'medium', name: 'Medium' },
+  { value: 'high', name: 'High' },
+  { value: 'xhigh', name: 'Extra High' },
+  { value: 'max', name: 'Max' },
+]
 
 type Turn = {
   client: AgentContext
@@ -35,7 +48,6 @@ const turns = new Map<string, Turn>()
 // T3 Code hands each thread its own MCP servers, with tools like html_render, preview
 // and delegate_task. A session loads them as it starts, so it starts again when they change.
 const servers = new Map<string, string>()
-const started = new Map<string, string | undefined>()
 
 mkdirSync(INBOX_DIR, { recursive: true, mode: 0o700 })
 
@@ -59,7 +71,6 @@ const hub = startHub({
   },
   args: thread => {
     const config = servers.get(thread)
-    started.set(thread, config)
     return config ? ['--mcp-config', config] : []
   },
   hexDir: HEX_DIR,
@@ -127,11 +138,41 @@ function prompt(thread: string, blocks: ContentBlock[], client: AgentContext): P
     if (session) turn.reader = reader(thread, session, turn, false)
     if (!compact) {
       const message = { content: render(blocks), meta: { ts: new Date().toISOString() } }
-      return servers.get(thread) === started.get(thread) ? hub.deliver(thread, name, message) : hub.refresh(thread, message)
+      return hub.deliver(thread, name, message)
     }
     compaction(turn, thread, 'in_progress')
     hub.command(thread, '/compact')
   })
+}
+
+// T3 shows these as its model and effort pickers. A thread with no choice of its own
+// runs on what hex's settings say, so that's what they show.
+function options(thread: string): SessionConfigOption[] {
+  const chosen = hub.settings(thread)
+  const defaults = settings()
+  const model = chosen.model ?? MODELS.find(model => defaults.model === model.alias || defaults.model?.startsWith(model.value))?.value ?? MODELS[0]!.value
+  const effort = chosen.effort ?? EFFORTS.find(effort => effort.value === defaults.effortLevel)?.value ?? 'medium'
+  return [
+    { type: 'select', id: 'model', name: 'Model', category: 'model', currentValue: model, options: MODELS.map(({ value, name }) => ({ value, name })) },
+    { type: 'select', id: 'effort', name: 'Effort', category: 'thought_level', currentValue: effort, options: EFFORTS },
+  ]
+}
+
+function settings(): { model?: string; effortLevel?: string } {
+  try {
+    return JSON.parse(readFileSync(join(HEX_DIR, '.claude', 'settings.json'), 'utf8'))
+  } catch {
+    return {}
+  }
+}
+
+// The thread's session starts again with the new choice at its next prompt.
+function configure(thread: string, id: string, value: unknown) {
+  const choices = id === 'model' ? MODELS : id === 'effort' ? EFFORTS : undefined
+  if (!choices) throw RequestError.invalidParams(undefined, `no option ${id}`)
+  if (!choices.some(choice => choice.value === value)) throw RequestError.invalidParams(undefined, `${id} can't be ${value}`)
+  hub.configure(known(thread), { [id]: value as string })
+  return { configOptions: options(thread) }
 }
 
 // Sent once the session/new or session/resume answer is out, so the client knows the session.
@@ -205,13 +246,14 @@ function serve(socket: Socket) {
       remember(thread, params.mcpServers)
       hub.register(thread, basename(folder ?? HEX_DIR), folder)
       advertise(client, thread)
-      return { sessionId: thread }
+      return { sessionId: thread, configOptions: options(thread) }
     })
     .onRequest('session/resume', ({ params, client }) => {
       remember(known(params.sessionId), params.mcpServers)
       advertise(client, params.sessionId)
-      return {}
+      return { configOptions: options(params.sessionId) }
     })
+    .onRequest('session/set_config_option', ({ params }) => configure(params.sessionId, params.configId, params.value))
     .onRequest('session/prompt', ({ params, client }) => prompt(params.sessionId, params.prompt, client))
     .onNotification('session/cancel', ({ params }) => cancel(params.sessionId))
     .connect(ndJsonStream(Writable.toWeb(socket) as WritableStream<Uint8Array>, Readable.toWeb(socket) as ReadableStream<Uint8Array>))

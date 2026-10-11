@@ -376,6 +376,23 @@ test('stopping a thread ends its session now, and its next message resumes it', 
   expect(registry()['chat:7']).toEqual({ name: 'Desk anchors', session: SESSION })
 })
 
+test('a thread\'s model and effort are kept, and a running session takes them by starting again with its next message', async () => {
+  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } }, agents: [{ sessionId: SESSION, status: 'idle' }] })
+  const { received } = await session('chat:7')
+  await Bun.sleep(50)
+  hub.deliver('chat:7', 'Desk anchors', message)
+  await until(() => received.length)
+  hub.configure('chat:7', { model: 'claude-fable-5-1', effort: 'xhigh' })
+  expect(registry()['chat:7']).toEqual({ name: 'Desk anchors', session: SESSION, model: 'claude-fable-5-1', effort: 'xhigh' })
+  hub.deliver('chat:7', 'Desk anchors', { content: 'again', meta: {} })
+  const args = await launched()
+  expect([args[args.indexOf('--model') + 1], args[args.indexOf('--effort') + 1], args[args.indexOf('--resume') + 1]]).toEqual(['claude-fable-5-1', 'xhigh', SESSION])
+  expect(received.map(payload => payload.content)).toEqual(['hi'])
+  const fresh = await session('chat:7')
+  await until(() => fresh.received.length)
+  expect(fresh.received[0]).toMatchObject({ type: 'inbound', content: 'again' })
+})
+
 test('closing an idle thread stops its session right away, then forgets the thread', async () => {
   start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } } })
   const { socket } = await session('chat:7')

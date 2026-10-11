@@ -1,5 +1,6 @@
 import { createServer, type Socket } from 'net'
 import { execFile, spawn } from 'child_process'
+import { createHash } from 'crypto'
 import { existsSync, readFileSync, writeFileSync, renameSync, rmSync, watch, type FSWatcher } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
@@ -9,7 +10,8 @@ export type Call = (thread: string, tool: string, args: Record<string, unknown>)
 export type State = (thread: string, busy: boolean) => void
 export type Failed = (thread: string, reason: string) => void
 export type Permission = { request_id: string; tool_name: string; description: string; input_preview: string }
-type Thread = { name: string; session?: string; cwd?: string }
+export type Settings = { model?: string; effort?: string }
+type Thread = Settings & { name: string; session?: string; cwd?: string; launched?: string }
 type Agent = { sessionId: string; pid?: number; status?: string }
 export type Hub = ReturnType<typeof startHub>
 
@@ -209,8 +211,39 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
     })
   }
 
+  // What a thread's session starts with besides the basics. A session reads it only as it
+  // starts, so threads.json keeps a digest of what it started with to tell when it's stale.
+  function extra(thread: string) {
+    const { model, effort } = threads[thread]!
+    return [...(model ? ['--model', model] : []), ...(effort ? ['--effort', effort] : []), ...args(thread)]
+  }
+
+  function digest(list: string[]) {
+    return createHash('sha256').update(JSON.stringify(list)).digest('hex').slice(0, 16)
+  }
+
+  function stale(thread: string) {
+    const list = extra(thread)
+    return threads[thread]?.launched !== (list.length ? digest(list) : undefined)
+  }
+
+  function configure(thread: string, settings: Settings) {
+    const known = threads[thread]!
+    for (const [key, value] of Object.entries(settings) as [keyof Settings, string | undefined][]) {
+      if (value) known[key] = value
+      else delete known[key]
+    }
+    save()
+  }
+
   function start(known: Thread, thread: string, prompt?: string, fork?: string) {
     const bound = { HEX_CHANNEL: channel, HEX_THREAD: thread, HEX_HUB: socketPath, ...(thread === main ? { HEX_MAIN: '1' } : {}) }
+    const launchArgs = extra(thread)
+    const launched = launchArgs.length ? digest(launchArgs) : undefined
+    if (known.launched !== launched) {
+      known.launched = launched
+      save()
+    }
     let child
     try {
       child = spawn(launcher, [
@@ -218,7 +251,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
         '--channels', channel,
         '--name', known.name,
         ...(fork ? ['--resume', fork, '--fork-session'] : known.session ? ['--resume', known.session] : []),
-        ...args(thread),
+        ...launchArgs,
         '--settings', JSON.stringify({ enabledPlugins: { [plugin]: true }, env: bound }),
         ...(prompt ? [prompt] : []),
       ], { cwd: known.cwd ?? hexDir, env, stdio: ['ignore', 'pipe', 'pipe'] })
@@ -267,7 +300,8 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
 
   function deliver(thread: string, name: string, message: Message) {
     const socket = live.get(thread)
-    if (socket) return send(socket, { type: 'inbound', ...message })
+    if (socket && !stale(thread)) return send(socket, { type: 'inbound', ...message })
+    if (socket) return refresh(thread, message)
     queued.set(thread, [...(queued.get(thread) ?? []), message])
     launch(thread, name)
   }
@@ -285,11 +319,9 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
   // Delivers a message to a fresh start of the thread's session, so it gets new launch
   // arguments; a session busy with background work keeps running and takes it as it is.
   function refresh(thread: string, message: Message) {
-    const known = threads[thread]!
-    const session = current(thread)
-    if (!session) return deliver(thread, known.name, message)
-    agent(session, running => {
-      if (running?.status === 'busy') return deliver(thread, known.name, message)
+    agent(current(thread) ?? '', running => {
+      const socket = live.get(thread)
+      if (socket && running?.status === 'busy') return send(socket, { type: 'inbound', ...message })
       queued.set(thread, [...(queued.get(thread) ?? []), message])
       cycle(thread, running)
     })
@@ -392,7 +424,8 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
   return {
     deliver,
     command: restart,
-    refresh,
+    configure,
+    settings: (thread: string): Settings => ({ model: threads[thread]?.model, effort: threads[thread]?.effort }),
     register: (thread: string, name: string, cwd?: string) => void register(thread, name, cwd),
     open: (thread: string, name: string, prompt?: string, cwd?: string) => launch(thread, name, prompt, undefined, cwd),
     fork: (thread: string, name: string, session: string, prompt: string, cwd?: string) => launch(thread, name, prompt, session, cwd),

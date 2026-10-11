@@ -37,10 +37,12 @@ for thread names every client enforces: one word. A
 local program can hand a thread a message over the socket (`inbound`), as if it
 came from the app. A session's permission prompt (`permission_request`) reaches
 the client with the session's thread, and the client's `answer` goes back to
-that session alone (`permission`). A client can add launch arguments per thread, and hand a
-message to a fresh start of a thread's session so it picks up new ones (a session
-busy with background work keeps running and takes it as it is). Each session's
-settings enable only its client's plugin.
+that session alone (`permission`). A thread can have its own model and effort
+(`configure`), kept in `threads.json` and passed as `--model` and `--effort`, and a
+client can add launch arguments per thread. `threads.json` keeps a digest of what a
+session started with, so a message to a session whose arguments changed goes to a
+fresh start of it (a session busy with background work keeps running and takes it
+as it is). Each session's settings enable only its client's plugin.
 
 `tappable` turns `buzz://` links into web links through `open.html` on hex's
 site, since chat apps only link web addresses.
