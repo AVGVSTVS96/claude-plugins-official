@@ -4,7 +4,7 @@ id: hub
 summary: Add a client-agnostic hub that gives every chat thread its own Claude Code session and moves threads between clients.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: hub.patch
-patch_sha256: 3e16262151674576404a025e80b31595bba9736266f821efcfb9a19a9ffd4add
+patch_sha256: 04933ce00f0f6e195bd82f0c0adf486294cf54eb3f91e083fde453f912747909
 ---
 
 ## Intent
@@ -59,7 +59,9 @@ site, since chat apps only link web addresses.
 
 The main thread is always running: the hub starts it (or resumes it) when it
 starts, never stops it for being idle, and starts it again when its session
-has been gone for 30 seconds.
+has been gone for 30 seconds. A client whose main thread is hex's General
+says so (`general`), and only that session's settings env says `HEX_MAIN`, so
+hex runs General's jobs in General alone, not in every client's main thread.
 
 `hub/serve.ts` is the service: it runs every client (Telegram, Discord,
 Buzz, T3 Code) in one process. Each chat client registers in `clients` with a `place` that opens a
@@ -96,7 +98,7 @@ instead (`fork`, `--fork-session`).
 ## Verification
 
 `bun test hub` drives routing, queueing, resume, folders, running sessions, the main
-thread (started with the hub, kept running, revived), the launcher and its
+thread (started with the hub, kept running, revived, `HEX_MAIN` only for General), the launcher and its
 environment, failed starts, busy and idle, idle stops, fresh threads, stopping, closing, naming and
 handoffs (release, adopt, fork), permission prompts and bad input against a fake `claude`. Run `scripts/verify`.
 

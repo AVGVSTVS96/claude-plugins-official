@@ -37,7 +37,7 @@ afterEach(() => {
   process.env.PATH = process.env.PATH!.split(':').slice(1).join(':')
 })
 
-function start(options: { main?: string; idleStop?: number; relaunch?: number; launcher?: string; registry?: object; agents?: object[]; fresh?: (thread: string) => boolean } = {}) {
+function start(options: { main?: string; general?: boolean; idleStop?: number; relaunch?: number; launcher?: string; registry?: object; agents?: object[]; fresh?: (thread: string) => boolean } = {}) {
   if (options.registry) writeFileSync(join(dir, 'threads.json'), JSON.stringify(options.registry))
   if (options.agents) writeFileSync(join(dir, 'agents'), JSON.stringify(options.agents))
   const seen: [string, boolean][] = (states = [])
@@ -47,6 +47,7 @@ function start(options: { main?: string; idleStop?: number; relaunch?: number; l
     stateDir: dir,
     channel: CHANNEL,
     main: options.main,
+    general: options.general,
     call: async (thread, tool) => `${tool} in ${thread}`,
     state: (thread, busy) => void seen.push([thread, busy]),
     failed: (thread, reason) => void failedSeen.push([thread, reason]),
@@ -168,12 +169,19 @@ test('a thread whose session is still running is never relaunched', async () => 
 })
 
 test('the main thread starts with the hub, under its name, with no prompt and no typing', async () => {
-  start({ main: 'chat' })
+  start({ main: 'chat', general: true })
   const args = await launched()
   expect(args.slice(0, 5)).toEqual(['--bg', '--channels', CHANNEL, '--name', 'hex'])
   expect(args.at(-2)).toBe('--settings')
   expect(settingsOf(args).env.HEX_MAIN).toBe('1')
   expect(states).toEqual([])
+})
+
+test("only the hub whose main thread is hex's General marks it HEX_MAIN", async () => {
+  start({ main: 'chat' })
+  const args = await launched()
+  expect(settingsOf(args).env.HEX_THREAD).toBe('chat')
+  expect(settingsOf(args).env.HEX_MAIN).toBeUndefined()
 })
 
 test('a running main thread is left to reconnect, and gets its messages when it does', async () => {

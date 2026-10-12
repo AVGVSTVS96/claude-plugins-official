@@ -632,10 +632,10 @@ index 0000000000000000000000000000000000000000..eae46ef27e744dc63f3d281746c0becb
 +})
 diff --git a/external_plugins/telegram/bot.ts b/external_plugins/telegram/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..f8bb846afd11d22c0a94d038271a603ca3d383f0
+index 0000000000000000000000000000000000000000..6bbd8d2d532eeb1c0d026de415667bfa10e5aa36
 --- /dev/null
 +++ b/external_plugins/telegram/bot.ts
-@@ -0,0 +1,894 @@
+@@ -0,0 +1,895 @@
 +#!/usr/bin/env bun
 +import { Bot, GrammyError, InputFile, type Context } from 'grammy'
 +import type { Chat, MessageEntity, MessageOrigin, ReactionTypeEmoji } from 'grammy/types'
@@ -1124,6 +1124,7 @@ index 0000000000000000000000000000000000000000..f8bb846afd11d22c0a94d038271a603c
 +  stateDir: STATE_DIR,
 +  channel: 'plugin:telegram@hex',
 +  main: MAIN,
++  general: true,
 +  hexDir: process.env.HEX_DIR,
 +  launcher: process.env.HEX_LAUNCHER,
 +  mainName: process.env.HEX_NAME,

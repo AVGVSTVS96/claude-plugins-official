@@ -50,11 +50,13 @@ export function title(text: string): string {
   return title
 }
 
-export function startHub({ stateDir, channel, main, mainName = 'main', call, state, failed, permission, args = () => [], fresh = () => false, idleStop = IDLE_STOP, relaunch = RELAUNCH, jobsDir = JOBS, hexDir = process.cwd(), projectsDir = join(CLAUDE, 'projects'), launcher = 'claude' }: {
+export function startHub({ stateDir, channel, main, mainName = 'main', general = false, call, state, failed, permission, args = () => [], fresh = () => false, idleStop = IDLE_STOP, relaunch = RELAUNCH, jobsDir = JOBS, hexDir = process.cwd(), projectsDir = join(CLAUDE, 'projects'), launcher = 'claude' }: {
   stateDir: string
   channel: string
   main?: string
   mainName?: string
+  // The main thread is hex's General: its settings env says HEX_MAIN.
+  general?: boolean
   call: Call
   state: State
   failed: Failed
@@ -254,7 +256,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', call, sta
   }
 
   function start(known: Thread, thread: string, prompt?: string, fork?: string) {
-    const bound = { HEX_CHANNEL: channel, HEX_THREAD: thread, HEX_HUB: socketPath, ...(thread === main ? { HEX_MAIN: '1' } : {}), ...(fresh(thread) ? { HEX_FRESH: '1' } : {}) }
+    const bound = { HEX_CHANNEL: channel, HEX_THREAD: thread, HEX_HUB: socketPath, ...(general && thread === main ? { HEX_MAIN: '1' } : {}), ...(fresh(thread) ? { HEX_FRESH: '1' } : {}) }
     const launchArgs = extra(thread)
     const launched = launchArgs.length ? digest(launchArgs) : undefined
     if (known.launched !== launched) {

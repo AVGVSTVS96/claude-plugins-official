@@ -486,6 +486,7 @@ const hub = startHub({
   stateDir: STATE_DIR,
   channel: 'plugin:telegram@hex',
   main: MAIN,
+  general: true,
   hexDir: process.env.HEX_DIR,
   launcher: process.env.HEX_LAUNCHER,
   mainName: process.env.HEX_NAME,
