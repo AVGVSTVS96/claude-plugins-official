@@ -19,8 +19,6 @@ const mcp = new Server(
       'For formatted replies use format: "markdown" and write ordinary Markdown (code blocks, diagrams, bold, links, lists, tables), no escaping needed. reply accepts file paths (files: ["/abs/path.png"]) for attachments, silent: true to send without a notification, and buttons: ["Yes", "No"] for tappable choices. Use react to add or remove emoji reactions, edit_message for interim progress updates or to change a file\'s caption or the file itself, and delete_message, pin, forward and poll as their names say. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',
       '',
       'new_thread opens a new forum topic with its own fresh session and hands it your prompt; the topic starts with the user\'s request and your replies since, forwarded. Use it for work the user will want to follow or talk to on its own. It only works in a group with topics, and rename_thread changes a topic\'s name or icon. With app: "discord" or "buzz" it opens a Discord or Buzz thread instead, the place for deep, long-form work. handoff moves this whole conversation to Discord or Buzz when the user asks: you stop here and continue there with your memory (from General, a copy continues there and you stay).',
-      '',
-      "Telegram's Bot API exposes no history or search — you only see messages as they arrive. If you need earlier context, ask the user to paste it or summarize.",
     ].join('\n'),
   },
 )
