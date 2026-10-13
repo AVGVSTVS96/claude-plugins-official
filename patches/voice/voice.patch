@@ -33,10 +33,10 @@ index 0000000000000000000000000000000000000000..07fdedd6c4bc9e7072f8d860f7eadd42
 +}
 diff --git a/external_plugins/voice/README.md b/external_plugins/voice/README.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..d23d69ec5e83c5f5f9be9351f527a826c194209b
+index 0000000000000000000000000000000000000000..47f34a30e0ef3c741883a46993fc9bbcc2a4b042
 --- /dev/null
 +++ b/external_plugins/voice/README.md
-@@ -0,0 +1,256 @@
+@@ -0,0 +1,257 @@
 +# voice
 +
 +Live voice calls for Claude Code. OpenAI's `gpt-live-1` talks with you in real
@@ -78,6 +78,7 @@ index 0000000000000000000000000000000000000000..d23d69ec5e83c5f5f9be9351f527a826
 +   | `say` | `session.commentary.append` | a result to say aloud (it paraphrases) |
 +   | `note` | `session.thinking.append` | a fact to know without saying it yet |
 +   | `task` | `session.thinking.append` (the whole board) | task status: running, done, failed |
++   | `send` | the board, as running until the thread is done | work for another hex thread (hex only) |
 +   | `hang_up` | `session.close`, once the voice stops talking | ending the call |
 +
 +   Each tool returns once OpenAI acknowledges the update.

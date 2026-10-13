@@ -4,7 +4,7 @@ id: voice
 summary: Add a voice channel where OpenAI's gpt-live-1 holds a live call and hands every real request to the Claude Code session.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: voice.patch
-patch_sha256: 2654fadfa9c0076df9a19f9657a9199cf8f5f7b7ba9e57fffe0aa3184a5cf9d2
+patch_sha256: e5c74bd57ab94a06eccb4f3329b5e3400a0d0f3615c095aa83afeb83563ed3b5
 ---
 
 ## Intent
