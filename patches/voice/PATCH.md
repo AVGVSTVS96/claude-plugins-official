@@ -4,7 +4,7 @@ id: voice
 summary: Add a voice channel where OpenAI's gpt-live-1 holds a live call and hands every real request to the Claude Code session.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: voice.patch
-patch_sha256: 888bca42e0862ffe0eab316f20f76f34a0fce7c9b4d1b69d73fd6b7979ab258a
+patch_sha256: 0cf7e4bfdc63928c2954853359f162c73c8b190e04414a875d3454d87d1c72bf
 ---
 
 ## Intent
@@ -35,8 +35,10 @@ plugin with no hub code.
   `voice` is a fresh thread, and when a call ends `server.ts` sends the hub
   `renew`, so every call starts in a new session that reads the call chat.
   Because that restarts the plugin, `bot.ts` holds `VOICE_PORT` (read from the
-  plugin's `.env` like the plugin does) with `door.ts`, and a `server.ts`
-  started by the voice hub listens on `state/voice/http.sock` instead. The door
+  plugin's `.env` like the plugin does) with `door.ts`, and starts the session
+  with `VOICE_SOCKET` (`state/voice/http.sock`) in its settings env (the hub's
+  `bind`); `server.ts` listens on that socket when it's set, and on the port
+  otherwise, so a plugin started by a hub without the door keeps the port. The door
   passes each request and websocket on to that socket unchanged, and a request
   that finds no plugin there waits for the socket to come back (a file change,
   up to 30 seconds) before answering 503. If the port is still taken (an old

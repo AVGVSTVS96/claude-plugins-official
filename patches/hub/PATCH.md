@@ -4,7 +4,7 @@ id: hub
 summary: Add a client-agnostic hub that gives every chat thread its own Claude Code session and moves threads between clients.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: hub.patch
-patch_sha256: cb466c251f52a456a36a9086800c0181a4867cae8b3c6e3f66a4dfc2e84abd36
+patch_sha256: b4383a70bac29ee339c27ac8554786766c7b26c3fa5f6bc41015fde5e8234843
 ---
 
 ## Intent
@@ -44,7 +44,8 @@ came from the app. A session's permission prompt (`permission_request`) reaches
 the client with the session's thread, and the client's `answer` goes back to
 that session alone (`permission`). A thread can have its own model and effort
 (`configure`), kept in `threads.json` and passed as `--model` and `--effort`, and a
-client can add launch arguments per thread. `threads.json` keeps a digest of what a
+client can add launch arguments per thread, and more of a thread's binding to its
+settings env (`bind`), under the hub's own. `threads.json` keeps a digest of what a
 session started with, so a message to a session whose arguments changed goes to a
 fresh start of it (a session busy with background work keeps running and takes it
 as it is). A client can mark threads fresh: a fresh thread's session is never

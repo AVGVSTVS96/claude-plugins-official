@@ -116,8 +116,9 @@ to keep the session (`keep`), so a renew asked for by the call before it
 doesn't stop the session mid-call.
 
 In hex the plugin restarts with each call's new session, so the hub holds the
-port instead (`door.ts`): the plugin listens on `state/voice/http.sock`, and the
-hub passes every request and websocket on to it. A request that comes while the
+port instead (`door.ts`): it starts the plugin with `VOICE_SOCKET` set to
+`state/voice/http.sock`, the plugin listens there, and the hub passes every
+request and websocket on to it. A request that comes while the
 plugin restarts waits for it to come back (up to 30 seconds) instead of failing.
 
 ## Agent activity

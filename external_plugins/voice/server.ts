@@ -34,7 +34,7 @@ const TOKEN = process.env.VOICE_TOKEN
 const HUB = process.env.HEX_HUB
 const THREAD = process.env.HEX_CHANNEL?.startsWith('plugin:voice@') ? process.env.HEX_THREAD : undefined
 const HEX_STATE = HUB && dirname(dirname(HUB))
-const SOCKET = HUB && THREAD ? join(dirname(HUB), 'http.sock') : undefined
+const SOCKET = process.env.VOICE_SOCKET
 const calls = new CallLog(join(STATE_DIR, 'calls'))
 const activity = new Changes()
 const follows = new Map<string, () => void>()

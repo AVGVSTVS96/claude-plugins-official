@@ -37,7 +37,7 @@ afterEach(() => {
   process.env.PATH = process.env.PATH!.split(':').slice(1).join(':')
 })
 
-function start(options: { main?: string; general?: boolean; idleStop?: number; relaunch?: number; launcher?: string; registry?: object; agents?: object[]; fresh?: (thread: string) => boolean } = {}) {
+function start(options: { main?: string; general?: boolean; idleStop?: number; relaunch?: number; launcher?: string; registry?: object; agents?: object[]; fresh?: (thread: string) => boolean; bind?: (thread: string) => Record<string, string> } = {}) {
   if (options.registry) writeFileSync(join(dir, 'threads.json'), JSON.stringify(options.registry))
   if (options.agents) writeFileSync(join(dir, 'agents'), JSON.stringify(options.agents))
   const seen: [string, boolean][] = (states = [])
@@ -59,6 +59,7 @@ function start(options: { main?: string; general?: boolean; idleStop?: number; r
     relaunch: options.relaunch,
     launcher: options.launcher,
     fresh: options.fresh,
+    bind: options.bind,
     mainName: 'hex',
   })
 }
@@ -548,6 +549,11 @@ test('closing a busy thread stops its session at its next idle, not before', asy
   expect(calls().some(args => args[0] === 'stop')).toBe(false)
   send({ type: 'state', thread: 'chat:7', busy: false })
   await until(() => calls().find(args => args[0] === 'stop'))
+})
+
+test("a client's own binding for a thread reaches its session's settings env, under the hub's own", async () => {
+  start({ main: 'voice', bind: thread => ({ VOICE_SOCKET: `/run/${thread}.sock`, HEX_THREAD: 'not this' }) })
+  expect(settingsOf(await launched()).env).toMatchObject({ VOICE_SOCKET: '/run/voice.sock', HEX_THREAD: 'voice' })
 })
 
 test('the main thread cannot be closed', () => {

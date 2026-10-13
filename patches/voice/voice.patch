@@ -33,10 +33,10 @@ index 0000000000000000000000000000000000000000..07fdedd6c4bc9e7072f8d860f7eadd42
 +}
 diff --git a/external_plugins/voice/README.md b/external_plugins/voice/README.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..bc4a2f21a5d542b79dbc11830a6ec11975980955
+index 0000000000000000000000000000000000000000..0681d1a55259ed1c778a1ac22694fe8244d5c92a
 --- /dev/null
 +++ b/external_plugins/voice/README.md
-@@ -0,0 +1,264 @@
+@@ -0,0 +1,265 @@
 +# voice
 +
 +Live voice calls for Claude Code. OpenAI's `gpt-live-1` talks with you in real
@@ -155,8 +155,9 @@ index 0000000000000000000000000000000000000000..bc4a2f21a5d542b79dbc11830a6ec119
 +doesn't stop the session mid-call.
 +
 +In hex the plugin restarts with each call's new session, so the hub holds the
-+port instead (`door.ts`): the plugin listens on `state/voice/http.sock`, and the
-+hub passes every request and websocket on to it. A request that comes while the
++port instead (`door.ts`): it starts the plugin with `VOICE_SOCKET` set to
++`state/voice/http.sock`, the plugin listens there, and the hub passes every
++request and websocket on to it. A request that comes while the
 +plugin restarts waits for it to come back (up to 30 seconds) instead of failing.
 +
 +## Agent activity
@@ -700,10 +701,10 @@ index 0000000000000000000000000000000000000000..5dcd8644eaa2c824e6f575acc741297d
 +}
 diff --git a/external_plugins/voice/bot.ts b/external_plugins/voice/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..a655cfa7f5646b4d6dac1caab7ffd7c6a898560f
+index 0000000000000000000000000000000000000000..ca531607be84af2d51e1567f847c440c2d69ad02
 --- /dev/null
 +++ b/external_plugins/voice/bot.ts
-@@ -0,0 +1,25 @@
+@@ -0,0 +1,27 @@
 +import { mkdirSync } from 'fs'
 +import { join } from 'path'
 +import { startHub } from '../../hub/hub.ts'
@@ -711,6 +712,7 @@ index 0000000000000000000000000000000000000000..a655cfa7f5646b4d6dac1caab7ffd7c6
 +
 +const HEX_DIR = process.env.HEX_DIR ?? process.cwd()
 +const STATE_DIR = process.env.VOICE_STATE_DIR ?? join(HEX_DIR, 'state', 'voice')
++const SOCKET = join(STATE_DIR, 'http.sock')
 +mkdirSync(STATE_DIR, { recursive: true })
 +
 +startHub({
@@ -720,6 +722,7 @@ index 0000000000000000000000000000000000000000..a655cfa7f5646b4d6dac1caab7ffd7c6
 +  mainName: 'voice',
 +  hexDir: HEX_DIR,
 +  fresh: () => true,
++  bind: () => ({ VOICE_SOCKET: SOCKET }),
 +  launcher: process.env.HEX_LAUNCHER,
 +  call: async (_, tool) => {
 +    throw new Error(`unknown tool: ${tool}`)
@@ -728,7 +731,7 @@ index 0000000000000000000000000000000000000000..a655cfa7f5646b4d6dac1caab7ffd7c6
 +  failed: (_, reason) => process.stderr.write(`voice hub: the voice session couldn't start: ${reason}\n`),
 +})
 +
-+door({ port: voicePort(), socket: join(STATE_DIR, 'http.sock') })
++door({ port: voicePort(), socket: SOCKET })
 diff --git a/external_plugins/voice/bun.lock b/external_plugins/voice/bun.lock
 new file mode 100644
 index 0000000000000000000000000000000000000000..c93a7a533bf379bd6b60b1f04ab67be3a521d768
@@ -1785,7 +1788,7 @@ index 0000000000000000000000000000000000000000..0ada79ea59ad789671d2c7bda2164d2e
 +</html>
 diff --git a/external_plugins/voice/server.ts b/external_plugins/voice/server.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..8a183459d4da535ef56126bf7acb9cbabb61b16c
+index 0000000000000000000000000000000000000000..b549f752a7aa343bceb78ecf35c2be9a48e0eb1e
 --- /dev/null
 +++ b/external_plugins/voice/server.ts
 @@ -0,0 +1,893 @@
@@ -1825,7 +1828,7 @@ index 0000000000000000000000000000000000000000..8a183459d4da535ef56126bf7acb9cba
 +const HUB = process.env.HEX_HUB
 +const THREAD = process.env.HEX_CHANNEL?.startsWith('plugin:voice@') ? process.env.HEX_THREAD : undefined
 +const HEX_STATE = HUB && dirname(dirname(HUB))
-+const SOCKET = HUB && THREAD ? join(dirname(HUB), 'http.sock') : undefined
++const SOCKET = process.env.VOICE_SOCKET
 +const calls = new CallLog(join(STATE_DIR, 'calls'))
 +const activity = new Changes()
 +const follows = new Map<string, () => void>()
