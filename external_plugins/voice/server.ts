@@ -275,12 +275,20 @@ function answer(twilio: Bun.ServerWebSocket<Phone>) {
     }))
   openai.addEventListener('message', ({ data }) => {
     const event = JSON.parse(String(data))
+    if (event.type === 'error' && !twilio.data.started) trace(`OpenAI refused the phone session: ${JSON.stringify(event.error)}`)
     if (event.type !== 'session.started') return
     twilio.data.started = true
     follow(event.session.id, openai, audio => twilio.send(JSON.stringify({ event: 'media', streamSid: twilio.data.stream, media: { payload: audio } })))
     openai.send(JSON.stringify({ type: 'session.instructions.append', delegation_id: null, content: twilio.data.greeting }))
   })
-  openai.addEventListener('close', () => twilio.close())
+  openai.addEventListener('close', ({ code, reason }) => {
+    trace(`OpenAI closed the phone session (${code} ${reason})`)
+    twilio.close()
+  })
+}
+
+function trace(line: string) {
+  process.stderr.write(`voice: ${line}\n`)
 }
 
 function twiml(body: string) {
@@ -304,6 +312,7 @@ async function pickUp(request: Request) {
 function hearPhone(twilio: Bun.ServerWebSocket<Phone>, raw: string | Buffer) {
   const message = JSON.parse(String(raw))
   if (message.event === 'start') twilio.data.stream = message.start.streamSid
+  if (message.event === 'start' || message.event === 'stop') trace(`Twilio stream ${message.event}`)
   if (message.event === 'media' && twilio.data.started)
     twilio.data.openai?.send(JSON.stringify({ type: 'session.input_audio.append', audio: message.media.payload }))
   if (message.event === 'stop') hangUp(twilio)
@@ -370,6 +379,7 @@ Bun.serve<Phone>({
     if (pathname === '/twilio/incoming' && request.method === 'POST') return pickUp(request)
     const [, token, twimlPath] = pathname.match(/^\/twilio\/([\w-]+)(\/twiml)?$/) ?? []
     const greeting = dials.get(token)
+    if (token) trace(`Twilio ${request.method} ${twimlPath ? 'TwiML' : 'stream'}, ${greeting ? 'known' : 'unknown'} token`)
     if (greeting && twimlPath) return stream(token)
     if (greeting && dials.delete(token)) return server.upgrade(request, { data: { greeting } }) ? undefined : new Response('upgrade failed', { status: 400 })
     if (pathname === '/') return new Response(page, { headers: { 'content-type': 'text/html; charset=utf-8' } })

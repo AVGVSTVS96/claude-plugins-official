@@ -33,10 +33,10 @@ index 0000000000000000000000000000000000000000..07fdedd6c4bc9e7072f8d860f7eadd42
 +}
 diff --git a/external_plugins/voice/README.md b/external_plugins/voice/README.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..aceb1703508d3bd95ba1d04f0bf22a2c0b3962f6
+index 0000000000000000000000000000000000000000..ede1396720f9f275b3e98e3fc33f78c56f1f7b25
 --- /dev/null
 +++ b/external_plugins/voice/README.md
-@@ -0,0 +1,136 @@
+@@ -0,0 +1,143 @@
 +# voice
 +
 +Live voice calls for Claude Code. OpenAI's `gpt-live-1` talks with you in real
@@ -130,6 +130,13 @@ index 0000000000000000000000000000000000000000..aceb1703508d3bd95ba1d04f0bf22a2c
 +     then `https://<host>.<tailnet>.ts.net:8790`.
 +
 +The page listens on `127.0.0.1` only, and the API key never leaves the plugin.
++
++An app can hold the same call: POST its WebRTC offer to `/session` as
++`{ "sdp": "...", "voice": "marin" }` (the voice is optional), and it gets
++OpenAI's session back, with the answer SDP in `transport.sdp`. Its data
++channel may send `session.input_audio.mute`, `session.input_audio.unmute` and
++`session.close`; `DELETE /session` ends the call from outside it.
++[hex-voice](https://github.com/AVGVSTVS96/hex-voice) is an iPhone app built this way.
 +
 +## Phone calls
 +
@@ -655,10 +662,10 @@ index 0000000000000000000000000000000000000000..0502c4c9398edaa47623afcbbecf912a
 +</html>
 diff --git a/external_plugins/voice/server.ts b/external_plugins/voice/server.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..21a1c8723a0f3705e40cb3d475f670b4bb3aa447
+index 0000000000000000000000000000000000000000..659db8dc3895a3cb82426d014f7efba1c64ed119
 --- /dev/null
 +++ b/external_plugins/voice/server.ts
-@@ -0,0 +1,383 @@
+@@ -0,0 +1,400 @@
 +#!/usr/bin/env bun
 +import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 +import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
@@ -936,12 +943,20 @@ index 0000000000000000000000000000000000000000..21a1c8723a0f3705e40cb3d475f670b4
 +    }))
 +  openai.addEventListener('message', ({ data }) => {
 +    const event = JSON.parse(String(data))
++    if (event.type === 'error' && !twilio.data.started) trace(`OpenAI refused the phone session: ${JSON.stringify(event.error)}`)
 +    if (event.type !== 'session.started') return
 +    twilio.data.started = true
 +    follow(event.session.id, openai, audio => twilio.send(JSON.stringify({ event: 'media', streamSid: twilio.data.stream, media: { payload: audio } })))
 +    openai.send(JSON.stringify({ type: 'session.instructions.append', delegation_id: null, content: twilio.data.greeting }))
 +  })
-+  openai.addEventListener('close', () => twilio.close())
++  openai.addEventListener('close', ({ code, reason }) => {
++    trace(`OpenAI closed the phone session (${code} ${reason})`)
++    twilio.close()
++  })
++}
++
++function trace(line: string) {
++  process.stderr.write(`voice: ${line}\n`)
 +}
 +
 +function twiml(body: string) {
@@ -965,6 +980,7 @@ index 0000000000000000000000000000000000000000..21a1c8723a0f3705e40cb3d475f670b4
 +function hearPhone(twilio: Bun.ServerWebSocket<Phone>, raw: string | Buffer) {
 +  const message = JSON.parse(String(raw))
 +  if (message.event === 'start') twilio.data.stream = message.start.streamSid
++  if (message.event === 'start' || message.event === 'stop') trace(`Twilio stream ${message.event}`)
 +  if (message.event === 'media' && twilio.data.started)
 +    twilio.data.openai?.send(JSON.stringify({ type: 'session.input_audio.append', audio: message.media.payload }))
 +  if (message.event === 'stop') hangUp(twilio)
@@ -977,13 +993,16 @@ index 0000000000000000000000000000000000000000..21a1c8723a0f3705e40cb3d475f670b4
 +
 +async function start(request: Request) {
 +  if (!KEY) return new Response(`Set OPENAI_API_KEY in ${join(STATE_DIR, '.env')}`, { status: 503 })
-+  const { sdp } = (await request.json()) as { sdp?: string }
++  const { sdp, voice = VOICE } = (await request.json()) as { sdp?: string; voice?: string }
 +  if (!sdp) return new Response('An SDP offer is required', { status: 400 })
 +  const response = await fetch(API, {
 +    method: 'POST',
 +    headers: { Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json' },
 +    body: JSON.stringify({
-+      session: session(VOICE ? { audio: { output: { voice: VOICE } } } : {}),
++      session: session({
++        ...(voice ? { audio: { output: { voice } } } : {}),
++        client: { data_channel: { allowed_client_events: ['session.input_audio.mute', 'session.input_audio.unmute', 'session.close'] } },
++      }),
 +      transport: { type: 'webrtc', sdp },
 +    }),
 +  })
@@ -1028,10 +1047,15 @@ index 0000000000000000000000000000000000000000..21a1c8723a0f3705e40cb3d475f670b4
 +    if (pathname === '/twilio/incoming' && request.method === 'POST') return pickUp(request)
 +    const [, token, twimlPath] = pathname.match(/^\/twilio\/([\w-]+)(\/twiml)?$/) ?? []
 +    const greeting = dials.get(token)
++    if (token) trace(`Twilio ${request.method} ${twimlPath ? 'TwiML' : 'stream'}, ${greeting ? 'known' : 'unknown'} token`)
 +    if (greeting && twimlPath) return stream(token)
 +    if (greeting && dials.delete(token)) return server.upgrade(request, { data: { greeting } }) ? undefined : new Response('upgrade failed', { status: 400 })
 +    if (pathname === '/') return new Response(page, { headers: { 'content-type': 'text/html; charset=utf-8' } })
 +    if (pathname === '/session' && request.method === 'POST') return start(request)
++    if (pathname === '/session' && request.method === 'DELETE') {
++      live?.socket.send(JSON.stringify({ type: 'session.close' }))
++      return new Response(null, { status: 204 })
++    }
 +    if (pathname === '/phone' && request.method === 'POST')
 +      return dial().then(text => new Response(text), error => new Response(error.message, { status: 502 }))
 +    return new Response('404', { status: 404 })
