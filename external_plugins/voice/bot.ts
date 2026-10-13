@@ -1,6 +1,7 @@
 import { mkdirSync } from 'fs'
 import { join } from 'path'
 import { startHub } from '../../hub/hub.ts'
+import { door, voicePort } from './door.ts'
 
 const HEX_DIR = process.env.HEX_DIR ?? process.cwd()
 const STATE_DIR = process.env.VOICE_STATE_DIR ?? join(HEX_DIR, 'state', 'voice')
@@ -20,3 +21,5 @@ startHub({
   state: () => {},
   failed: (_, reason) => process.stderr.write(`voice hub: the voice session couldn't start: ${reason}\n`),
 })
+
+door({ port: voicePort(), socket: join(STATE_DIR, 'http.sock') })

@@ -4,7 +4,7 @@ id: voice
 summary: Add a voice channel where OpenAI's gpt-live-1 holds a live call and hands every real request to the Claude Code session.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: voice.patch
-patch_sha256: e5c74bd57ab94a06eccb4f3329b5e3400a0d0f3615c095aa83afeb83563ed3b5
+patch_sha256: 888bca42e0862ffe0eab316f20f76f34a0fce7c9b4d1b69d73fd6b7979ab258a
 ---
 
 ## Intent
@@ -34,6 +34,13 @@ plugin with no hub code.
   hub socket, which also lets other sessions message it as `inbound`.
   `voice` is a fresh thread, and when a call ends `server.ts` sends the hub
   `renew`, so every call starts in a new session that reads the call chat.
+  Because that restarts the plugin, `bot.ts` holds `VOICE_PORT` (read from the
+  plugin's `.env` like the plugin does) with `door.ts`, and a `server.ts`
+  started by the voice hub listens on `state/voice/http.sock` instead. The door
+  passes each request and websocket on to that socket unchanged, and a request
+  that finds no plugin there waits for the socket to come back (a file change,
+  up to 30 seconds) before answering 503. If the port is still taken (an old
+  plugin during an update), the door binds it once the new plugin's socket appears.
 - `dial` (the `phone` tool, or `POST /phone`) has Twilio ring a number; its
   TwiML comes from `/twilio/<one-time token>/twiml` (trial accounts can't pass
   TwiML inline) and streams the call to `wss://VOICE_PUBLIC_URL/twilio/<token>`. The plugin accepts only a token it issued, opens a `gpt-live-1`
@@ -95,7 +102,8 @@ plugin with no hub code.
    starting, steering and stopping work stays with Claude.
 2. A transcript fragment that arrives late is still delivered, at its
    timeline position, in the next handoff.
-3. The API key stays in the plugin; the page listens on loopback only.
+3. The API key stays in the plugin; the page listens on loopback only, or in
+   hex on a socket in hex's state folder behind the hub's loopback door.
 5. A call's record is never left without an end once the plugin has run again.
 4. Stays on `@modelcontextprotocol/sdk` 1.x, which Claude Code registers
    channels on.
@@ -103,8 +111,9 @@ plugin with no hub code.
 ## Verification
 
 `bun test external_plugins/voice` covers transcript order, late fragments,
-the board, call records, step lines, and following a sent message to done or
-failed through fake transcripts. `scripts/verify` builds `server.ts`. A live check: start
+the board, call records, step lines, following a sent message to done or
+failed through fake transcripts, and the door (requests and websockets passed
+through unchanged, a request held across a plugin restart, a taken port). `scripts/verify` builds `server.ts`. A live check: start
 `claude --channels plugin:voice@hex`, open the page, ask something that needs
 the backend, and see a `<channel source="voice">` handoff arrive and its
 `say` spoken.

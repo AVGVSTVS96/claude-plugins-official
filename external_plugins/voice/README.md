@@ -115,6 +115,11 @@ the plugin, so a restart ends it. When a call starts, the plugin tells the hub
 to keep the session (`keep`), so a renew asked for by the call before it
 doesn't stop the session mid-call.
 
+In hex the plugin restarts with each call's new session, so the hub holds the
+port instead (`door.ts`): the plugin listens on `state/voice/http.sock`, and the
+hub passes every request and websocket on to it. A request that comes while the
+plugin restarts waits for it to come back (up to 30 seconds) instead of failing.
+
 ## Agent activity
 
 While a call is live, the app can show one line of what hex's agents are
@@ -182,8 +187,10 @@ same conversion hex uses for Buzz and T3 Code), then into a few plain words.
    keeps a session named `voice` always running with this channel, so the
    call page comes back by itself after restarts and updates. Each call gets
    a new session: when a call ends, the plugin asks the hub to renew, and once
-   that turn is done the hub starts `voice` over fresh, with its own OptChat
-   chat of past calls instead of one context that grows with every call.
+   that turn is done the hub starts `voice` over fresh right away, with its own
+   OptChat chat of past calls instead of one context that grows with every
+   call. The hub holds `VOICE_PORT` meanwhile, so a call started then waits a
+   few seconds instead of failing.
 
 3. Open the call page. The browser only allows the microphone on `localhost`
    or HTTPS:

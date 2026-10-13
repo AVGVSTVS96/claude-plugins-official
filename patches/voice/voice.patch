@@ -33,10 +33,10 @@ index 0000000000000000000000000000000000000000..07fdedd6c4bc9e7072f8d860f7eadd42
 +}
 diff --git a/external_plugins/voice/README.md b/external_plugins/voice/README.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..47f34a30e0ef3c741883a46993fc9bbcc2a4b042
+index 0000000000000000000000000000000000000000..bc4a2f21a5d542b79dbc11830a6ec11975980955
 --- /dev/null
 +++ b/external_plugins/voice/README.md
-@@ -0,0 +1,257 @@
+@@ -0,0 +1,264 @@
 +# voice
 +
 +Live voice calls for Claude Code. OpenAI's `gpt-live-1` talks with you in real
@@ -154,6 +154,11 @@ index 0000000000000000000000000000000000000000..47f34a30e0ef3c741883a46993fc9bbc
 +to keep the session (`keep`), so a renew asked for by the call before it
 +doesn't stop the session mid-call.
 +
++In hex the plugin restarts with each call's new session, so the hub holds the
++port instead (`door.ts`): the plugin listens on `state/voice/http.sock`, and the
++hub passes every request and websocket on to it. A request that comes while the
++plugin restarts waits for it to come back (up to 30 seconds) instead of failing.
++
 +## Agent activity
 +
 +While a call is live, the app can show one line of what hex's agents are
@@ -221,8 +226,10 @@ index 0000000000000000000000000000000000000000..47f34a30e0ef3c741883a46993fc9bbc
 +   keeps a session named `voice` always running with this channel, so the
 +   call page comes back by itself after restarts and updates. Each call gets
 +   a new session: when a call ends, the plugin asks the hub to renew, and once
-+   that turn is done the hub starts `voice` over fresh, with its own OptChat
-+   chat of past calls instead of one context that grows with every call.
++   that turn is done the hub starts `voice` over fresh right away, with its own
++   OptChat chat of past calls instead of one context that grows with every
++   call. The hub holds `VOICE_PORT` meanwhile, so a call started then waits a
++   few seconds instead of failing.
 +
 +3. Open the call page. The browser only allows the microphone on `localhost`
 +   or HTTPS:
@@ -693,13 +700,14 @@ index 0000000000000000000000000000000000000000..5dcd8644eaa2c824e6f575acc741297d
 +}
 diff --git a/external_plugins/voice/bot.ts b/external_plugins/voice/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..007421169754f227c723ca5a22ca49a2f7237eaa
+index 0000000000000000000000000000000000000000..a655cfa7f5646b4d6dac1caab7ffd7c6a898560f
 --- /dev/null
 +++ b/external_plugins/voice/bot.ts
-@@ -0,0 +1,22 @@
+@@ -0,0 +1,25 @@
 +import { mkdirSync } from 'fs'
 +import { join } from 'path'
 +import { startHub } from '../../hub/hub.ts'
++import { door, voicePort } from './door.ts'
 +
 +const HEX_DIR = process.env.HEX_DIR ?? process.cwd()
 +const STATE_DIR = process.env.VOICE_STATE_DIR ?? join(HEX_DIR, 'state', 'voice')
@@ -719,6 +727,8 @@ index 0000000000000000000000000000000000000000..007421169754f227c723ca5a22ca49a2
 +  state: () => {},
 +  failed: (_, reason) => process.stderr.write(`voice hub: the voice session couldn't start: ${reason}\n`),
 +})
++
++door({ port: voicePort(), socket: join(STATE_DIR, 'http.sock') })
 diff --git a/external_plugins/voice/bun.lock b/external_plugins/voice/bun.lock
 new file mode 100644
 index 0000000000000000000000000000000000000000..c93a7a533bf379bd6b60b1f04ab67be3a521d768
@@ -1412,6 +1422,216 @@ index 0000000000000000000000000000000000000000..8b43569416466e50c388e80f9cf8baf9
 +    for (const done of [...this.waiting]) done()
 +  }
 +}
+diff --git a/external_plugins/voice/door.test.ts b/external_plugins/voice/door.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..6e66ee08d89390ab5848c1175fc7f0215bf25a63
+--- /dev/null
++++ b/external_plugins/voice/door.test.ts
+@@ -0,0 +1,112 @@
++import { expect, test } from 'bun:test'
++import { mkdtempSync, rmSync, writeFileSync } from 'fs'
++import { tmpdir } from 'os'
++import { join } from 'path'
++import { door, voicePort } from './door.ts'
++
++function scratch() {
++  const dir = mkdtempSync(join(tmpdir(), 'door-'))
++  const socket = join(dir, 'http.sock')
++  const servers: { stop: (force?: boolean) => unknown }[] = []
++  const plugin = (handler: Parameters<typeof Bun.serve>[0]) => {
++    rmSync(socket, { force: true })
++    const server = Bun.serve({ ...handler, unix: socket } as Parameters<typeof Bun.serve>[0])
++    servers.push(server)
++    return server
++  }
++  return {
++    dir,
++    socket,
++    plugin,
++    servers,
++    [Symbol.dispose]: () => {
++      for (const server of servers) server.stop(true)
++      rmSync(dir, { recursive: true, force: true })
++    },
++  }
++}
++
++const echo = {
++  async fetch(request: Request) {
++    const { pathname, search } = new URL(request.url)
++    return Response.json({ method: request.method, path: pathname + search, body: await request.text(), auth: request.headers.get('authorization'), forwarded: request.headers.get('x-forwarded-for') })
++  },
++}
++
++test('a request goes on to the plugin as it came, and its answer comes back', async () => {
++  using s = scratch()
++  s.plugin(echo)
++  const front = door({ port: 0, socket: s.socket })!
++  s.servers.push(front)
++  const response = await fetch(`http://127.0.0.1:${front.port}/session?x=1`, {
++    method: 'POST',
++    headers: { authorization: 'Bearer t', 'x-forwarded-for': '100.64.0.2' },
++    body: '{"sdp":"v=0"}',
++  })
++  expect(await response.json()).toEqual({ method: 'POST', path: '/session?x=1', body: '{"sdp":"v=0"}', auth: 'Bearer t', forwarded: '100.64.0.2' })
++})
++
++test('a request made while the plugin restarts waits for it, past the socket the old one left behind', async () => {
++  using s = scratch()
++  writeFileSync(s.socket, '')
++  const front = door({ port: 0, socket: s.socket })!
++  s.servers.push(front)
++  const asked = Date.now()
++  const answer = fetch(`http://127.0.0.1:${front.port}/session`, { method: 'POST', body: 'offer' })
++  await Bun.sleep(300)
++  s.plugin(echo)
++  const response = await answer
++  expect(response.status).toBe(200)
++  expect((await response.json()).body).toBe('offer')
++  expect(Date.now() - asked).toBeLessThan(2000)
++})
++
++test('with no plugin by the time the wait is up, the answer says so', async () => {
++  using s = scratch()
++  const front = door({ port: 0, socket: s.socket, wait: 200 })!
++  s.servers.push(front)
++  const response = await fetch(`http://127.0.0.1:${front.port}/calls`)
++  expect(response.status).toBe(503)
++})
++
++test("a websocket (a phone call's audio) goes through both ways, and closes with the plugin's end", async () => {
++  using s = scratch()
++  s.plugin({
++    fetch: (request, server) => (server.upgrade(request, { data: new URL(request.url).pathname }) ? undefined : new Response('no', { status: 400 })),
++    websocket: { message: (ws, message) => (message === 'bye' ? ws.close() : ws.send(`${ws.data} heard ${message}`)) },
++  } as Parameters<typeof Bun.serve>[0])
++  const front = door({ port: 0, socket: s.socket })!
++  s.servers.push(front)
++  const ws = new WebSocket(`ws://127.0.0.1:${front.port}/twilio/abc`)
++  const heard = new Promise<string>(resolve => (ws.onmessage = ({ data }) => resolve(String(data))))
++  ws.onopen = () => ws.send('hello')
++  expect(await heard).toBe('/twilio/abc heard hello')
++  const closed = new Promise(resolve => (ws.onclose = resolve))
++  ws.send('bye')
++  await closed
++})
++
++test('a port still held by an old plugin is taken once the new plugin comes up', async () => {
++  using s = scratch()
++  const old = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('old') })
++  const { port } = old
++  expect(door({ port, socket: s.socket })).toBeUndefined()
++  old.stop(true)
++  s.plugin(echo)
++  await Bun.sleep(100)
++  expect((await (await fetch(`http://127.0.0.1:${port}/calls`)).json()).path).toBe('/calls')
++})
++
++test("the door's port is the plugin's: VOICE_PORT from the environment, then from its .env, then 8790", () => {
++  using s = scratch()
++  const env = join(s.dir, '.env')
++  const before = process.env.VOICE_PORT
++  delete process.env.VOICE_PORT
++  expect(voicePort(env)).toBe(8790)
++  writeFileSync(env, 'OPENAI_API_KEY=sk-1\nVOICE_PORT = 8801\n')
++  expect(voicePort(env)).toBe(8801)
++  process.env.VOICE_PORT = '8802'
++  expect(voicePort(env)).toBe(8802)
++  if (before === undefined) delete process.env.VOICE_PORT
++  else process.env.VOICE_PORT = before
++})
+diff --git a/external_plugins/voice/door.ts b/external_plugins/voice/door.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..6abc6eb80a3aace6732466dfe2e62ab83a312165
+--- /dev/null
++++ b/external_plugins/voice/door.ts
+@@ -0,0 +1,86 @@
++import { readFileSync, watch, type FSWatcher } from 'fs'
++import { homedir } from 'os'
++import { basename, dirname, join } from 'path'
++
++type Pipe = { path: string; queue: (string | Buffer)[]; upstream?: WebSocket }
++
++export function voicePort(env = join(homedir(), '.claude', 'channels', 'voice', '.env')) {
++  let text = ''
++  try {
++    text = readFileSync(env, 'utf8')
++  } catch {}
++  return Number(process.env.VOICE_PORT ?? text.match(/^\s*VOICE_PORT\s*=\s*(\d+)/m)?.[1] ?? 8790)
++}
++
++// In hex the voice plugin restarts with every call's new session, so the hub holds its port:
++// each request goes on to the plugin's socket, and one that comes while the plugin is
++// restarting waits for it to come back instead of failing.
++export function door({ port, socket, wait = 30_000 }: { port: number; socket: string; wait?: number }) {
++  const dir = dirname(socket)
++  const name = basename(socket)
++
++  function moved(until: number) {
++    let watcher: FSWatcher | undefined
++    let timer: ReturnType<typeof setTimeout> | undefined
++    const settled = new Promise<void>(resolve => {
++      watcher = watch(dir, (_, file) => file === name && resolve())
++      timer = setTimeout(resolve, Math.max(0, until - Date.now()))
++    })
++    return { settled, close: () => (watcher?.close(), clearTimeout(timer)) }
++  }
++
++  async function pass(request: Request) {
++    const { pathname, search } = new URL(request.url)
++    const body = request.method === 'GET' || request.method === 'HEAD' ? undefined : await request.arrayBuffer()
++    const until = Date.now() + wait
++    for (;;) {
++      const next = moved(until)
++      try {
++        return await fetch(`http://voice${pathname}${search}`, { unix: socket, method: request.method, headers: request.headers, body, redirect: 'manual', signal: request.signal })
++      } catch (error) {
++        if ((error as { code?: string }).code !== 'FailedToOpenSocket' || Date.now() >= until) return new Response("hex voice isn't answering", { status: 503 })
++        await next.settled
++      } finally {
++        next.close()
++      }
++    }
++  }
++
++  function listen() {
++    try {
++      return Bun.serve<Pipe>({
++        hostname: '127.0.0.1',
++        port,
++        idleTimeout: 120,
++        fetch(request, server) {
++          if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') return pass(request)
++          const { pathname, search } = new URL(request.url)
++          return server.upgrade(request, { data: { path: pathname + search, queue: [] } }) ? undefined : new Response('upgrade failed', { status: 400 })
++        },
++        websocket: {
++          open(client) {
++            const upstream = (client.data.upstream = new WebSocket(`ws+unix://${socket}:${client.data.path}`))
++            upstream.binaryType = 'nodebuffer'
++            upstream.onopen = () => client.data.queue.splice(0).forEach(message => upstream.send(message))
++            upstream.onmessage = ({ data }) => client.send(data)
++            upstream.onclose = () => client.close()
++          },
++          message(client, message) {
++            const { upstream, queue } = client.data
++            if (upstream?.readyState === WebSocket.OPEN) upstream.send(message)
++            else queue.push(message)
++          },
++          close(client) {
++            client.data.upstream?.close()
++          },
++        },
++      })
++    } catch (error) {
++      if ((error as { code?: string }).code !== 'EADDRINUSE') throw error
++      process.stderr.write(`voice door: port ${port} is taken, so it tries again once the plugin comes up on ${socket}\n`)
++      const watcher = watch(dir, (_, file) => file === name && (watcher.close(), listen()))
++    }
++  }
++
++  return listen()
++}
 diff --git a/external_plugins/voice/package.json b/external_plugins/voice/package.json
 new file mode 100644
 index 0000000000000000000000000000000000000000..4ab482cf406b2c01ac9096478e979660a82f6a1b
@@ -1565,16 +1785,16 @@ index 0000000000000000000000000000000000000000..0ada79ea59ad789671d2c7bda2164d2e
 +</html>
 diff --git a/external_plugins/voice/server.ts b/external_plugins/voice/server.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..f5ad9e6a87bc9521a4be0d4e0b92d19df261aad9
+index 0000000000000000000000000000000000000000..8a183459d4da535ef56126bf7acb9cbabb61b16c
 --- /dev/null
 +++ b/external_plugins/voice/server.ts
-@@ -0,0 +1,892 @@
+@@ -0,0 +1,893 @@
 +#!/usr/bin/env bun
 +import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 +import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 +import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 +import { createHmac, timingSafeEqual } from 'crypto'
-+import { readFileSync } from 'fs'
++import { readFileSync, rmSync } from 'fs'
 +import { connect } from 'net'
 +import { homedir } from 'os'
 +import { dirname, join } from 'path'
@@ -1605,6 +1825,7 @@ index 0000000000000000000000000000000000000000..f5ad9e6a87bc9521a4be0d4e0b92d19d
 +const HUB = process.env.HEX_HUB
 +const THREAD = process.env.HEX_CHANNEL?.startsWith('plugin:voice@') ? process.env.HEX_THREAD : undefined
 +const HEX_STATE = HUB && dirname(dirname(HUB))
++const SOCKET = HUB && THREAD ? join(dirname(HUB), 'http.sock') : undefined
 +const calls = new CallLog(join(STATE_DIR, 'calls'))
 +const activity = new Changes()
 +const follows = new Map<string, () => void>()
@@ -2437,10 +2658,10 @@ index 0000000000000000000000000000000000000000..f5ad9e6a87bc9521a4be0d4e0b92d19d
 +    return dial().then(text => new Response(text), error => new Response(error.message, { status: 502 }))
 +}
 +
++if (SOCKET) rmSync(SOCKET, { force: true })
 +Bun.serve<Phone>({
-+  port: PORT,
++  ...(SOCKET ? { unix: SOCKET } : { port: PORT, hostname: '127.0.0.1' }),
 +  idleTimeout: 40,
-+  hostname: '127.0.0.1',
 +  fetch(request, server) {
 +    const { pathname } = new URL(request.url)
 +    if (pathname === '/twilio/incoming' && request.method === 'POST') return pickUp(request)

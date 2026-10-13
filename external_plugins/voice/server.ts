@@ -3,7 +3,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { createHmac, timingSafeEqual } from 'crypto'
-import { readFileSync } from 'fs'
+import { readFileSync, rmSync } from 'fs'
 import { connect } from 'net'
 import { homedir } from 'os'
 import { dirname, join } from 'path'
@@ -34,6 +34,7 @@ const TOKEN = process.env.VOICE_TOKEN
 const HUB = process.env.HEX_HUB
 const THREAD = process.env.HEX_CHANNEL?.startsWith('plugin:voice@') ? process.env.HEX_THREAD : undefined
 const HEX_STATE = HUB && dirname(dirname(HUB))
+const SOCKET = HUB && THREAD ? join(dirname(HUB), 'http.sock') : undefined
 const calls = new CallLog(join(STATE_DIR, 'calls'))
 const activity = new Changes()
 const follows = new Map<string, () => void>()
@@ -866,10 +867,10 @@ function routes(request: Request) {
     return dial().then(text => new Response(text), error => new Response(error.message, { status: 502 }))
 }
 
+if (SOCKET) rmSync(SOCKET, { force: true })
 Bun.serve<Phone>({
-  port: PORT,
+  ...(SOCKET ? { unix: SOCKET } : { port: PORT, hostname: '127.0.0.1' }),
   idleTimeout: 40,
-  hostname: '127.0.0.1',
   fetch(request, server) {
     const { pathname } = new URL(request.url)
     if (pathname === '/twilio/incoming' && request.method === 'POST') return pickUp(request)
