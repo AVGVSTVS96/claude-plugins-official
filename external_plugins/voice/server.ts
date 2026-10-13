@@ -11,6 +11,7 @@ import { findThread, followAgent, followThread, type Step, type Thread } from '.
 import { Call, transcript, type Mark, type Speaker, type Task } from './call.ts'
 import { CallLog, ending, usage, type CallRecord, type Ending, type Source } from './calls.ts'
 import { Changes } from './changes.ts'
+import { Tasks, opener, type HexTask } from './tasks.ts'
 import page from './page.html' with { type: 'text' }
 
 const STATE_DIR = join(homedir(), '.claude', 'channels', 'voice')
@@ -38,6 +39,7 @@ const SOCKET = process.env.VOICE_SOCKET
 const calls = new CallLog(join(STATE_DIR, 'calls'))
 const activity = new Changes()
 const follows = new Map<string, () => void>()
+let board: Tasks | undefined
 
 const IDENTITY = (() => {
   try {
@@ -452,7 +454,7 @@ function ringing() {
   return [...placed.values()].some(call => !call.session)
 }
 
-function follow(socket: WebSocket, record: Live['record'], { call = new Call(), speak, hello }: { call?: Call; speak?: Live['speak']; hello?: string } = {}) {
+function follow(socket: WebSocket, record: Live['record'], { call = new Call(), speak, hello, about }: { call?: Call; speak?: Live['speak']; hello?: string; about?: HexTask } = {}) {
   if (live) {
     live.socket.send(JSON.stringify({ type: 'session.close', event_id: 'close-you-moved' }))
     finish(live, 'moved to a new call', 'close-you-moved')
@@ -465,11 +467,34 @@ function follow(socket: WebSocket, record: Live['record'], { call = new Call(), 
   listen(current, socket)
   warn(current)
   deliver(
-    hello ?? [`A call started.${record.why ? ` You placed it because: ${record.why}` : ''}`, 'Send the voice what it should know right away, with note.'].join('\n'),
-    { call: record.id, started: 'true' },
+    hello ??
+      [
+        `A call started.${record.why ? ` You placed it because: ${record.why}` : ''}`,
+        ...(about ? [`The caller started it with Talk it through on a task. ${opener(about)}`] : []),
+        'Send the voice what it should know right away, with note.',
+      ].join('\n'),
+    { call: record.id, started: 'true', ...(about && { task: about.id }) },
   )
   for (const text of briefing.splice(0)) void tell(current, 'note', text).catch(() => {})
+  if (about) whenOpen(socket, () => void send(current, 'session.instructions.append', bringUp(about)).catch(() => {}))
   return current
+}
+
+function whenOpen(socket: WebSocket, then: () => void) {
+  if (socket.readyState === WebSocket.OPEN) then()
+  else socket.addEventListener('open', then, { once: true })
+}
+
+function bringUp(task: HexTask) {
+  return `The caller tapped Talk it through on a task, so bring it up now in a sentence or two, then listen. ${opener(task)}`
+}
+
+// Talk it through, tapped during a call: the voice brings the task up, and Claude hears which one.
+function talk(task: HexTask) {
+  if (!live) return new Response('No call is live', { status: 409 })
+  deliver(`The caller opened a task in the app and tapped Talk it through. ${opener(task)}`, { call: live.id, task: task.id })
+  void send(live, 'session.instructions.append', bringUp(task)).catch(() => {})
+  return new Response(null, { status: 204 })
 }
 
 function listen(call: Live, socket: WebSocket, attempt = 0) {
@@ -745,7 +770,7 @@ function session(extra: object = {}) {
 
 async function start(request: Request) {
   if (!KEY) return new Response(`Set OPENAI_API_KEY in ${join(STATE_DIR, '.env')}`, { status: 503 })
-  const { sdp, voice = VOICE, from: origin } = (await request.json()) as { sdp?: string; voice?: string; from?: string }
+  const { sdp, voice = VOICE, from: origin, about } = (await request.json()) as { sdp?: string; voice?: string; from?: string; about?: string }
   if (!sdp) return new Response('An SDP offer is required', { status: 400 })
   const from = origin === 'app' ? 'app' : 'web'
   let response: Response
@@ -772,7 +797,7 @@ async function start(request: Request) {
     return new Response(text, { status: response.status })
   }
   const result = (await response.json()) as { session: { id: string; expires_at?: number } }
-  follow(sideband(result.session.id), base(result.session.id, from, { voice, expires: expiry(result.session.expires_at) }))
+  follow(sideband(result.session.id), base(result.session.id, from, { voice, expires: expiry(result.session.expires_at) }), { about: about ? hexTasks()?.get(about) : undefined })
   return Response.json(result, { status: 201 })
 }
 
@@ -838,6 +863,34 @@ async function showActivity(url: URL) {
   return Response.json({ version: activity.version, call: live?.id ?? null, tasks: live?.call.activity() ?? [] })
 }
 
+function hexTasks() {
+  return HEX_STATE ? (board ??= new Tasks(HEX_STATE, dirname(HEX_STATE))) : undefined
+}
+
+async function showTasks(url: URL, tasks: Tasks) {
+  const after = url.searchParams.get('after')
+  if (after) await tasks.changes(Number(after), 25_000)
+  return Response.json({ version: tasks.version, tasks: tasks.rows() })
+}
+
+async function showSummary(url: URL, tasks: Tasks) {
+  const after = url.searchParams.get('after')
+  if (after) await tasks.counts.changes(Number(after), 25_000)
+  return Response.json({ version: tasks.counts.version, ...tasks.summary })
+}
+
+function taskRoutes(request: Request, url: URL) {
+  const tasks = hexTasks()
+  if (!tasks) return new Response('Tasks are hex threads, and this voice plugin runs outside hex', { status: 404 })
+  if (url.pathname === '/tasks' && request.method === 'GET') return showTasks(url, tasks)
+  if (url.pathname === '/tasks/summary' && request.method === 'GET') return showSummary(url, tasks)
+  const [, id, talking] = url.pathname.match(/^\/tasks\/([^/]+)(\/talk)?$/) ?? []
+  const task = id && tasks.get(decodeURIComponent(id))
+  if (!task) return new Response('404', { status: 404 })
+  if (talking && request.method === 'POST') return talk(task)
+  if (!talking && request.method === 'GET') return Response.json(task)
+}
+
 async function listCalls(url: URL) {
   const after = url.searchParams.get('after')
   if (after) await calls.changes(Number(after), 25_000)
@@ -853,6 +906,7 @@ function routes(request: Request) {
   }
   if (pathname === '/calls' && request.method === 'GET') return listCalls(new URL(request.url))
   if (pathname === '/activity' && request.method === 'GET') return showActivity(new URL(request.url))
+  if (pathname === '/tasks' || pathname.startsWith('/tasks/')) return taskRoutes(request, new URL(request.url))
   const [, callId, moments] = pathname.match(/^\/calls\/([\w-]+)(\/moments)?$/) ?? []
   if (callId && moments && request.method === 'POST') return interruption(request, callId)
   if (callId && !moments && request.method === 'GET') {

@@ -61,12 +61,13 @@ function firstLine(text: string) {
   return line ? line.slice(0, 160) : undefined
 }
 
-// Follows one Claude Code transcript as Claude Code writes it (a file change, not a timer):
-// every new line, and the ACP updates its assistant content makes, converted when asked for.
-export function followTranscript(path: string, fromStart: boolean, onEntry: (entry: any, updates: () => Update[]) => void) {
+// Follows one Claude Code transcript as Claude Code writes it (a file change, not a timer), from
+// a byte offset or its end: every new line, and the ACP updates its assistant content makes,
+// converted when asked for. A line cut in half by the offset is skipped.
+export function followTranscript(path: string, from: number | 'end', onEntry: (entry: any, updates: () => Update[]) => void) {
   const tools = {}
   const tasks = new Map()
-  let offset = fromStart ? 0 : sizeOf(path)
+  let offset = from === 'end' ? sizeOf(path) : from
   let rest = Buffer.alloc(0)
   let closed = false
   mkdirSync(dirname(path), { recursive: true })
@@ -130,7 +131,7 @@ export function followAgent(agent: string, session: string | undefined, onStep: 
   const patterns = [...(session && ID.test(session) ? [`*/${session}/subagents/agent-${agent}.jsonl`] : []), `*/*/subagents/agent-${agent}.jsonl`]
   for (const pattern of patterns)
     for (const path of new Bun.Glob(pattern).scanSync({ cwd: PROJECTS, absolute: true }))
-      return followTranscript(path, true, (_, updates) => lines(updates(), onStep))
+      return followTranscript(path, 0, (_, updates) => lines(updates(), onStep))
 }
 
 // hex threads (Telegram topics, Discord, Buzz and T3 Code threads), from each app's threads.json.
@@ -169,7 +170,7 @@ export function followThread(thread: Thread, hexDir: string, tag: string, resume
     stopSession()
     session = next
     project = join(PROJECTS, (thread.cwd ?? hexDir).replace(/[^a-zA-Z0-9]/g, '-'))
-    stopSession = followTranscript(join(project, `${session}.jsonl`), fresh, take)
+    stopSession = followTranscript(join(project, `${session}.jsonl`), fresh ? 0 : 'end', take)
   }
 
   function take(entry: any, updates: () => Update[]) {
@@ -180,7 +181,7 @@ export function followThread(thread: Thread, hexDir: string, tag: string, resume
     }
     const launched = entry.toolUseResult?.isAsync && entry.toolUseResult.agentId
     if (launched && ID.test(launched) && !agents.has(launched))
-      agents.set(launched, followTranscript(join(project, session!, 'subagents', `agent-${launched}.jsonl`), true, (_, updates) => lines(updates(), onStep)))
+      agents.set(launched, followTranscript(join(project, session!, 'subagents', `agent-${launched}.jsonl`), 0, (_, updates) => lines(updates(), onStep)))
     const back = entry.origin?.kind === 'task-notification' && JSON.stringify(entry.message?.content).match(/<task-id>([\w-]+)<\/task-id>/)?.[1]
     if (back) {
       agents.get(back)?.()
@@ -223,7 +224,7 @@ function readJson(path: string) {
   } catch {}
 }
 
-function sizeOf(path: string) {
+export function sizeOf(path: string) {
   try {
     return statSync(path).size
   } catch {

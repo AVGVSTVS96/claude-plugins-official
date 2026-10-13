@@ -155,6 +155,40 @@ same conversion hex uses for Buzz and T3 Code), then into a few plain words.
 | `GET /activity` | `{ version, call, tasks }`: the live call's tasks, most recently changed first, each with its latest `line` |
 | `GET /activity?after=<version>` | the same, once anything has changed since that version (or after 25 seconds) |
 
+## Tasks
+
+In hex, the app can also show every hex thread as a task, call or no call:
+what needs you, what's working and its newest step, and what finished. Nothing
+new reports in: `tasks.ts` reads the records Claude Code already keeps (the
+same ones `claude agents --json` prints) and wakes when one of them changes.
+
+```
+ ~/.claude/jobs/<id>/state.json      working, blocked or done; its status line; what it needs
+ ~/.claude/jobs/<id>/timeline.jsonl  each change, with its time
+ ~/.claude/sessions/<pid>.json       which sessions are running
+ state/<app>/threads.json            each thread's name and current session
+ <session>.jsonl transcripts         a working thread's newest step, its agents' too
+                    │
+                    ▼
+        GET /tasks?after=<version> ── the app's Tasks sheet
+```
+
+A blocked thread needs you; a working one whose session stopped counts as idle;
+anything that finished more than a week ago is left out. Rows come in that
+order (needs you, working, done, failed, idle), newest change first in each.
+
+| Request | Answers |
+| --- | --- |
+| `GET /tasks` | `{ version, tasks }`: each thread's `id`, `name`, `where` (Telegram, General, Discord...), `state` (`needs`, `working`, `done`, `failed`, `idle`), one `line`, `since` its state began, `at` its last change, its running `agents` with their own lines, and a Telegram `link` |
+| `GET /tasks?after=<version>` | the same, once anything has changed (or after 25 seconds) |
+| `GET /tasks/summary?after=<version>` | `{ version, needs, working }`, once a count changes |
+| `GET /tasks/<id>` | one task, with what it `needs` from you in full and what it did `lately` |
+| `POST /tasks/<id>/talk` | during a call: the voice brings the task up, and Claude hears which thread it is |
+
+An app starting a call with `"about": "<task id>"` in its `/session` body gets
+the same: the voice opens with the task, and Claude's "call started" message
+names it, so `send` can reach that thread.
+
 ## Setup
 
 1. Put an OpenAI API key with access to `gpt-live-1` (a paid tier) in

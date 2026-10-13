@@ -50,7 +50,7 @@ test('each kind of step reads as a few plain words', () => {
   const path = join(home, 'steps.jsonl')
   write(path, ...steps)
   const lines: (string | undefined)[] = []
-  followTranscript(path, true, (_: unknown, updates: () => any[]) => lines.push(...updates().map(headline)))()
+  followTranscript(path, 0, (_: unknown, updates: () => any[]) => lines.push(...updates().map(headline)))()
   expect(lines).toEqual([
     'Show recent commits',
     'Running uptime',
