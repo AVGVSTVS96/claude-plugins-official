@@ -316,13 +316,16 @@ function hangUp(twilio: Bun.ServerWebSocket<Phone>) {
 
 async function start(request: Request) {
   if (!KEY) return new Response(`Set OPENAI_API_KEY in ${join(STATE_DIR, '.env')}`, { status: 503 })
-  const { sdp } = (await request.json()) as { sdp?: string }
+  const { sdp, voice = VOICE } = (await request.json()) as { sdp?: string; voice?: string }
   if (!sdp) return new Response('An SDP offer is required', { status: 400 })
   const response = await fetch(API, {
     method: 'POST',
     headers: { Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      session: session(VOICE ? { audio: { output: { voice: VOICE } } } : {}),
+      session: session({
+        ...(voice ? { audio: { output: { voice } } } : {}),
+        client: { data_channel: { allowed_client_events: ['session.input_audio.mute', 'session.input_audio.unmute', 'session.close'] } },
+      }),
       transport: { type: 'webrtc', sdp },
     }),
   })
@@ -371,6 +374,10 @@ Bun.serve<Phone>({
     if (greeting && dials.delete(token)) return server.upgrade(request, { data: { greeting } }) ? undefined : new Response('upgrade failed', { status: 400 })
     if (pathname === '/') return new Response(page, { headers: { 'content-type': 'text/html; charset=utf-8' } })
     if (pathname === '/session' && request.method === 'POST') return start(request)
+    if (pathname === '/session' && request.method === 'DELETE') {
+      live?.socket.send(JSON.stringify({ type: 'session.close' }))
+      return new Response(null, { status: 204 })
+    }
     if (pathname === '/phone' && request.method === 'POST')
       return dial().then(text => new Response(text), error => new Response(error.message, { status: 502 }))
     return new Response('404', { status: 404 })

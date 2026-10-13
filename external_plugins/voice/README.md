@@ -92,6 +92,13 @@ Claude to stop that task.
 
 The page listens on `127.0.0.1` only, and the API key never leaves the plugin.
 
+An app can hold the same call: POST its WebRTC offer to `/session` as
+`{ "sdp": "...", "voice": "marin" }` (the voice is optional), and it gets
+OpenAI's session back, with the answer SDP in `transport.sdp`. Its data
+channel may send `session.input_audio.mute`, `session.input_audio.unmute` and
+`session.close`; `DELETE /session` ends the call from outside it.
+[hex-voice](https://github.com/AVGVSTVS96/hex-voice) is an iPhone app built this way.
+
 ## Phone calls
 
 The plugin can also ring a phone through [Twilio](https://www.twilio.com):
