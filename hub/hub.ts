@@ -118,9 +118,22 @@ export function startHub({ stateDir, channel, main, mainName = 'main', general =
     claim(thread)
     if (working) busy.add(thread)
     else busy.delete(thread)
-    // A thread that asked to renew (a voice call ended) stops at its next rest, so it starts over fresh.
-    if (!working && renewing.has(thread)) stopIfIdle(thread)
+    if (!working && renewing.has(thread)) renew(thread)
     rest(thread)
+  }
+
+  // A thread that asked to renew (a voice call ended) starts over at its next rest, as soon as
+  // its process exits rather than after the main thread's relaunch delay. A keep that lands
+  // while Claude is asked whether it's still working cancels it.
+  function renew(thread: string) {
+    const session = current(thread)
+    if (!session) return
+    agent(session, running => {
+      if (!renewing.has(thread) || busy.has(thread) || running?.status === 'busy') return
+      renewing.delete(thread)
+      if (running) cycle(thread, running)
+      else stop(thread)
+    })
   }
 
   // A running session that isn't busy stops after a while; its next message resumes it.
@@ -447,7 +460,11 @@ export function startHub({ stateDir, channel, main, mainName = 'main', general =
     rename(main, mainName)
     launch(main, mainName)
   }
-  revive()
+  // A fresh main thread's launch never resumes, so one whose session outlived the hub (a hub
+  // restart) gets the same time to reconnect as a dropped one instead of a second session.
+  const outlived = main && fresh(main) && current(main)
+  if (outlived) agent(outlived, running => (running ? setTimeout(revive, relaunch) : revive()))
+  else revive()
 
   return {
     deliver,

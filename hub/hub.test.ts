@@ -458,19 +458,43 @@ test('a fresh thread keeps its session while it waits on a permission prompt or 
   expect(calls().some(args => args[0] === 'stop' || args[0] === '--bg')).toBe(false)
 })
 
-test('a thread that asks to renew stops once its turn ends, and its main thread starts over as a new session', async () => {
-  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'idle' }], relaunch: 50, fresh: () => true })
-  const { socket, send } = await session('voice')
+test('a thread that asks to renew starts over as a new session once its turn ends, without waiting out the main thread\'s relaunch delay', async () => {
+  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 999999, status: 'idle' }], relaunch: 60_000, fresh: () => true })
+  const { send } = await session('voice')
   send({ type: 'state', thread: 'voice', busy: true })
   send({ type: 'renew', thread: 'voice' })
   await Bun.sleep(100)
   expect(calls().some(args => args[0] === 'stop')).toBe(false)
   send({ type: 'state', thread: 'voice', busy: false })
   expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
-  const before = calls().filter(args => args[0] === '--bg').length
-  socket.destroy()
-  const args = await until(() => calls().filter(args => args[0] === '--bg')[before])
+  const args = await until(() => calls().slice(calls().findIndex(args => args[0] === 'stop')).find(args => args[0] === '--bg'))
   expect(args).not.toContain('--resume')
+})
+
+test('a renew waits out background agents Claude still reports working, then starts over at the next idle', async () => {
+  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 999999, status: 'busy' }], relaunch: 60_000, fresh: () => true })
+  const { send } = await session('voice')
+  send({ type: 'renew', thread: 'voice' })
+  send({ type: 'state', thread: 'voice', busy: false })
+  await Bun.sleep(150)
+  expect(calls().some(args => args[0] === 'stop' || args[0] === '--bg')).toBe(false)
+  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid: 999999, status: 'idle' }]))
+  send({ type: 'state', thread: 'voice', busy: false })
+  await until(() => calls().find(args => args[0] === 'stop'))
+  expect(await launched()).not.toContain('--resume')
+})
+
+test('a fresh main thread still running when the hub starts is left to reconnect instead of getting a second session', async () => {
+  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'idle' }], relaunch: 150, fresh: () => true })
+  await Bun.sleep(50)
+  await session('voice')
+  await Bun.sleep(250)
+  expect(calls().some(args => args[0] === '--bg')).toBe(false)
+})
+
+test('a fresh main thread whose session is gone when the hub starts gets a new one at once', async () => {
+  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [], relaunch: 60_000, fresh: () => true })
+  expect(await launched()).not.toContain('--resume')
 })
 
 test('a thread that asked to renew keeps running when it asks to keep before its turn ends (a new call started)', async () => {

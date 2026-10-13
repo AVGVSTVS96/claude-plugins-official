@@ -4,7 +4,7 @@ id: hub
 summary: Add a client-agnostic hub that gives every chat thread its own Claude Code session and moves threads between clients.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: hub.patch
-patch_sha256: 916cfd13cd3f36b29b89e0739047105b613d4e5e805b750b802d934dfc1ccc66
+patch_sha256: cb466c251f52a456a36a9086800c0181a4867cae8b3c6e3f66a4dfc2e84abd36
 ---
 
 ## Intent
@@ -62,9 +62,13 @@ starts, never stops it for being idle, and starts it again when its session
 has been gone for 30 seconds. A client whose main thread is hex's General
 says so (`general`), and only that session's settings env says `HEX_MAIN`, so
 hex runs General's jobs in General alone, not in every client's main thread.
-A session can ask to `renew`: the hub stops it at its next rest, once Claude
-reports it idle, and a fresh main thread then starts over as a new session.
-Asking to `keep` before then cancels it (a voice call started in the meantime).
+A session can ask to `renew`: at its next rest, once Claude reports it idle,
+the hub stops it and starts it over as soon as its process exits, as a new
+session for a fresh thread, without waiting out the main thread's 30 seconds.
+Asking to `keep` before then cancels it (a voice call started in the meantime),
+even while the hub is still asking Claude whether the session is working. A
+fresh main thread whose session outlived the hub (a hub restart) gets the same
+30 seconds to reconnect before a new one starts, so it never runs twice.
 
 `hub/serve.ts` is the service: it runs every client (Telegram, Discord,
 Buzz, T3 Code) in one process. Each chat client registers in `clients` with a `place` that opens a
@@ -101,7 +105,8 @@ instead (`fork`, `--fork-session`).
 ## Verification
 
 `bun test hub` drives routing, queueing, resume, folders, running sessions, the main
-thread (started with the hub, kept running, revived, `HEX_MAIN` only for General), the launcher and its
+thread (started with the hub, kept running, revived, `HEX_MAIN` only for General, renewed at once, a
+fresh one left to reconnect after a hub restart), the launcher and its
 environment, failed starts, busy and idle, idle stops, fresh threads, stopping, closing, naming and
 handoffs (release, adopt, fork), permission prompts and bad input against a fake `claude`. Run `scripts/verify`.
 

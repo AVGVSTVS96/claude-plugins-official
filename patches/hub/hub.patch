@@ -1,9 +1,9 @@
 diff --git a/hub/hub.test.ts b/hub/hub.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..0381e1fd94c7fdbaf0fd4577709c49e445f1b317
+index 0000000000000000000000000000000000000000..170bea2680b46a85418a33ae4f5d118069291b1c
 --- /dev/null
 +++ b/hub/hub.test.ts
-@@ -0,0 +1,706 @@
+@@ -0,0 +1,730 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { connect, createServer, type Socket } from 'net'
 +import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, chmodSync, existsSync } from 'fs'
@@ -464,19 +464,43 @@ index 0000000000000000000000000000000000000000..0381e1fd94c7fdbaf0fd4577709c49e4
 +  expect(calls().some(args => args[0] === 'stop' || args[0] === '--bg')).toBe(false)
 +})
 +
-+test('a thread that asks to renew stops once its turn ends, and its main thread starts over as a new session', async () => {
-+  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'idle' }], relaunch: 50, fresh: () => true })
-+  const { socket, send } = await session('voice')
++test('a thread that asks to renew starts over as a new session once its turn ends, without waiting out the main thread\'s relaunch delay', async () => {
++  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 999999, status: 'idle' }], relaunch: 60_000, fresh: () => true })
++  const { send } = await session('voice')
 +  send({ type: 'state', thread: 'voice', busy: true })
 +  send({ type: 'renew', thread: 'voice' })
 +  await Bun.sleep(100)
 +  expect(calls().some(args => args[0] === 'stop')).toBe(false)
 +  send({ type: 'state', thread: 'voice', busy: false })
 +  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
-+  const before = calls().filter(args => args[0] === '--bg').length
-+  socket.destroy()
-+  const args = await until(() => calls().filter(args => args[0] === '--bg')[before])
++  const args = await until(() => calls().slice(calls().findIndex(args => args[0] === 'stop')).find(args => args[0] === '--bg'))
 +  expect(args).not.toContain('--resume')
++})
++
++test('a renew waits out background agents Claude still reports working, then starts over at the next idle', async () => {
++  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 999999, status: 'busy' }], relaunch: 60_000, fresh: () => true })
++  const { send } = await session('voice')
++  send({ type: 'renew', thread: 'voice' })
++  send({ type: 'state', thread: 'voice', busy: false })
++  await Bun.sleep(150)
++  expect(calls().some(args => args[0] === 'stop' || args[0] === '--bg')).toBe(false)
++  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid: 999999, status: 'idle' }]))
++  send({ type: 'state', thread: 'voice', busy: false })
++  await until(() => calls().find(args => args[0] === 'stop'))
++  expect(await launched()).not.toContain('--resume')
++})
++
++test('a fresh main thread still running when the hub starts is left to reconnect instead of getting a second session', async () => {
++  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'idle' }], relaunch: 150, fresh: () => true })
++  await Bun.sleep(50)
++  await session('voice')
++  await Bun.sleep(250)
++  expect(calls().some(args => args[0] === '--bg')).toBe(false)
++})
++
++test('a fresh main thread whose session is gone when the hub starts gets a new one at once', async () => {
++  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [], relaunch: 60_000, fresh: () => true })
++  expect(await launched()).not.toContain('--resume')
 +})
 +
 +test('a thread that asked to renew keeps running when it asks to keep before its turn ends (a new call started)', async () => {
@@ -712,10 +736,10 @@ index 0000000000000000000000000000000000000000..0381e1fd94c7fdbaf0fd4577709c49e4
 +})
 diff --git a/hub/hub.ts b/hub/hub.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..cfe3f30e6bfa95d42683270a0f25eac99e5418d7
+index 0000000000000000000000000000000000000000..a58448c6e4b90f2739f3d7d691459409d8d617d1
 --- /dev/null
 +++ b/hub/hub.ts
-@@ -0,0 +1,494 @@
+@@ -0,0 +1,511 @@
 +import { createServer, type Socket } from 'net'
 +import { execFile, spawn } from 'child_process'
 +import { createHash } from 'crypto'
@@ -836,9 +860,22 @@ index 0000000000000000000000000000000000000000..cfe3f30e6bfa95d42683270a0f25eac9
 +    claim(thread)
 +    if (working) busy.add(thread)
 +    else busy.delete(thread)
-+    // A thread that asked to renew (a voice call ended) stops at its next rest, so it starts over fresh.
-+    if (!working && renewing.has(thread)) stopIfIdle(thread)
++    if (!working && renewing.has(thread)) renew(thread)
 +    rest(thread)
++  }
++
++  // A thread that asked to renew (a voice call ended) starts over at its next rest, as soon as
++  // its process exits rather than after the main thread's relaunch delay. A keep that lands
++  // while Claude is asked whether it's still working cancels it.
++  function renew(thread: string) {
++    const session = current(thread)
++    if (!session) return
++    agent(session, running => {
++      if (!renewing.has(thread) || busy.has(thread) || running?.status === 'busy') return
++      renewing.delete(thread)
++      if (running) cycle(thread, running)
++      else stop(thread)
++    })
 +  }
 +
 +  // A running session that isn't busy stops after a while; its next message resumes it.
@@ -1165,7 +1202,11 @@ index 0000000000000000000000000000000000000000..cfe3f30e6bfa95d42683270a0f25eac9
 +    rename(main, mainName)
 +    launch(main, mainName)
 +  }
-+  revive()
++  // A fresh main thread's launch never resumes, so one whose session outlived the hub (a hub
++  // restart) gets the same time to reconnect as a dropped one instead of a second session.
++  const outlived = main && fresh(main) && current(main)
++  if (outlived) agent(outlived, running => (running ? setTimeout(revive, relaunch) : revive()))
++  else revive()
 +
 +  return {
 +    deliver,
