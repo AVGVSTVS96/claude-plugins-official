@@ -8,6 +8,10 @@ export type Task = { id: string; state: 'running' | 'done' | 'failed'; text: str
 
 export type Moment = Task & { at: number }
 
+export type Mark = { at: number; kind: 'say' | 'note' | 'paused' | 'resumed' | 'warned'; text: string }
+
+export type Saved = { turns: { who: Speaker; at: number; text: string }[]; tasks: Moment[]; moments?: Mark[] }
+
 const PAUSE = 2000
 
 export class Call {
@@ -16,6 +20,15 @@ export class Call {
   private moments: Moment[] = []
   private lines = new Map<string, string>()
   private recent: string[] = []
+  private marks: Mark[] = []
+
+  static resume({ turns, tasks, moments = [] }: Saved) {
+    const call = new Call()
+    call.fragments = turns.map(({ who, at, text }) => ({ who, text, start: at, end: at, sent: true }))
+    for (const task of tasks) call.track(task, task.at)
+    call.marks = [...moments]
+    return call
+  }
 
   hear(fragment: Fragment) {
     let i = this.fragments.length
@@ -65,6 +78,10 @@ export class Call {
     this.recent = [id, ...this.recent.filter(other => other !== id)]
   }
 
+  mark(mark: Mark) {
+    this.marks.push(mark)
+  }
+
   board(): string {
     if (!this.tasks.size) return 'Task board: nothing running or finished yet.'
     return ['Task board:', ...[...this.tasks.values()].map(task => `- ${task.id} ${task.state}: ${task.text}${task.to ? ` (sent to ${task.to})` : ''}`)].join('\n')
@@ -82,6 +99,7 @@ export class Call {
     return {
       turns: tidy(turns.sort((a, b) => a.start - b.start)).map(({ who, start, text }) => ({ who, at: start, text })),
       tasks: [...this.moments],
+      moments: [...this.marks],
     }
   }
 }

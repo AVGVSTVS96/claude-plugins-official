@@ -36,6 +36,13 @@
   const log = document.getElementById('log')
   const speaker = document.getElementById('speaker')
   let peer, events, microphone, last
+  const hash = new URLSearchParams(location.hash.slice(1)).get('token')
+  if (hash) {
+    localStorage.setItem('voice-token', hash)
+    history.replaceState(null, '', location.pathname)
+  }
+  const token = '__VOICE_TOKEN__' || localStorage.getItem('voice-token')
+  const auth = token ? { Authorization: `Bearer ${token}` } : {}
 
   const say = text => (status.textContent = text)
 
@@ -89,7 +96,7 @@
     })
     const response = await fetch('session', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...auth },
       body: JSON.stringify({ sdp: peer.localDescription.sdp }),
     })
     if (!response.ok) throw new Error(await response.text())
@@ -100,7 +107,7 @@
   const phone = document.getElementById('phone')
   phone.onclick = async () => {
     phone.disabled = true
-    const response = await fetch('phone', { method: 'POST' })
+    const response = await fetch('phone', { method: 'POST', headers: auth })
     say(await response.text())
     phone.disabled = false
   }

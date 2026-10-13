@@ -4,7 +4,7 @@ id: hub
 summary: Add a client-agnostic hub that gives every chat thread its own Claude Code session and moves threads between clients.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: hub.patch
-patch_sha256: 06c2d50bb83a862e578bfb9b642e7a49c0be87a2eebe684413468ad5d878dd5f
+patch_sha256: 916cfd13cd3f36b29b89e0739047105b613d4e5e805b750b802d934dfc1ccc66
 ---
 
 ## Intent
@@ -64,6 +64,7 @@ says so (`general`), and only that session's settings env says `HEX_MAIN`, so
 hex runs General's jobs in General alone, not in every client's main thread.
 A session can ask to `renew`: the hub stops it at its next rest, once Claude
 reports it idle, and a fresh main thread then starts over as a new session.
+Asking to `keep` before then cancels it (a voice call started in the meantime).
 
 `hub/serve.ts` is the service: it runs every client (Telegram, Discord,
 Buzz, T3 Code) in one process. Each chat client registers in `clients` with a `place` that opens a

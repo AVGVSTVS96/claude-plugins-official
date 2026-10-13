@@ -1,6 +1,6 @@
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
 import { join } from 'path'
-import type { Moment, Speaker } from './call.ts'
+import type { Mark, Moment, Speaker } from './call.ts'
 import { Changes } from './changes.ts'
 
 export type Source = 'app' | 'web' | 'phone-in' | 'phone-out'
@@ -17,11 +17,23 @@ export type CallRecord = {
   voice?: string
   title?: string
   claude?: string
+  why?: string
+  summary?: string
+  waiting?: string[]
+  expires?: string
+  usage?: Usage
   turns: { who: Speaker; at: number; text: string }[]
   tasks: Moment[]
+  moments?: Mark[]
 }
 
-export type CallSummary = Omit<CallRecord, 'turns' | 'tasks'> & { seconds: number; tasks: number; preview: string }
+export type CallSummary = Omit<CallRecord, 'turns' | 'tasks' | 'moments'> & { seconds: number; tasks: number; preview: string }
+
+export type Usage = { seconds: number; dollars: number; context?: number }
+
+export function usage(seconds: number, context?: number): Usage {
+  return { seconds, dollars: Math.round(seconds * 5 / 60) / 100, ...(context === undefined ? {} : { context }) }
+}
 
 const ID = /^[\w-]+$/
 
@@ -74,7 +86,7 @@ export class CallLog extends Changes {
   }
 }
 
-export function summary({ turns, tasks, ...call }: CallRecord): CallSummary {
+export function summary({ turns, tasks, moments, ...call }: CallRecord): CallSummary {
   const heard = Math.max(0, ...turns.map(turn => turn.at), ...tasks.map(task => task.at))
   const ms = call.ended ? Date.parse(call.ended) - Date.parse(call.started) : heard
   return {

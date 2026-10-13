@@ -49,6 +49,7 @@ test('the record keeps the whole call, each speaker joined like the live caption
       { id: 'build', state: 'running', text: 'checking CI', at: 2500 },
       { id: 'build', state: 'done', text: 'CI is green', at: 8000 },
     ],
+    moments: [],
   })
 })
 
@@ -66,4 +67,24 @@ test("the live view lists tasks by their latest change, a task's step included, 
   call.track({ id: 'orb', state: 'done', text: 'your orb feedback', to: 'voiceapp' })
   expect(call.activity()[0]).toMatchObject({ id: 'orb', state: 'done' })
   expect(call.board()).toBe('Task board:\n- build running: checking CI\n- orb done: your orb feedback (sent to voiceapp)')
+})
+
+test("the record keeps hex's own words and the call's moments, and a call picks back up from its record", () => {
+  const call = new Call()
+  call.hear({ who: 'you', text: 'is the build green', start: 1000, end: 2000 })
+  call.handOff()
+  call.mark({ at: 2500, kind: 'say', text: 'The email agent is drafting it.' })
+  call.track({ id: 'build', state: 'running', text: 'checking CI' }, 2600)
+  call.mark({ at: 5000, kind: 'paused', text: 'Your phone took over the audio' })
+  const saved = call.record()
+  expect(saved.moments).toEqual([
+    { at: 2500, kind: 'say', text: 'The email agent is drafting it.' },
+    { at: 5000, kind: 'paused', text: 'Your phone took over the audio' },
+  ])
+  const resumed = Call.resume(saved)
+  expect(resumed.handOff()).toEqual([])
+  expect(resumed.board()).toBe('Task board:\n- build running: checking CI')
+  resumed.hear({ who: 'you', text: 'still there?', start: 9000, end: 9500 })
+  expect(transcript(resumed.handOff())).toBe('[9.0s] you: still there?')
+  expect(resumed.record()).toEqual({ ...saved, turns: [...saved.turns, { who: 'you', at: 9000, text: 'still there?' }] })
 })

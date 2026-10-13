@@ -4,7 +4,7 @@ id: voice
 summary: Add a voice channel where OpenAI's gpt-live-1 holds a live call and hands every real request to the Claude Code session.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: voice.patch
-patch_sha256: c2f7b309962d1bfa91d1e2599fc971b81c50b5bb894d0e45980a07be0d0456b9
+patch_sha256: 2654fadfa9c0076df9a19f9657a9199cf8f5f7b7ba9e57fffe0aa3184a5cf9d2
 ---
 
 ## Intent
@@ -66,6 +66,28 @@ plugin with no hub code.
 - `GET /activity?after=<version>` long-polls the live call's tasks, most
   recently changed first, each with its latest `line`, for the app's live
   line.
+- Calls that never connect are saved with no turns and Claude is told:
+  `/session` refused by OpenAI, a phone session OpenAI refused, and placed
+  phone calls Twilio reports (through a signed `StatusCallback` at
+  `/twilio/status/<token>`) as busy, no-answer, failed, or picked up without
+  the voice ever joining. `end` takes `no-connect`, `no-answer` and `busy`.
+- When the sideband of a page or app call closes without `session.closed`,
+  the plugin reattaches to the session by id a few times before calling the
+  call dropped; on start it reattaches to the latest call whose record has no
+  end, sends Claude a "call resumed" message with the call so far, and closes
+  out any other unended record as `dropped`. A new call sends the hub `keep`,
+  which cancels a pending `renew`.
+- Records keep Claude's exact `say` and `note` text as `moments`, plus
+  `why` (from `phone`), `summary` and `waiting` (from `title`), `expires`
+  and `usage` (billed seconds, dollars, context ratio from
+  `session.usage.updated` and `session.closed`). Two minutes before
+  `expires` the voice and Claude are told. `hang_up` closes the session with
+  an `event_id` starting `close_hex` once the voice stops talking.
+  `POST /calls/<id>/moments` records when the caller's phone took the audio
+  and tells the voice to wait.
+- With `VOICE_TOKEN` set, everything but the page and Twilio's routes needs
+  `Authorization: Bearer <token>`; the page gets the token filled in only for
+  requests that didn't come through a proxy.
 
 ## Invariants
 
@@ -74,6 +96,7 @@ plugin with no hub code.
 2. A transcript fragment that arrives late is still delivered, at its
    timeline position, in the next handoff.
 3. The API key stays in the plugin; the page listens on loopback only.
+5. A call's record is never left without an end once the plugin has run again.
 4. Stays on `@modelcontextprotocol/sdk` 1.x, which Claude Code registers
    channels on.
 

@@ -39,6 +39,7 @@ Claude to stop that task.
    | `say` | `session.commentary.append` | a result to say aloud (it paraphrases) |
    | `note` | `session.thinking.append` | a fact to know without saying it yet |
    | `task` | `session.thinking.append` (the whole board) | task status: running, done, failed |
+   | `hang_up` | `session.close`, once the voice stops talking | ending the call |
 
    Each tool returns once OpenAI acknowledges the update.
 5. The voice hands every question to Claude, status questions included, and
@@ -58,18 +59,36 @@ task change, and when it ends, so a crash keeps almost all of it.
 {
   "id": "sess_...", "started": "2026-10-13T03:05:12.000Z", "ended": "...",
   "end": "you", "reason": "close_requested", "from": "app", "voice": "marin", "title": "Voice app history",
-  "claude": "c0f06426-...",
+  "claude": "c0f06426-...", "why": "Your build finished",
+  "summary": "Checked CI and sent the PR link to Telegram.", "waiting": ["Merge the PR"],
+  "expires": "...", "usage": { "seconds": 312.4, "dollars": 0.26, "context": 0.18 },
   "turns": [{ "who": "you", "at": 3400, "text": "Hello there" }],
-  "tasks": [{ "id": "plan", "state": "running", "at": 61200, "text": "..." }]
+  "tasks": [{ "id": "plan", "state": "running", "at": 61200, "text": "..." }],
+  "moments": [{ "kind": "say", "at": 8100, "text": "CI is green." }]
 }
 ```
 
 `from` is where the call came from: `app`, `web` (the call page), `phone-in`
-or `phone-out`. `end` is how it ended: `you` (the caller hung up), `hex` (hex
-hung up), `dropped`, `expired`, `no-connect`, `no-answer` or `busy`; `reason` is
-the raw reason. Every way the caller ends a call (the page, an app, the phone,
-`DELETE /session`) sends `session.close` with an `event_id` starting
-`close-you`. `at` is milliseconds from the start of the call; `claude` is
+or `phone-out`. `end` is how it ended: `you` (the caller hung up), `hex`
+(Claude hung up with `hang_up`, or the voice service ended it), `dropped`,
+`expired` (the session's time limit), `no-connect`, `no-answer` or `busy`;
+`reason` says why in words. Every way the caller ends a call (the page, an
+app, the phone, `DELETE /session`) sends `session.close` with an `event_id`
+starting `close-you`; `hang_up` sends one starting `close_hex`.
+
+Calls that never connect are saved too, with no turns: an app or page whose
+`/session` OpenAI refused, a phone session OpenAI refused, and a placed phone
+call nobody answered, that was busy, or that failed (Twilio reports each
+placed call's outcome to `/twilio/status/<token>`). Claude gets a message for
+each, with why it was calling.
+
+`why` is the reason Claude gave `phone`; `summary` and `waiting` are Claude's
+wrap-up from `title`; `moments` are Claude's exact `say` and `note` words
+(the voice paraphrases them aloud), the time-limit warning, and when the
+caller's phone took the audio (`paused`, `resumed`). `usage` is OpenAI's
+billed audio seconds, their cost, and how full the voice's context got;
+`expires` is when OpenAI ends the session, and two minutes before it the voice
+and Claude are told. `at` is milliseconds from the start of the call; `claude` is
 the Claude Code session that did the work. Each speaker's words are joined
 the way live captions show them: a pause of over two seconds starts a new turn.
 Tasks often finish after the caller hangs up; `task` with that call's id keeps
@@ -81,6 +100,19 @@ updating its record.
 | `GET /calls?after=<version>` | the same, once anything has changed since that version (or after 25 seconds) |
 | `GET /calls/<id>` | one whole call |
 | `DELETE /calls/<id>` | deletes a finished call |
+| `POST /calls/<id>/moments` | `{ "kind": "paused" \| "resumed", "text": "..." }` from the app when the phone takes its audio (a phone call or Siri) and gives it back; the voice is told to wait |
+
+## Dropped connections and restarts
+
+If the plugin's connection to a page or app call drops, it reattaches to the
+same session by its id (`/v1/live/sessions/<id>/attach`) a few times over
+about 15 seconds before calling the call dropped. When the plugin starts, it
+picks the latest call that never got an end back up the same way and sends
+Claude a "call resumed" message with the call so far; any other call left
+without an end is closed out as `dropped`. A phone call's audio runs through
+the plugin, so a restart ends it. When a call starts, the plugin tells the hub
+to keep the session (`keep`), so a renew asked for by the call before it
+doesn't stop the session mid-call.
 
 ## Agent activity
 
@@ -126,6 +158,7 @@ same conversion hex uses for Buzz and T3 Code), then into a few plain words.
    # optional
    VOICE=marin        # one of OpenAI's built-in voices; OpenAI's default if unset
    VOICE_PORT=8790    # the call page's local port
+   VOICE_TOKEN=...    # if set, /session, /calls and /phone need "Authorization: Bearer <token>"
    ```
 
    Who the voice is goes in `~/.claude/channels/voice/instructions.md`, the
@@ -160,6 +193,12 @@ same conversion hex uses for Buzz and T3 Code), then into a few plain words.
      then `https://<host>.<tailnet>.ts.net:8790`.
 
 The page listens on `127.0.0.1` only, and the API key never leaves the plugin.
+With `VOICE_TOKEN` set, every request except the page itself and Twilio's
+(which carry their own signature or one-time token) needs the token, so
+other devices on the same tailnet can't read or delete calls. The page gets it
+filled in when opened on `127.0.0.1` directly; through a proxy like
+`tailscale serve`, open it once as `https://<host>:8790/#token=<token>` and
+the browser keeps it.
 
 An app can hold the same call: POST its WebRTC offer to `/session` as
 `{ "sdp": "...", "voice": "marin", "from": "app" }` (the voice is optional; `from`
@@ -175,7 +214,11 @@ The plugin can also ring a phone through [Twilio](https://www.twilio.com):
 Claude's `phone` tool, or **Call my phone** on the call page. Twilio places
 the call and streams its audio (G.711 μ-law, passed through untouched) to a
 `gpt-live-1` session over a WebSocket; handoffs, `say`, `note` and the board
-work exactly as on the page.
+work exactly as on the page. `phone` takes `why`, the reason Claude is
+calling, which the voice opens with; notes Claude sends while it rings reach
+the voice when the call connects, and Twilio reports how each placed call
+ended to a signed status callback, so an unanswered or failed call is saved
+and Claude hears about it.
 
 ```
 phone ◄── PSTN ──► Twilio ── Media Stream (wss) ──► plugin /twilio/<one-time token>

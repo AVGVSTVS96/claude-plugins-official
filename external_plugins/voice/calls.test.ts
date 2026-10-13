@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { CallLog, ending, type CallRecord } from './calls.ts'
+import { CallLog, ending, summary, usage, type CallRecord } from './calls.ts'
 
 function scratch() {
   const dir = mkdtempSync(join(tmpdir(), 'calls-'))
@@ -58,12 +58,21 @@ test('a list request from before a restart answers right away', async () => {
   expect(Date.now() - started).toBeLessThan(100)
 })
 
-test('how a call ended: the caller, the voice service, or a dropped connection', () => {
+test('how a call ended: the caller, hex, the time limit, or a dropped connection', () => {
   expect(ending('close_requested', 'close-you-app')).toBe('you')
   expect(ending('close_requested')).toBe('you')
   expect(ending('remote_hangup')).toBe('you')
   expect(ending('close_requested', 'close_hex_1')).toBe('hex')
   expect(ending('expired')).toBe('expired')
+  expect(ending('content')).toBe('hex')
   expect(ending('connection_lost')).toBe('dropped')
   expect(ending('connection closed')).toBe('dropped')
+})
+
+test("a call's cost is its billed audio at five cents a minute, and the list leaves out hex's own words", () => {
+  expect(usage(90, 0.4)).toEqual({ seconds: 90, dollars: 0.08, context: 0.4 })
+  expect(usage(600)).toEqual({ seconds: 600, dollars: 0.5 })
+  const listed = summary(record('a', '2026-10-13T01:00:00.000Z', { moments: [{ at: 1, kind: 'say', text: 'hi' }], summary: 'Checked CI.', waiting: ['Merge the PR'] }))
+  expect(listed).not.toHaveProperty('moments')
+  expect(listed).toMatchObject({ summary: 'Checked CI.', waiting: ['Merge the PR'] })
 })
