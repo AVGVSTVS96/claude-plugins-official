@@ -473,6 +473,17 @@ test('a thread that asks to renew stops once its turn ends, and its main thread 
   expect(args).not.toContain('--resume')
 })
 
+test('a thread that asked to renew keeps running when it asks to keep before its turn ends (a new call started)', async () => {
+  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'idle' }], relaunch: 50, fresh: () => true })
+  const { send } = await session('voice')
+  send({ type: 'state', thread: 'voice', busy: true })
+  send({ type: 'renew', thread: 'voice' })
+  send({ type: 'keep', thread: 'voice' })
+  send({ type: 'state', thread: 'voice', busy: false })
+  await Bun.sleep(150)
+  expect(calls().some(args => args[0] === 'stop')).toBe(false)
+})
+
 test('closing an idle thread stops its session right away, then forgets the thread', async () => {
   start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } } })
   const { socket } = await session('chat:7')

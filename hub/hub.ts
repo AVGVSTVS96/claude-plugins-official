@@ -419,6 +419,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', general =
       if (request.type === 'hello') welcome(thread = request.thread, request.session, socket)
       if (request.type === 'state') setState(request.thread, request.busy, request.background === true)
       if (request.type === 'renew') renewing.add(request.thread)
+      if (request.type === 'keep') renewing.delete(request.thread)
       if (request.type === 'open') launch(request.thread, request.name, request.prompt)
       if (request.type === 'permission_request') permission?.(thread, request)
       if (request.type === 'inbound') deliver(request.thread, threads[request.thread]?.name ?? request.thread, { content: request.content, meta: request.meta })
