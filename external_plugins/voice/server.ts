@@ -77,6 +77,7 @@ type Dial = { greeting: string; from: Source }
 type Phone = Dial & { openai?: WebSocket; stream?: string; started?: true }
 
 let live: Live | undefined
+let last: Live | undefined
 let hub: ReturnType<typeof connect> | undefined
 let seq = 0
 const dials = new Map<string, Dial>()
@@ -125,7 +126,8 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'task',
-      description: 'Put a task on the board the voice model reads to answer status questions: running when it starts, then done or failed.',
+      description:
+        "Put a task on the board the voice model reads to answer status questions: running when it starts, then done or failed. After the call ends, it still updates that call's record.",
       inputSchema: {
         type: 'object',
         properties: {
@@ -158,6 +160,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async request => {
   try {
     if (request.params.name === 'phone') return done(await dial(args.to))
     if (request.params.name === 'title') return done(name(args.call, args.title))
+    if (request.params.name === 'task') return done(await task(args.id, args.state as Task['state'], args.text))
     if (!live) throw new Error('no call is live')
     switch (request.params.name) {
       case 'say':
@@ -166,11 +169,6 @@ mcp.setRequestHandler(CallToolRequestSchema, async request => {
       case 'note':
         await send(live, 'session.thinking.append', args.text, args.delegation_id)
         return done('noted')
-      case 'task':
-        live.call.track({ id: args.id, state: args.state as Task['state'], text: args.text }, Date.now() - Date.parse(live.record.started))
-        save(live)
-        await send(live, 'session.thinking.append', live.call.board())
-        return done('board updated')
       default:
         throw new Error(`unknown tool ${request.params.name}`)
     }
@@ -191,6 +189,16 @@ function send(call: Live, type: string, content: string, delegation?: string) {
 
 function save(call: Live) {
   calls.save({ ...call.record, ...call.call.record() })
+}
+
+async function task(id: string, state: Task['state'], text: string) {
+  const call = live ?? last
+  if (!call) throw new Error('no call yet')
+  call.call.track({ id, state, text }, Date.now() - Date.parse(call.record.started))
+  save(call)
+  if (call !== live) return 'the call has ended, so only its record changed'
+  await send(call, 'session.thinking.append', call.call.board())
+  return 'board updated'
 }
 
 function name(id: string, title: string) {
@@ -227,6 +235,7 @@ function hear(call: Live, who: Speaker, event: { delta: string; start_ms: number
 function finish(call: Live, reason: string) {
   if (live !== call) return
   live = undefined
+  last = call
   for (const pending of call.pending.values()) pending.reject(new Error(`the call ended (${reason})`))
   for (const pending of call.rings) ring(call, pending)
   const rest = call.call.handOff()

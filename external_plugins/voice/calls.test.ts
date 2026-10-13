@@ -27,8 +27,8 @@ test('the list is newest first, without the turns, with how long and how it bega
   calls.save(record('a', '2026-10-13T01:00:00.000Z', { ended: '2026-10-13T01:04:30.000Z' }))
   calls.save(record('b', '2026-10-13T03:00:00.000Z'))
   expect(calls.list()).toEqual([
-    { id: 'b', started: '2026-10-13T03:00:00.000Z', from: 'app', seconds: 3, preview: 'Is the build green?' },
-    { id: 'a', started: '2026-10-13T01:00:00.000Z', ended: '2026-10-13T01:04:30.000Z', from: 'app', seconds: 270, preview: 'Is the build green?' },
+    { id: 'b', started: '2026-10-13T03:00:00.000Z', from: 'app', seconds: 3, tasks: 0, preview: 'Is the build green?' },
+    { id: 'a', started: '2026-10-13T01:00:00.000Z', ended: '2026-10-13T01:04:30.000Z', from: 'app', seconds: 270, tasks: 0, preview: 'Is the build green?' },
   ])
   expect(calls.get('a')?.turns).toHaveLength(2)
 })

@@ -68,10 +68,12 @@ task change, and when it ends, so a crash keeps almost all of it.
 or `phone-out`. `at` is milliseconds from the start of the call; `claude` is
 the Claude Code session that did the work. Each speaker's words are joined
 the way live captions show them: a pause of over two seconds starts a new turn.
+Tasks often finish after the caller hangs up; `task` keeps updating that
+call's record until the next call starts.
 
 | Request | Answers |
 | --- | --- |
-| `GET /calls` | `{ version, live, calls }`, newest first, each without its turns, with `seconds` and a `preview` of the caller's first words |
+| `GET /calls` | `{ version, live, calls }`, newest first, each without its turns, with `seconds`, how many `tasks` and a `preview` of the caller's first words |
 | `GET /calls?after=<version>` | the same, once anything has changed since that version (or after 25 seconds) |
 | `GET /calls/<id>` | one whole call |
 | `DELETE /calls/<id>` | deletes a finished call |

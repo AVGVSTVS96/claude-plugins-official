@@ -17,7 +17,7 @@ export type CallRecord = {
   tasks: Moment[]
 }
 
-export type CallSummary = Omit<CallRecord, 'turns' | 'tasks'> & { seconds: number; preview: string }
+export type CallSummary = Omit<CallRecord, 'turns' | 'tasks'> & { seconds: number; tasks: number; preview: string }
 
 const ID = /^[\w-]+$/
 
@@ -85,5 +85,10 @@ export class CallLog {
 export function summary({ turns, tasks, ...call }: CallRecord): CallSummary {
   const heard = Math.max(0, ...turns.map(turn => turn.at), ...tasks.map(task => task.at))
   const ms = call.ended ? Date.parse(call.ended) - Date.parse(call.started) : heard
-  return { ...call, seconds: Math.round(ms / 1000), preview: turns.find(turn => turn.who === 'you')?.text.slice(0, 160) ?? '' }
+  return {
+    ...call,
+    seconds: Math.round(ms / 1000),
+    tasks: new Set(tasks.map(task => task.id)).size,
+    preview: turns.find(turn => turn.who === 'you')?.text.slice(0, 160) ?? '',
+  }
 }
