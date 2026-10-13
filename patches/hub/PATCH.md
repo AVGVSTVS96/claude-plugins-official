@@ -4,7 +4,7 @@ id: hub
 summary: Add a client-agnostic hub that gives every chat thread its own Claude Code session and moves threads between clients.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: hub.patch
-patch_sha256: b4383a70bac29ee339c27ac8554786766c7b26c3fa5f6bc41015fde5e8234843
+patch_sha256: 73bf460234572b7a138cd0d4cbdfcb8680dc4181467aa3a8cf25504b854d4a6d
 ---
 
 ## Intent
@@ -69,7 +69,9 @@ session for a fresh thread, without waiting out the main thread's 30 seconds.
 Asking to `keep` before then cancels it (a voice call started in the meantime),
 even while the hub is still asking Claude whether the session is working. A
 fresh main thread whose session outlived the hub (a hub restart) gets the same
-30 seconds to reconnect before a new one starts, so it never runs twice.
+30 seconds to reconnect before a new one starts, so it never runs twice; any
+running session under its name and folder counts, since a fresh session's id is
+only saved once it has a conversation.
 
 `hub/serve.ts` is the service: it runs every client (Telegram, Discord,
 Buzz, T3 Code) in one process. Each chat client registers in `clients` with a `place` that opens a

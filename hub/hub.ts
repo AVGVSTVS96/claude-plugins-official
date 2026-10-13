@@ -13,7 +13,7 @@ export type Failed = (thread: string, reason: string) => void
 export type Permission = { request_id: string; tool_name: string; description: string; input_preview: string }
 export type Settings = { model?: string; effort?: string }
 type Thread = Settings & { name: string; session?: string; cwd?: string; launched?: string }
-type Agent = { sessionId: string; pid?: number; status?: string }
+type Agent = { sessionId: string; pid?: number; status?: string; name?: string; cwd?: string }
 export type Hub = ReturnType<typeof startHub>
 
 // Every client running in this process, so a thread can move between them.
@@ -238,14 +238,18 @@ export function startHub({ stateDir, channel, main, mainName = 'main', general =
     })
   }
 
-  function agent(session: string, then: (running?: Agent) => void) {
+  function agents(then: (running: Agent[]) => void) {
     execFile('claude', ['agents', '--json'], (_, stdout) => {
       let agents: Agent[] = []
       try {
         agents = JSON.parse(stdout)
       } catch {}
-      then(agents.find(agent => agent.sessionId === session && agent.pid))
+      then(agents.filter(agent => agent.pid))
     })
+  }
+
+  function agent(session: string, then: (running?: Agent) => void) {
+    agents(running => then(running.find(agent => agent.sessionId === session)))
   }
 
   // What a thread's session starts with besides the basics. A session reads it only as it
@@ -464,9 +468,11 @@ export function startHub({ stateDir, channel, main, mainName = 'main', general =
   }
   // A fresh main thread's launch never resumes, so one whose session outlived the hub (a hub
   // restart) gets the same time to reconnect as a dropped one instead of a second session.
-  const outlived = main && fresh(main) && current(main)
-  if (outlived) agent(outlived, running => (running ? setTimeout(revive, relaunch) : revive()))
-  else revive()
+  // Its newest session may not be saved yet, so any running session under its name counts.
+  if (main && fresh(main)) {
+    const where = threads[main]?.cwd ?? hexDir
+    agents(running => (running.some(agent => agent.sessionId === current(main) || (agent.name === mainName && agent.cwd === where)) ? setTimeout(revive, relaunch) : revive()))
+  } else revive()
 
   return {
     deliver,

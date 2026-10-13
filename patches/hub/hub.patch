@@ -1,9 +1,9 @@
 diff --git a/hub/hub.test.ts b/hub/hub.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..8c7266dc0fe724155aa686e3cfb83a912b667feb
+index 0000000000000000000000000000000000000000..36f8f4a6e62f4b9bb21a1e5ae38d32a45a582adf
 --- /dev/null
 +++ b/hub/hub.test.ts
-@@ -0,0 +1,736 @@
+@@ -0,0 +1,745 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { connect, createServer, type Socket } from 'net'
 +import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, chmodSync, existsSync } from 'fs'
@@ -14,6 +14,8 @@ index 0000000000000000000000000000000000000000..8c7266dc0fe724155aa686e3cfb83a91
 +const CHANNEL = 'plugin:telegram@hex'
 +const SESSION = '0a1b2c3d-0000-4000-8000-000000000000'
 +const message: Message = { content: 'hi', meta: { chat_id: '1' } }
++// Above Linux's highest pid, so a session's process is always already gone.
++const EXITED = 4_194_305
 +
 +let dir: string
 +let hub: ReturnType<typeof startHub>
@@ -466,26 +468,25 @@ index 0000000000000000000000000000000000000000..8c7266dc0fe724155aa686e3cfb83a91
 +})
 +
 +test('a thread that asks to renew starts over as a new session once its turn ends, without waiting out the main thread\'s relaunch delay', async () => {
-+  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 999999, status: 'idle' }], relaunch: 60_000, fresh: () => true })
++  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: EXITED, status: 'idle' }], relaunch: 60_000, fresh: () => true })
 +  const { send } = await session('voice')
 +  send({ type: 'state', thread: 'voice', busy: true })
 +  send({ type: 'renew', thread: 'voice' })
 +  await Bun.sleep(100)
-+  expect(calls().some(args => args[0] === 'stop')).toBe(false)
++  expect(calls().some(args => args[0] === 'stop' || args[0] === '--bg')).toBe(false)
 +  send({ type: 'state', thread: 'voice', busy: false })
 +  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
-+  const args = await until(() => calls().slice(calls().findIndex(args => args[0] === 'stop')).find(args => args[0] === '--bg'))
-+  expect(args).not.toContain('--resume')
++  expect(await launched()).not.toContain('--resume')
 +})
 +
 +test('a renew waits out background agents Claude still reports working, then starts over at the next idle', async () => {
-+  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 999999, status: 'busy' }], relaunch: 60_000, fresh: () => true })
++  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: EXITED, status: 'busy' }], relaunch: 60_000, fresh: () => true })
 +  const { send } = await session('voice')
 +  send({ type: 'renew', thread: 'voice' })
 +  send({ type: 'state', thread: 'voice', busy: false })
 +  await Bun.sleep(150)
 +  expect(calls().some(args => args[0] === 'stop' || args[0] === '--bg')).toBe(false)
-+  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid: 999999, status: 'idle' }]))
++  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid: EXITED, status: 'idle' }]))
 +  send({ type: 'state', thread: 'voice', busy: false })
 +  await until(() => calls().find(args => args[0] === 'stop'))
 +  expect(await launched()).not.toContain('--resume')
@@ -495,6 +496,14 @@ index 0000000000000000000000000000000000000000..8c7266dc0fe724155aa686e3cfb83a91
 +  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'idle' }], relaunch: 150, fresh: () => true })
 +  await Bun.sleep(50)
 +  await session('voice')
++  await Bun.sleep(250)
++  expect(calls().some(args => args[0] === '--bg')).toBe(false)
++})
++
++test('a fresh main thread whose newest session is still running but not yet saved is left to reconnect too', async () => {
++  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: '0a1b2c3d-0000-4000-8000-000000000009', pid: 43, name: 'hex', cwd: join(dir, 'hex') }], relaunch: 150, fresh: () => true })
++  await Bun.sleep(50)
++  await session('voice', '0a1b2c3d-0000-4000-8000-000000000009')
 +  await Bun.sleep(250)
 +  expect(calls().some(args => args[0] === '--bg')).toBe(false)
 +})
@@ -742,10 +751,10 @@ index 0000000000000000000000000000000000000000..8c7266dc0fe724155aa686e3cfb83a91
 +})
 diff --git a/hub/hub.ts b/hub/hub.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..89e38915c98da4785593078e0895dacee5d9ee06
+index 0000000000000000000000000000000000000000..198d489473db76fd4e9c6b9ef560091a2d6f928c
 --- /dev/null
 +++ b/hub/hub.ts
-@@ -0,0 +1,513 @@
+@@ -0,0 +1,519 @@
 +import { createServer, type Socket } from 'net'
 +import { execFile, spawn } from 'child_process'
 +import { createHash } from 'crypto'
@@ -761,7 +770,7 @@ index 0000000000000000000000000000000000000000..89e38915c98da4785593078e0895dace
 +export type Permission = { request_id: string; tool_name: string; description: string; input_preview: string }
 +export type Settings = { model?: string; effort?: string }
 +type Thread = Settings & { name: string; session?: string; cwd?: string; launched?: string }
-+type Agent = { sessionId: string; pid?: number; status?: string }
++type Agent = { sessionId: string; pid?: number; status?: string; name?: string; cwd?: string }
 +export type Hub = ReturnType<typeof startHub>
 +
 +// Every client running in this process, so a thread can move between them.
@@ -986,14 +995,18 @@ index 0000000000000000000000000000000000000000..89e38915c98da4785593078e0895dace
 +    })
 +  }
 +
-+  function agent(session: string, then: (running?: Agent) => void) {
++  function agents(then: (running: Agent[]) => void) {
 +    execFile('claude', ['agents', '--json'], (_, stdout) => {
 +      let agents: Agent[] = []
 +      try {
 +        agents = JSON.parse(stdout)
 +      } catch {}
-+      then(agents.find(agent => agent.sessionId === session && agent.pid))
++      then(agents.filter(agent => agent.pid))
 +    })
++  }
++
++  function agent(session: string, then: (running?: Agent) => void) {
++    agents(running => then(running.find(agent => agent.sessionId === session)))
 +  }
 +
 +  // What a thread's session starts with besides the basics. A session reads it only as it
@@ -1212,9 +1225,11 @@ index 0000000000000000000000000000000000000000..89e38915c98da4785593078e0895dace
 +  }
 +  // A fresh main thread's launch never resumes, so one whose session outlived the hub (a hub
 +  // restart) gets the same time to reconnect as a dropped one instead of a second session.
-+  const outlived = main && fresh(main) && current(main)
-+  if (outlived) agent(outlived, running => (running ? setTimeout(revive, relaunch) : revive()))
-+  else revive()
++  // Its newest session may not be saved yet, so any running session under its name counts.
++  if (main && fresh(main)) {
++    const where = threads[main]?.cwd ?? hexDir
++    agents(running => (running.some(agent => agent.sessionId === current(main) || (agent.name === mainName && agent.cwd === where)) ? setTimeout(revive, relaunch) : revive()))
++  } else revive()
 +
 +  return {
 +    deliver,

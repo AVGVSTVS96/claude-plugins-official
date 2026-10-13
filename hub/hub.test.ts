@@ -8,6 +8,8 @@ import { startHub, tappable, transcribe, type Message, type Permission } from '.
 const CHANNEL = 'plugin:telegram@hex'
 const SESSION = '0a1b2c3d-0000-4000-8000-000000000000'
 const message: Message = { content: 'hi', meta: { chat_id: '1' } }
+// Above Linux's highest pid, so a session's process is always already gone.
+const EXITED = 4_194_305
 
 let dir: string
 let hub: ReturnType<typeof startHub>
@@ -460,26 +462,25 @@ test('a fresh thread keeps its session while it waits on a permission prompt or 
 })
 
 test('a thread that asks to renew starts over as a new session once its turn ends, without waiting out the main thread\'s relaunch delay', async () => {
-  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 999999, status: 'idle' }], relaunch: 60_000, fresh: () => true })
+  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: EXITED, status: 'idle' }], relaunch: 60_000, fresh: () => true })
   const { send } = await session('voice')
   send({ type: 'state', thread: 'voice', busy: true })
   send({ type: 'renew', thread: 'voice' })
   await Bun.sleep(100)
-  expect(calls().some(args => args[0] === 'stop')).toBe(false)
+  expect(calls().some(args => args[0] === 'stop' || args[0] === '--bg')).toBe(false)
   send({ type: 'state', thread: 'voice', busy: false })
   expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
-  const args = await until(() => calls().slice(calls().findIndex(args => args[0] === 'stop')).find(args => args[0] === '--bg'))
-  expect(args).not.toContain('--resume')
+  expect(await launched()).not.toContain('--resume')
 })
 
 test('a renew waits out background agents Claude still reports working, then starts over at the next idle', async () => {
-  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 999999, status: 'busy' }], relaunch: 60_000, fresh: () => true })
+  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: EXITED, status: 'busy' }], relaunch: 60_000, fresh: () => true })
   const { send } = await session('voice')
   send({ type: 'renew', thread: 'voice' })
   send({ type: 'state', thread: 'voice', busy: false })
   await Bun.sleep(150)
   expect(calls().some(args => args[0] === 'stop' || args[0] === '--bg')).toBe(false)
-  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid: 999999, status: 'idle' }]))
+  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid: EXITED, status: 'idle' }]))
   send({ type: 'state', thread: 'voice', busy: false })
   await until(() => calls().find(args => args[0] === 'stop'))
   expect(await launched()).not.toContain('--resume')
@@ -489,6 +490,14 @@ test('a fresh main thread still running when the hub starts is left to reconnect
   start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'idle' }], relaunch: 150, fresh: () => true })
   await Bun.sleep(50)
   await session('voice')
+  await Bun.sleep(250)
+  expect(calls().some(args => args[0] === '--bg')).toBe(false)
+})
+
+test('a fresh main thread whose newest session is still running but not yet saved is left to reconnect too', async () => {
+  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: '0a1b2c3d-0000-4000-8000-000000000009', pid: 43, name: 'hex', cwd: join(dir, 'hex') }], relaunch: 150, fresh: () => true })
+  await Bun.sleep(50)
+  await session('voice', '0a1b2c3d-0000-4000-8000-000000000009')
   await Bun.sleep(250)
   expect(calls().some(args => args[0] === '--bg')).toBe(false)
 })
