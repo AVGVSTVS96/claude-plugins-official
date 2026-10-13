@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { CallLog, type CallRecord } from './calls.ts'
+import { CallLog, ending, type CallRecord } from './calls.ts'
 
 function scratch() {
   const dir = mkdtempSync(join(tmpdir(), 'calls-'))
@@ -56,4 +56,13 @@ test('a list request from before a restart answers right away', async () => {
   const started = Date.now()
   await log.calls.changes(log.calls.version - 1, 5000)
   expect(Date.now() - started).toBeLessThan(100)
+})
+
+test('how a call ended: the caller, the voice service, or a dropped connection', () => {
+  expect(ending('close_requested', 'close-you-app')).toBe('you')
+  expect(ending('close_requested')).toBe('you')
+  expect(ending('remote_hangup')).toBe('you')
+  expect(ending('expired')).toBe('hex')
+  expect(ending('connection_lost')).toBe('dropped')
+  expect(ending('connection closed')).toBe('dropped')
 })

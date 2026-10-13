@@ -109,7 +109,7 @@
     if (!peer) return call().catch(error => hangUp(error.message))
     button.disabled = true
     say('ending…')
-    events.send(JSON.stringify({ type: 'session.close' }))
+    events.send(JSON.stringify({ type: 'session.close', event_id: 'close-you-web' }))
   }
 </script>
 </html>

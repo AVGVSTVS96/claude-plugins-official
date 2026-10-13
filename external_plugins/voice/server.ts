@@ -8,7 +8,7 @@ import { connect } from 'net'
 import { homedir } from 'os'
 import { join } from 'path'
 import { Call, transcript, type Speaker, type Task } from './call.ts'
-import { CallLog, type CallRecord, type Source } from './calls.ts'
+import { CallLog, ending, type CallRecord, type Ending, type Source } from './calls.ts'
 import page from './page.html' with { type: 'text' }
 
 const STATE_DIR = join(homedir(), '.claude', 'channels', 'voice')
@@ -77,7 +77,7 @@ type Dial = { greeting: string; from: Source }
 type Phone = Dial & { openai?: WebSocket; stream?: string; started?: true }
 
 let live: Live | undefined
-let last: Live | undefined
+let ended: string | undefined
 let hub: ReturnType<typeof connect> | undefined
 let seq = 0
 const dials = new Map<string, Dial>()
@@ -127,11 +127,12 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: 'task',
       description:
-        "Put a task on the board the voice model reads to answer status questions: running when it starts, then done or failed. After the call ends, it still updates that call's record.",
+        "Put a task on the board the voice model reads to answer status questions: running when it starts, then done or failed. After its call ends, pass that call's id to update its record.",
       inputSchema: {
         type: 'object',
         properties: {
           id: { type: 'string', description: 'A short name that stays the same across updates' },
+          call: { type: 'string', description: 'The call the task belongs to, once that call has ended; the live call by default' },
           state: { type: 'string', enum: ['running', 'done', 'failed'] },
           text: { type: 'string', description: 'What it is, and the result once it has one' },
         },
@@ -160,7 +161,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async request => {
   try {
     if (request.params.name === 'phone') return done(await dial(args.to))
     if (request.params.name === 'title') return done(name(args.call, args.title))
-    if (request.params.name === 'task') return done(await task(args.id, args.state as Task['state'], args.text))
+    if (request.params.name === 'task') return done(await task(args.id, args.state as Task['state'], args.text, args.call))
     if (!live) throw new Error('no call is live')
     switch (request.params.name) {
       case 'say':
@@ -191,26 +192,31 @@ function save(call: Live) {
   calls.save({ ...call.record, ...call.call.record() })
 }
 
-async function task(id: string, state: Task['state'], text: string) {
-  const call = live ?? last
+async function task(id: string, state: Task['state'], text: string, call = live?.id ?? ended) {
   if (!call) throw new Error('no call yet')
-  call.call.track({ id, state, text }, Date.now() - Date.parse(call.record.started))
-  save(call)
-  if (call !== live) return 'the call has ended, so only its record changed'
-  await send(call, 'session.thinking.append', call.call.board())
-  return 'board updated'
+  if (live?.id === call) {
+    live.call.track({ id, state, text }, Date.now() - Date.parse(live.record.started))
+    save(live)
+    await send(live, 'session.thinking.append', live.call.board())
+    return 'board updated'
+  }
+  const record = past(call)
+  calls.save({ ...record, tasks: [...record.tasks, { id, state, text, at: Date.now() - Date.parse(record.started) }] })
+  return 'that call has ended, so only its record changed'
 }
 
-function name(id: string, title: string) {
-  if (live?.id === id) {
+function name(call: string, title: string) {
+  if (live?.id === call) {
     live.record.title = title
     save(live)
-    return 'named'
-  }
+  } else calls.save({ ...past(call), title })
+  return 'named'
+}
+
+function past(id: string) {
   const record = calls.get(id)
   if (!record) throw new Error(`no call ${id}`)
-  calls.save({ ...record, title })
-  return 'named'
+  return record
 }
 
 function deliver(content: string, meta: Record<string, string>) {
@@ -232,18 +238,27 @@ function hear(call: Live, who: Speaker, event: { delta: string; start_ms: number
   while (call.rings[0] && call.rings[0].offset <= event.start_ms) ring(call, call.rings.shift()!)
 }
 
-function finish(call: Live, reason: string) {
+const ENDINGS: Record<Ending, string> = {
+  you: 'the caller hung up',
+  hex: 'the voice service ended it',
+  dropped: 'the connection dropped',
+  'no-connect': 'it never connected',
+  'no-answer': 'nobody answered',
+}
+
+function finish(call: Live, reason: string, by?: string) {
   if (live !== call) return
   live = undefined
-  last = call
+  ended = call.id
+  const end = ending(reason, by)
   for (const pending of call.pending.values()) pending.reject(new Error(`the call ended (${reason})`))
   for (const pending of call.rings) ring(call, pending)
   const rest = call.call.handOff()
-  call.record = { ...call.record, ended: new Date().toISOString(), end: reason }
+  call.record = { ...call.record, ended: new Date().toISOString(), end, reason }
   save(call)
   deliver(
-    ['The call ended. Name it with title.', ...(rest.length ? ['Last words:', transcript(rest)] : [])].join('\n'),
-    { call: call.id, ended: reason },
+    [`The call ended: ${ENDINGS[end]} (${reason}). Name it with title.`, ...(rest.length ? ['Last words:', transcript(rest)] : [])].join('\n'),
+    { call: call.id, ended: end, reason },
   )
   hub?.write(JSON.stringify({ type: 'renew', thread: THREAD }) + '\n')
   call.socket.close()
@@ -281,7 +296,7 @@ function follow(id: string, socket: WebSocket, from: Source, voice?: string, spe
       case 'session.output_audio.delta':
         return call.speak?.(event.delta)
       case 'session.closed':
-        return finish(call, event.reason ?? 'closed')
+        return finish(call, event.reason ?? 'closed', event.client_event_id)
     }
   }
   socket.onclose = () => finish(call, 'connection closed')
@@ -377,7 +392,7 @@ function hearPhone(twilio: Bun.ServerWebSocket<Phone>, raw: string | Buffer) {
 
 function hangUp(twilio: Bun.ServerWebSocket<Phone>) {
   const openai = twilio.data.openai
-  if (openai?.readyState === WebSocket.OPEN) openai.send(JSON.stringify({ type: 'session.close' }))
+  if (openai?.readyState === WebSocket.OPEN) openai.send(JSON.stringify({ type: 'session.close', event_id: 'close-you-phone' }))
 }
 
 async function start(request: Request) {
@@ -449,7 +464,7 @@ Bun.serve<Phone>({
     if (pathname === '/') return new Response(page, { headers: { 'content-type': 'text/html; charset=utf-8' } })
     if (pathname === '/session' && request.method === 'POST') return start(request)
     if (pathname === '/session' && request.method === 'DELETE') {
-      live?.socket.send(JSON.stringify({ type: 'session.close' }))
+      live?.socket.send(JSON.stringify({ type: 'session.close', event_id: 'close-you-app' }))
       return new Response(null, { status: 204 })
     }
     if (pathname === '/calls' && request.method === 'GET') return listCalls(new URL(request.url))

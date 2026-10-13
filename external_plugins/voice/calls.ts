@@ -4,11 +4,14 @@ import type { Moment, Speaker } from './call.ts'
 
 export type Source = 'app' | 'web' | 'phone-in' | 'phone-out'
 
+export type Ending = 'you' | 'hex' | 'dropped' | 'no-connect' | 'no-answer'
+
 export type CallRecord = {
   id: string
   started: string
   ended?: string
-  end?: string
+  end?: Ending
+  reason?: string
   from: Source
   voice?: string
   title?: string
@@ -20,6 +23,12 @@ export type CallRecord = {
 export type CallSummary = Omit<CallRecord, 'turns' | 'tasks'> & { seconds: number; tasks: number; preview: string }
 
 const ID = /^[\w-]+$/
+
+export function ending(reason: string, by?: string): Ending {
+  if (by?.startsWith('close-you') || reason === 'close_requested' || reason === 'remote_hangup') return 'you'
+  if (reason === 'expired' || reason === 'content') return 'hex'
+  return 'dropped'
+}
 
 export class CallLog {
   version = Date.now()

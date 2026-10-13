@@ -57,7 +57,7 @@ task change, and when it ends, so a crash keeps almost all of it.
 ```json
 {
   "id": "sess_...", "started": "2026-10-13T03:05:12.000Z", "ended": "...",
-  "end": "closed", "from": "app", "voice": "marin", "title": "Voice app history",
+  "end": "you", "reason": "close_requested", "from": "app", "voice": "marin", "title": "Voice app history",
   "claude": "c0f06426-...",
   "turns": [{ "who": "you", "at": 3400, "text": "Hello there" }],
   "tasks": [{ "id": "plan", "state": "running", "at": 61200, "text": "..." }]
@@ -65,11 +65,15 @@ task change, and when it ends, so a crash keeps almost all of it.
 ```
 
 `from` is where the call came from: `app`, `web` (the call page), `phone-in`
-or `phone-out`. `at` is milliseconds from the start of the call; `claude` is
+or `phone-out`. `end` is how it ended: `you` (the caller hung up), `hex` (the
+voice service ended it), `dropped`, `no-connect` or `no-answer`; `reason` is
+the raw reason. Every way the caller ends a call (the page, an app, the phone,
+`DELETE /session`) sends `session.close` with an `event_id` starting
+`close-you`. `at` is milliseconds from the start of the call; `claude` is
 the Claude Code session that did the work. Each speaker's words are joined
 the way live captions show them: a pause of over two seconds starts a new turn.
-Tasks often finish after the caller hangs up; `task` keeps updating that
-call's record until the next call starts.
+Tasks often finish after the caller hangs up; `task` with that call's id keeps
+updating its record.
 
 | Request | Answers |
 | --- | --- |
