@@ -58,7 +58,7 @@ job('bbbbbbbb-autofork', { state: 'blocked', detail: 'needs music', needs: 'Pick
   { at: asked, state: 'blocked', detail: 'needs music', text: 'Your call' },
   { at: ago(20), state: 'blocked', detail: 'still needs music', text: 'Still yours' },
 ])
-job('cccccccc-voiceapp', { state: 'working', detail: 'building', updatedAt: ago(1), fan: [{ id: 'agent1', kind: 'agent', label: 'Build the Tasks view' }, { id: 'old', kind: 'agent', label: 'Earlier', doneAt: 1 }, { id: 'sh', kind: 'shell', label: 'sleep' }] }, [
+job('cccccccc-voiceapp', { state: 'working', detail: 'building', updatedAt: ago(1), fan: [{ id: 'old', kind: 'agent', label: 'Earlier', doneAt: 1 }, { id: 'agent2', kind: 'agent', label: 'Check the server', doneAt: Date.now() - 60_000 }, { id: 'agent1', kind: 'agent', label: 'Build the Tasks view' }, { id: 'sh', kind: 'shell', label: 'sleep' }] }, [
   { at: ago(14), state: 'working', detail: '', text: '' },
 ])
 job('dddddddd-theo', { state: 'stopped', detail: 'stopped', updatedAt: ago(30) }, [{ at: ago(100), state: 'done', detail: 'clips posted', text: 'done' }])
@@ -96,16 +96,24 @@ test("each thread is a task from its session's own records, what needs you first
   expect(tasks.get('telegram:-1004422245734:65')).toMatchObject({ line: 'clips posted', lately: [] })
   expect(tasks.get('buzz:b1')).toBeUndefined()
   expect(tasks.summary).toEqual({ needs: 1, working: 1 })
-  expect(tasks.rows()[0]).not.toContainKeys(['needs', 'lately'])
+  expect(tasks.rows()[0]).not.toContainKeys(['needs', 'lately', 'steps'])
 })
 
-test("a working thread's line is its newest step, and each of its running agents shows its own", async () => {
+test("a working thread's line is its newest step, and each of its agents from this stretch of work shows its own, running ones first", async () => {
   const voiceapp = () => tasks.get('telegram:-1004422245734:2583')!
-  expect(voiceapp().agents).toEqual([{ id: 'agent1', label: 'Build the Tasks view' }])
+  expect(voiceapp().agents).toEqual([
+    { id: 'agent1', label: 'Build the Tasks view', state: 'working', steps: [] },
+    { id: 'agent2', label: 'Check the server', state: 'done', steps: [] },
+  ])
+  step(join(project, 'cccccccc-voiceapp.jsonl'), 'Read', { file_path: '/repo/src/tasks.ts' })
   step(join(project, 'cccccccc-voiceapp.jsonl'), 'Edit', { file_path: '/repo/src/tasks.ts', old_string: 'a', new_string: 'b' })
   await until(() => voiceapp().line === 'Editing tasks.ts')
+  expect(voiceapp().steps.map(step => step.text)).toEqual(['Editing tasks.ts', 'Reading tasks.ts'])
   step(join(project, 'cccccccc-voiceapp', 'subagents', 'agent-agent1.jsonl'), 'Read', { file_path: '/repo/README.md' })
   await until(() => voiceapp().agents[0].line === 'Reading README.md')
+  const row = tasks.rows().find(row => row.name === 'voiceapp')!
+  expect(row).not.toContainKey('steps')
+  expect(row.agents[0]).toEqual({ id: 'agent1', label: 'Build the Tasks view', state: 'working', line: 'Reading README.md' })
 })
 
 test('a change to a session wakes the list, and the counts move only when a count does', async () => {

@@ -5,9 +5,10 @@ import { followTranscript, headline, sizeOf } from './activity.ts'
 import { Changes } from './changes.ts'
 
 export type State = 'working' | 'needs' | 'done' | 'failed' | 'idle'
-export type Agent = { id: string; label: string; line?: string }
+export type Step = { at: string; text: string }
+export type Agent = { id: string; label: string; state: 'working' | 'done'; line?: string; steps: Step[] }
 export type Moment = { at: string; state: State; text: string }
-export type Row = Omit<HexTask, 'needs' | 'lately'>
+export type Row = Omit<HexTask, 'needs' | 'lately' | 'steps' | 'agents'> & { agents: Omit<Agent, 'steps'>[] }
 export type Summary = { needs: number; working: number }
 export type HexTask = {
   id: string
@@ -21,6 +22,7 @@ export type HexTask = {
   since: string
   at: string
   agents: Agent[]
+  steps: Step[]
   lately: Moment[]
   link?: string
 }
@@ -35,11 +37,12 @@ type Job = {
   fan?: { id: string; kind: string; label: string; doneAt?: number }[]
 }
 type Entry = { at: string; state: string; detail?: string; text?: string }
-type Follower = { stop: () => void; line?: string }
+type Follower = { stop: () => void; steps: Step[] }
 
 const CLAUDE = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude')
 const TAIL = 256 * 1024
 const LATELY = 5
+const STEPS = 12
 const KEEP = 7 * 24 * 60 * 60_000
 const ORDER: State[] = ['needs', 'working', 'done', 'failed', 'idle']
 const STATES: Record<string, State> = { working: 'working', blocked: 'needs', done: 'done', failed: 'failed' }
@@ -81,7 +84,7 @@ export class Tasks extends Changes {
   }
 
   rows(): Row[] {
-    return this.tasks.map(({ needs, lately, ...row }) => row)
+    return this.tasks.map(({ needs, lately, steps, agents, ...row }) => ({ ...row, agents: agents.map(({ steps, ...agent }) => agent) }))
   }
 
   close() {
@@ -191,14 +194,16 @@ export class Tasks extends Changes {
     const at = job?.updatedAt ?? timeline.at(-1)?.at ?? new Date(0).toISOString()
     const needs = state === 'needs' ? plain(job?.needs ?? job?.detail ?? '') || undefined : undefined
     const detail = job?.state === 'stopped' ? undefined : job?.detail && plain(job.detail)
-    const step = this.followers.get(thread.session ?? '')?.line
-    const line = (state === 'working' ? step : undefined) ?? needs ?? detail ?? lately[0]?.text ?? ''
-    const agents = (running ? (job?.fan ?? []) : [])
-      .filter(fan => fan.kind === 'agent' && !fan.doneAt)
-      .map(({ id, label }) => {
-        const line = this.followers.get(`${thread.session} ${id}`)?.line
-        return { id, label, ...(line && { line }) }
+    const since = state === 'working' || state === 'needs' ? (streak(timeline, job?.state) ?? at) : at
+    const steps = state === 'working' ? this.steps(thread.session!) : []
+    const line = steps[0]?.text ?? needs ?? detail ?? lately[0]?.text ?? ''
+    const agents = (state === 'working' ? (job?.fan ?? []) : [])
+      .filter(fan => fan.kind === 'agent' && (!fan.doneAt || fan.doneAt >= Date.parse(since)))
+      .map(({ id, label, doneAt }): Agent => {
+        const steps = this.steps(`${thread.session} ${id}`)
+        return { id, label, state: doneAt ? 'done' : 'working', ...(steps[0] && { line: steps[0].text }), steps }
       })
+      .sort((a, b) => Number(a.state === 'done') - Number(b.state === 'done'))
     return {
       id: `${thread.app}:${thread.id}`,
       app: thread.app,
@@ -208,15 +213,21 @@ export class Tasks extends Changes {
       state,
       line: oneLine(line),
       ...(needs && { needs }),
-      since: state === 'working' || state === 'needs' ? streak(timeline, job?.state) ?? at : at,
+      since,
       at,
       agents,
+      steps,
       lately: state === 'idle' ? [] : lately,
       ...(link(thread) && { link: link(thread) }),
     }
   }
 
-  // A working thread's transcript, and its running subagents', give its newest step.
+  // A followed transcript's newest steps, newest first.
+  private steps(key: string) {
+    return [...(this.followers.get(key)?.steps ?? [])].reverse()
+  }
+
+  // A working thread's transcript, and its subagents' from this stretch of work, give its steps.
   private follow(tasks: HexTask[]) {
     const wanted = new Map<string, string>()
     for (const task of tasks) {
@@ -233,12 +244,14 @@ export class Tasks extends Changes {
     }
     for (const [key, path] of wanted) {
       if (this.followers.has(key)) continue
-      const follower: Follower = { stop: () => {} }
+      const follower: Follower = { stop: () => {}, steps: [] }
       this.followers.set(key, follower)
-      follower.stop = followTranscript(path, Math.max(0, sizeOf(path) - TAIL), (_, updates) => {
+      follower.stop = followTranscript(path, Math.max(0, sizeOf(path) - TAIL), (entry, updates) => {
         for (const update of updates()) {
-          const line = headline(update)
-          if (line) follower.line = line
+          const text = headline(update)
+          if (!text || text === follower.steps.at(-1)?.text) continue
+          follower.steps.push({ at: entry.timestamp ?? new Date().toISOString(), text: oneLine(text) })
+          if (follower.steps.length > STEPS) follower.steps.shift()
         }
         this.schedule()
       })
