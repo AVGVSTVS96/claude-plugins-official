@@ -4,7 +4,7 @@ id: voice
 summary: Add a voice channel where OpenAI's gpt-live-1 holds a live call and hands every real request to the Claude Code session.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: voice.patch
-patch_sha256: e1c9b9631d15e7db79186330e4c35531d032999885ed7276f7cedb7bd7547669
+patch_sha256: c2f7b309962d1bfa91d1e2599fc971b81c50b5bb894d0e45980a07be0d0456b9
 ---
 
 ## Intent
@@ -44,6 +44,28 @@ plugin with no hub code.
   and streams the same way; any other call is rejected.
 - When the call closes, pending handoffs and the last words reach Claude
   with a "call ended" message.
+- Every call is saved as one record in `calls/` (turns, task changes, where
+  it came from, Claude's title), served at `GET /calls` (long-polled with
+  `?after=<version>`), `GET /calls/<id>` and `DELETE /calls/<id>`.
+- Agent activity (`activity.ts`): a running task can name who does it, and
+  the plugin follows that agent's Claude Code transcript as it is written
+  (a file change, never a timer), converts each new assistant line to ACP
+  `session/update` notifications with `@agentclientprotocol/claude-agent-acp`
+  (as the Buzz and T3 plugins do), and keeps one plain line per task for its
+  latest step. `task` takes `agent`, the agentId of the brain's own
+  background subagent. `send` (only in hex, when `HEX_HUB` is set) delivers a
+  message to another hex thread through that app's `state/<app>/hub.sock`
+  with a one-off `voice_task` meta tag, puts it on the board, follows the
+  thread's session from the line that carries the tag (and its background
+  agents' transcripts), and marks the task done when a turn ends with none of
+  those agents out, failed when it ends on an API error. A renewed session
+  appears in `threads.json` and is followed from its start. Each call's
+  session starts its own plugin, so on start the plugin resumes the last
+  day's unfinished sends from their records, reading each thread from the
+  start of its session to find the tagged message.
+- `GET /activity?after=<version>` long-polls the live call's tasks, most
+  recently changed first, each with its latest `line`, for the app's live
+  line.
 
 ## Invariants
 
@@ -57,8 +79,9 @@ plugin with no hub code.
 
 ## Verification
 
-`bun test external_plugins/voice` covers transcript order, late fragments and
-the board. `scripts/verify` builds `server.ts`. A live check: start
+`bun test external_plugins/voice` covers transcript order, late fragments,
+the board, call records, step lines, and following a sent message to done or
+failed through fake transcripts. `scripts/verify` builds `server.ts`. A live check: start
 `claude --channels plugin:voice@hex`, open the page, ask something that needs
 the backend, and see a `<channel source="voice">` handoff arrive and its
 `say` spoken.

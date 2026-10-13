@@ -33,10 +33,10 @@ index 0000000000000000000000000000000000000000..07fdedd6c4bc9e7072f8d860f7eadd42
 +}
 diff --git a/external_plugins/voice/README.md b/external_plugins/voice/README.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..ede1396720f9f275b3e98e3fc33f78c56f1f7b25
+index 0000000000000000000000000000000000000000..5a06ef1b38dc5a565b6700e23a263738af950fb6
 --- /dev/null
 +++ b/external_plugins/voice/README.md
-@@ -0,0 +1,143 @@
+@@ -0,0 +1,213 @@
 +# voice
 +
 +Live voice calls for Claude Code. OpenAI's `gpt-live-1` talks with you in real
@@ -84,7 +84,76 @@ index 0000000000000000000000000000000000000000..ede1396720f9f275b3e98e3fc33f78c5
 +   only says Claude's answers. Claude is a dispatcher with work in background
 +   subagents, so answering never stops running work; the board keeps the
 +   voice aware of it.
-+6. When the call ends, Claude gets the last words and a "call ended" message.
++6. When the call ends, Claude gets the last words and a "call ended" message,
++   and names the call with `title`.
++
++## Call history
++
++Every call is saved as one JSON file in `~/.claude/channels/voice/calls/`,
++named by its `gpt-live-1` session id: when it starts, after every handoff and
++task change, and when it ends, so a crash keeps almost all of it.
++
++```json
++{
++  "id": "sess_...", "started": "2026-10-13T03:05:12.000Z", "ended": "...",
++  "end": "you", "reason": "close_requested", "from": "app", "voice": "marin", "title": "Voice app history",
++  "claude": "c0f06426-...",
++  "turns": [{ "who": "you", "at": 3400, "text": "Hello there" }],
++  "tasks": [{ "id": "plan", "state": "running", "at": 61200, "text": "..." }]
++}
++```
++
++`from` is where the call came from: `app`, `web` (the call page), `phone-in`
++or `phone-out`. `end` is how it ended: `you` (the caller hung up), `hex` (hex
++hung up), `dropped`, `expired`, `no-connect`, `no-answer` or `busy`; `reason` is
++the raw reason. Every way the caller ends a call (the page, an app, the phone,
++`DELETE /session`) sends `session.close` with an `event_id` starting
++`close-you`. `at` is milliseconds from the start of the call; `claude` is
++the Claude Code session that did the work. Each speaker's words are joined
++the way live captions show them: a pause of over two seconds starts a new turn.
++Tasks often finish after the caller hangs up; `task` with that call's id keeps
++updating its record.
++
++| Request | Answers |
++| --- | --- |
++| `GET /calls` | `{ version, live, calls }`, newest first, each without its turns, with `seconds`, how many `tasks` and a `preview` of the caller's first words |
++| `GET /calls?after=<version>` | the same, once anything has changed since that version (or after 25 seconds) |
++| `GET /calls/<id>` | one whole call |
++| `DELETE /calls/<id>` | deletes a finished call |
++
++## Agent activity
++
++While a call is live, the app can show one line of what hex's agents are
++doing: "Reading server.ts", "Started an agent: tune the glide", or the agent's
++own words. Each line comes from the agent's Claude Code transcript, read as
++Claude Code writes it and turned into ACP `session/update` notifications (the
++same conversion hex uses for Buzz and T3 Code), then into a few plain words.
++
++```
++ Claude's background subagent ── task(id, running, text, agent) ─┐
++ another hex thread ────────────── send(thread, about, text) ─────┤
++                                                                  ▼
++                     its transcript (.jsonl) ── ACP updates ── one line per task
++                                                                  │
++                                         GET /activity?after=<version>
++                                                                  ▼
++                                                     the app's live line
++```
++
++- `task` with `agent` (the agentId the Agent tool returned) follows that
++  subagent until the task is done or failed.
++- `send` (in hex) delivers a message to a Telegram topic, or a Discord, Buzz
++  or T3 Code thread, puts it on the board, follows that thread's session from
++  the moment it takes the message in, background agents included, and marks
++  it done when a turn ends with none of them still out (failed if the turn
++  ends on an API error). It keeps updating the call's record after you hang
++  up: the plugin that starts with the next session picks unfinished sends
++  from the last day back up, reading their threads from the start.
++
++| Request | Answers |
++| --- | --- |
++| `GET /activity` | `{ version, call, tasks }`: the live call's tasks, most recently changed first, each with its latest `line` |
++| `GET /activity?after=<version>` | the same, once anything has changed since that version (or after 25 seconds) |
 +
 +## Setup
 +
@@ -132,7 +201,8 @@ index 0000000000000000000000000000000000000000..ede1396720f9f275b3e98e3fc33f78c5
 +The page listens on `127.0.0.1` only, and the API key never leaves the plugin.
 +
 +An app can hold the same call: POST its WebRTC offer to `/session` as
-+`{ "sdp": "...", "voice": "marin" }` (the voice is optional), and it gets
++`{ "sdp": "...", "voice": "marin", "from": "app" }` (the voice is optional; `from`
++marks the call as the app's in the call history), and it gets
 +OpenAI's session back, with the answer SDP in `transport.sdp`. Its data
 +channel may send `session.input_audio.mute`, `session.input_audio.unmute` and
 +`session.close`; `DELETE /session` ends the call from outside it.
@@ -180,6 +250,403 @@ index 0000000000000000000000000000000000000000..ede1396720f9f275b3e98e3fc33f78c5
 +- Custom voices need OpenAI sales approval. Built-in voices work with any key.
 +- Voice costs $0.05 a minute, billed per second, on top of Claude usage.
 +- One call at a time. A new call ends the previous one.
+diff --git a/external_plugins/voice/activity.test.ts b/external_plugins/voice/activity.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..c4ee7dd3bbf8d1fb9768c04564b9d21c0996f227
+--- /dev/null
++++ b/external_plugins/voice/activity.test.ts
+@@ -0,0 +1,153 @@
++import { afterAll, expect, test } from 'bun:test'
++import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
++import { tmpdir } from 'os'
++import { join } from 'path'
++
++const home = mkdtempSync(join(tmpdir(), 'voice-activity-'))
++process.env.CLAUDE_CONFIG_DIR = join(home, 'claude')
++const { findThread, followAgent, followThread, followTranscript, headline } = await import('./activity.ts')
++afterAll(() => rmSync(home, { recursive: true }))
++
++const hex = '/home/someone/hex'
++const project = join(home, 'claude', 'projects', '-home-someone-hex')
++const state = join(home, 'state')
++
++function tool(name: string, input: object) {
++  return { type: 'assistant', message: { id: `msg_${name}`, content: [{ type: 'tool_use', id: `toolu_${name}_${Math.random()}`, name, input }] } }
++}
++const said = (text: string, extra = {}) => ({ type: 'assistant', message: { id: 'msg_text', content: [{ type: 'text', text }] }, ...extra })
++const ended = { type: 'system', subtype: 'turn_duration' }
++
++function write(path: string, ...entries: object[]) {
++  appendFileSync(path, entries.map(entry => JSON.stringify(entry) + '\n').join(''))
++}
++
++async function until(check: () => boolean) {
++  for (let i = 0; i < 100 && !check(); i++) await Bun.sleep(20)
++  expect(check()).toBe(true)
++}
++
++function threads(app: string, all: object) {
++  mkdirSync(join(state, app), { recursive: true })
++  writeFileSync(join(state, app, 'threads.json'), JSON.stringify(all))
++}
++
++test('each kind of step reads as a few plain words', () => {
++  const steps = [
++    tool('Bash', { command: 'git log --oneline', description: 'Show recent commits' }),
++    tool('Bash', { command: 'uptime\nfree -g' }),
++    tool('Read', { file_path: '/home/someone/hex/projects/notes/transcript.md' }),
++    tool('Edit', { file_path: '/repo/src/live-screen.tsx', old_string: 'a', new_string: 'b' }),
++    tool('Write', { file_path: '/repo/README.md', content: 'hi' }),
++    tool('Grep', { pattern: 'activity' }),
++    tool('WebSearch', { query: 'expo sdk 57 widgets' }),
++    tool('WebFetch', { url: 'https://docs.expo.dev/versions/v57.0.0/', prompt: 'read' }),
++    tool('Agent', { description: 'Fresh read of the transcript', prompt: 'go' }),
++    tool('mcp__plugin_telegram_telegram__reply', { text: 'done' }),
++    tool('mcp__claude_ai_Gmail__search_threads', { query: 'invoice' }),
++    tool('ToolSearch', { query: 'select:Monitor' }),
++  ]
++  const path = join(home, 'steps.jsonl')
++  write(path, ...steps)
++  const lines: (string | undefined)[] = []
++  followTranscript(path, true, (_: unknown, updates: () => any[]) => lines.push(...updates().map(headline)))()
++  expect(lines).toEqual([
++    'Show recent commits',
++    'Running uptime',
++    'Reading transcript.md',
++    'Editing live-screen.tsx',
++    'Writing README.md',
++    'Searching for activity',
++    'Searching the web for expo sdk 57 widgets',
++    'Reading docs.expo.dev',
++    'Started an agent: Fresh read of the transcript',
++    'Telegram: reply',
++    'Gmail: search threads',
++    undefined,
++  ])
++})
++
++test("an agent's own words read as their first line, without markdown, and its plan as the step in progress", () => {
++  expect(headline({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '**Found it.** The hub drops\nthe rest' } })).toBe('Found it. The hub drops')
++  expect(headline({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '  \n' } })).toBeUndefined()
++  expect(
++    headline({
++      sessionUpdate: 'plan',
++      entries: [
++        { content: 'Read the hub', status: 'completed', priority: 'medium' },
++        { content: 'Wire the line', status: 'in_progress', priority: 'medium' },
++      ],
++    }),
++  ).toBe('Wire the line')
++})
++
++test("a background subagent's steps come from its transcript as it writes them", async () => {
++  const dir = join(project, 'brain-session', 'subagents')
++  mkdirSync(dir, { recursive: true })
++  const path = join(dir, 'agent-a1b2.jsonl')
++  write(path, { type: 'user', isSidechain: true, message: { role: 'user', content: 'You are a subagent.' } }, tool('Read', { file_path: '/x/plan.md' }))
++  const lines: string[] = []
++  const stop = followAgent('a1b2', 'brain-session', step => step.line && lines.push(step.line))!
++  expect(lines).toEqual(['Reading plan.md'])
++  write(path, said('Read it; checking the hub next.'))
++  await until(() => lines.length === 2)
++  expect(lines[1]).toBe('Read it; checking the hub next.')
++  stop()
++  expect(followAgent('nobody', 'brain-session', () => {})).toBeUndefined()
++  expect(followAgent('../x', 'brain-session', () => {})).toBeUndefined()
++})
++
++test('a thread is found by its id or its name, in any app but voice', () => {
++  threads('telegram', { '-100:452': { name: 'voiceapp', session: 's1' } })
++  threads('voice', { voice: { name: 'voice', session: 'v' } })
++  threads('t3', { 't3-id': { name: 'commonplace', cwd: '/home/someone/Developer/commonplace' } })
++  expect(findThread(state, 'VoiceApp')).toMatchObject({ app: 'telegram', id: '-100:452', name: 'voiceapp' })
++  expect(findThread(state, 't3-id')).toMatchObject({ app: 't3', cwd: '/home/someone/Developer/commonplace' })
++  expect(findThread(state, 'voice')).toBeUndefined()
++})
++
++test("a message sent to a thread shows that thread's steps once it takes the message in, its agents' too, and is done when a turn ends with no agent out", async () => {
++  mkdirSync(project, { recursive: true })
++  const path = join(project, 's1.jsonl')
++  write(path, tool('Bash', { command: 'ls', description: 'Earlier work' }), ended)
++  const steps: object[] = []
++  const stop = followThread(findThread(state, 'voiceapp')!, hex, 'tag42', false, step => steps.push(step))
++  write(path, tool('Bash', { command: 'ls', description: 'Work on something else' }))
++  write(path, { type: 'user', origin: { kind: 'channel' }, message: { role: 'user', content: '<channel source="telegram" user="hex voice" voice_task="tag42">the orb bounces</channel>' } })
++  write(path, tool('Agent', { description: 'Tune the glide', prompt: 'go' }))
++  write(path, { type: 'user', message: { role: 'user', content: [] }, toolUseResult: { isAsync: true, agentId: 'agent7' } }, ended)
++  await until(() => steps.length === 1)
++  expect(steps).toEqual([{ line: 'Started an agent: Tune the glide' }])
++
++  const agent = join(project, 's1', 'subagents', 'agent-agent7.jsonl')
++  mkdirSync(join(project, 's1', 'subagents'), { recursive: true })
++  write(agent, tool('Edit', { file_path: '/repo/src/motion.ts', old_string: 'a', new_string: 'b' }))
++  await until(() => steps.length === 2)
++  expect(steps[1]).toEqual({ line: 'Editing motion.ts' })
++
++  write(path, { type: 'user', origin: { kind: 'task-notification' }, message: { role: 'user', content: '<task-notification>\n<task-id>agent7</task-id>\n<status>completed</status>' } })
++  write(path, said('The glide no longer overshoots.'), ended)
++  await until(() => steps.length === 4)
++  expect(steps.slice(2)).toEqual([{ line: 'The glide no longer overshoots.' }, { end: 'done' }])
++  stop()
++})
++
++test("a thread's new session is followed from its start, and a turn that ends on an API error fails", async () => {
++  threads('discord', { d1: { name: 'Latest Claude', session: 'old' } })
++  const steps: object[] = []
++  followThread(findThread(state, 'latest claude')!, hex, 'tag7', false, step => steps.push(step))
++  write(join(project, 'new.jsonl'), { type: 'user', origin: { kind: 'channel' }, message: { role: 'user', content: 'voice_task="tag7"' } })
++  threads('discord', { d1: { name: 'Latest Claude', session: 'new' } })
++  await Bun.sleep(50)
++  write(join(project, 'new.jsonl'), said("You've hit your weekly limit", { isApiErrorMessage: true }), ended)
++  await until(() => steps.length === 2)
++  expect(steps).toEqual([{ line: "You've hit your weekly limit" }, { end: 'failed' }])
++})
++
++test('following a message sent before a restart reads its thread from the start, and ends at once when the thread already finished', () => {
++  threads('buzz', { b1: { name: 'Context check', session: 'done-already' } })
++  write(join(project, 'done-already.jsonl'), { type: 'user', origin: { kind: 'channel' }, message: { role: 'user', content: 'voice_task="call:id"' } }, said('All set.'), ended)
++  const steps: object[] = []
++  followThread(findThread(state, 'context check')!, hex, 'call:id', true, step => steps.push(step))
++  expect(steps).toEqual([{ line: 'All set.' }, { end: 'done' }])
++})
+diff --git a/external_plugins/voice/activity.ts b/external_plugins/voice/activity.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..5dcd8644eaa2c824e6f575acc741297d61c4dff4
+--- /dev/null
++++ b/external_plugins/voice/activity.ts
+@@ -0,0 +1,232 @@
++import { closeSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, statSync, watch } from 'fs'
++import { homedir } from 'os'
++import { basename, dirname, join } from 'path'
++import { toAcpNotifications } from '@agentclientprotocol/claude-agent-acp'
++import type { SessionNotification, ToolCall } from '@agentclientprotocol/sdk'
++
++export type Update = SessionNotification['update']
++export type Step = { line?: string; end?: 'done' | 'failed' }
++export type Thread = { app: string; id: string; name: string; cwd?: string; threads: string }
++
++const PROJECTS = join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'projects')
++const client = { sessionUpdate: async () => {} } as unknown as Parameters<typeof toAcpNotifications>[4]
++const logger = { log: () => {}, error: (...args: unknown[]) => process.stderr.write(`voice: activity: ${args.join(' ')}\n`) }
++const ID = /^[\w-]+$/
++
++// What an agent is doing right now, in a few words, from one ACP session/update.
++export function headline(update: Update): string | undefined {
++  switch (update.sessionUpdate) {
++    case 'tool_call':
++      return step(update)
++    case 'agent_message_chunk':
++      return update.content.type === 'text' ? firstLine(update.content.text) : undefined
++    case 'agent_thought_chunk':
++      return 'Thinking'
++    case 'plan':
++      return update.entries.find(entry => entry.status === 'in_progress')?.content
++  }
++}
++
++function step({ title, kind, rawInput, locations, _meta }: ToolCall) {
++  const input = (rawInput ?? {}) as Record<string, string | undefined>
++  const tool: string = (_meta as any)?.claudeCode?.toolName ?? title
++  const file = locations?.[0]?.path ?? input.file_path ?? input.notebook_path
++  switch (kind) {
++    case 'execute':
++      return input.description || `Running ${firstLine(input.command ?? title)}`
++    case 'read':
++      return file ? `Reading ${basename(file)}` : title
++    case 'edit':
++      return `${tool === 'Write' ? 'Writing' : 'Editing'} ${basename(file ?? title)}`
++    case 'search':
++      return input.pattern ? `Searching for ${input.pattern}` : title
++    case 'fetch':
++      return input.query ? `Searching the web for ${input.query}` : input.url ? `Reading ${new URL(input.url).host}` : title
++    case 'think':
++      return input.description && `Started an agent: ${input.description}`
++  }
++  const mcp = tool.match(/^mcp__(.+?)__(.+)$/)
++  if (mcp) return `${mcp[1].split('_').at(-1)!.replace(/^./, letter => letter.toUpperCase())}: ${mcp[2].replaceAll('_', ' ')}`
++  if (input.skill) return `Using the ${input.skill} skill`
++  return title === tool ? undefined : title
++}
++
++function firstLine(text: string) {
++  const line = text
++    .trim()
++    .split('\n')[0]
++    .replace(/^(#+|[-*>]|\d+\.)\s+/, '')
++    .replace(/\*\*|__|`/g, '')
++    .trim()
++  return line ? line.slice(0, 160) : undefined
++}
++
++// Follows one Claude Code transcript as Claude Code writes it (a file change, not a timer):
++// every new line, and the ACP updates its assistant content makes, converted when asked for.
++export function followTranscript(path: string, fromStart: boolean, onEntry: (entry: any, updates: () => Update[]) => void) {
++  const tools = {}
++  const tasks = new Map()
++  let offset = fromStart ? 0 : sizeOf(path)
++  let rest = Buffer.alloc(0)
++  let closed = false
++  mkdirSync(dirname(path), { recursive: true })
++  const watcher = watch(dirname(path), (_, file) => file === basename(path) && read())
++  read()
++
++  function read() {
++    if (closed) return
++    let fd
++    try {
++      fd = openSync(path, 'r')
++    } catch {
++      return
++    }
++    try {
++      const size = fstatSync(fd).size
++      if (size <= offset) return
++      const chunk = Buffer.alloc(size - offset)
++      readSync(fd, chunk, 0, chunk.length, offset)
++      offset = size
++      const data = Buffer.concat([rest, chunk])
++      const last = data.lastIndexOf(10)
++      rest = data.subarray(last + 1)
++      if (last >= 0) for (const line of data.subarray(0, last).toString('utf8').split('\n')) if (!closed) take(line)
++    } finally {
++      closeSync(fd)
++    }
++  }
++
++  function take(line: string) {
++    let entry
++    try {
++      entry = JSON.parse(line)
++    } catch {
++      return
++    }
++    const content = entry.type === 'assistant' ? entry.message?.content : undefined
++    onEntry(entry, () =>
++      content
++        ? toAcpNotifications(content, 'assistant', entry.sessionId ?? '', tools, client, logger, {
++            registerHooks: false,
++            replay: true,
++            cwd: entry.cwd ?? '',
++            taskState: tasks,
++            messageId: entry.message.id,
++          }).map(notification => notification.update)
++        : [],
++    )
++  }
++
++  return () => {
++    closed = true
++    watcher.close()
++  }
++}
++
++// A background subagent's live steps, by the agentId its Agent call returned. Its own session's
++// subagents come first; any session's will do.
++export function followAgent(agent: string, session: string | undefined, onStep: (step: Step) => void) {
++  if (!ID.test(agent)) return
++  const patterns = [...(session && ID.test(session) ? [`*/${session}/subagents/agent-${agent}.jsonl`] : []), `*/*/subagents/agent-${agent}.jsonl`]
++  for (const pattern of patterns)
++    for (const path of new Bun.Glob(pattern).scanSync({ cwd: PROJECTS, absolute: true }))
++      return followTranscript(path, true, (_, updates) => lines(updates(), onStep))
++}
++
++// hex threads (Telegram topics, Discord, Buzz and T3 Code threads), from each app's threads.json.
++export function findThread(state: string, wanted: string): Thread | undefined {
++  const lower = wanted.toLowerCase()
++  for (const app of readdirSync(state)) {
++    if (app === 'voice') continue
++    const threads = join(state, app, 'threads.json')
++    const all: Record<string, { name?: string; cwd?: string }> = readJson(threads) ?? {}
++    const id = all[wanted] ? wanted : Object.keys(all).find(id => all[id].name?.toLowerCase() === lower)
++    if (id) return { app, id, name: all[id].name ?? id, cwd: all[id].cwd, threads }
++  }
++}
++
++// One message sent to a hex thread, followed through its session's transcript: it waits until the
++// session takes in the message carrying `tag`, shows each step after that (its background agents'
++// steps too), and ends when a turn ends with none of those agents still out. A new session for the
++// thread (a renewal or a restart) shows up in threads.json and is followed from its start; so is
++// the first one when following resumes a message sent earlier.
++export function followThread(thread: Thread, hexDir: string, tag: string, resumed: boolean, onStep: (step: Step) => void) {
++  const agents = new Map<string, () => void>()
++  let session: string | undefined
++  let project = ''
++  let stopSession = () => {}
++  let picked = false
++  let failed = false
++  let ended = false
++
++  const stopState = watchFile(thread.threads, locate)
++  locate()
++
++  function locate() {
++    const next = readJson(thread.threads)?.[thread.id]?.session
++    if (ended || !next || next === session || !ID.test(next)) return
++    const fresh = resumed || session !== undefined
++    stopSession()
++    session = next
++    project = join(PROJECTS, (thread.cwd ?? hexDir).replace(/[^a-zA-Z0-9]/g, '-'))
++    stopSession = followTranscript(join(project, `${session}.jsonl`), fresh, take)
++  }
++
++  function take(entry: any, updates: () => Update[]) {
++    if (!picked) {
++      const content = entry.message?.content
++      picked = entry.type === 'user' && entry.origin?.kind === 'channel' && (typeof content === 'string' ? content : JSON.stringify(content)).includes(tag)
++      return
++    }
++    const launched = entry.toolUseResult?.isAsync && entry.toolUseResult.agentId
++    if (launched && ID.test(launched) && !agents.has(launched))
++      agents.set(launched, followTranscript(join(project, session!, 'subagents', `agent-${launched}.jsonl`), true, (_, updates) => lines(updates(), onStep)))
++    const back = entry.origin?.kind === 'task-notification' && JSON.stringify(entry.message?.content).match(/<task-id>([\w-]+)<\/task-id>/)?.[1]
++    if (back) {
++      agents.get(back)?.()
++      agents.delete(back)
++    }
++    if (entry.type === 'assistant') failed = entry.isApiErrorMessage === true
++    lines(updates(), onStep)
++    if (entry.type === 'system' && entry.subtype === 'turn_duration' && !agents.size) {
++      close()
++      onStep({ end: failed ? 'failed' : 'done' })
++    }
++  }
++
++  function close() {
++    ended = true
++    stopState()
++    stopSession()
++    for (const stop of agents.values()) stop()
++    agents.clear()
++  }
++
++  return close
++}
++
++function lines(updates: Update[], onStep: (step: Step) => void) {
++  for (const update of updates) {
++    const line = headline(update)
++    if (line) onStep({ line })
++  }
++}
++
++function watchFile(path: string, changed: () => void) {
++  const watcher = watch(dirname(path), (_, file) => file === basename(path) && changed())
++  return () => watcher.close()
++}
++
++function readJson(path: string) {
++  try {
++    return JSON.parse(readFileSync(path, 'utf8'))
++  } catch {}
++}
++
++function sizeOf(path: string) {
++  try {
++    return statSync(path).size
++  } catch {
++    return 0
++  }
++}
 diff --git a/external_plugins/voice/bot.ts b/external_plugins/voice/bot.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..007421169754f227c723ca5a22ca49a2f7237eaa
@@ -210,10 +677,10 @@ index 0000000000000000000000000000000000000000..007421169754f227c723ca5a22ca49a2
 +})
 diff --git a/external_plugins/voice/bun.lock b/external_plugins/voice/bun.lock
 new file mode 100644
-index 0000000000000000000000000000000000000000..fa671dec5887946cb4acf6545fea0741c1180c40
+index 0000000000000000000000000000000000000000..c93a7a533bf379bd6b60b1f04ab67be3a521d768
 --- /dev/null
 +++ b/external_plugins/voice/bun.lock
-@@ -0,0 +1,214 @@
+@@ -0,0 +1,256 @@
 +{
 +  "lockfileVersion": 2,
 +  "configVersion": 1,
@@ -221,6 +688,8 @@ index 0000000000000000000000000000000000000000..fa671dec5887946cb4acf6545fea0741
 +    "": {
 +      "name": "claude-channel-voice",
 +      "dependencies": {
++        "@agentclientprotocol/claude-agent-acp": "^0.86.0",
++        "@agentclientprotocol/sdk": "^1.7.0",
 +        "@modelcontextprotocol/sdk": "^1.32.1",
 +      },
 +      "devDependencies": {
@@ -229,9 +698,37 @@ index 0000000000000000000000000000000000000000..fa671dec5887946cb4acf6545fea0741
 +    },
 +  },
 +  "packages": {
++    "@agentclientprotocol/claude-agent-acp": ["@agentclientprotocol/claude-agent-acp@0.86.0", "", { "dependencies": { "@agentclientprotocol/sdk": "1.7.0", "@anthropic-ai/claude-agent-sdk": "0.3.287", "diff": "9.0.0", "zod": "4.6.5" }, "bin": { "claude-agent-acp": "dist/index.js" } }, "sha512-TrdQZvT8YT3eOzMZngatm5GJi93dR4/bHoDXRd+8TxfY1cVYtJFK3KApIr6aDreti/Xn15rGCqX7OxxOV/sM4Q=="],
++
++    "@agentclientprotocol/sdk": ["@agentclientprotocol/sdk@1.8.0", "", { "peerDependencies": { "zod": "^3.25.0 || ^4.0.0" } }, "sha512-fbP7qHZsFyTJVT0/RPrcWJ8An26qLXHEuGCHHEKDyxD1xpXV+Ejyh2LAE6vBAFePkpVjZeeohnbgvuEhZ7wLMg=="],
++
++    "@anthropic-ai/claude-agent-sdk": ["@anthropic-ai/claude-agent-sdk@0.3.287", "", { "optionalDependencies": { "@anthropic-ai/claude-agent-sdk-darwin-arm64": "0.3.287", "@anthropic-ai/claude-agent-sdk-darwin-x64": "0.3.287", "@anthropic-ai/claude-agent-sdk-linux-arm64": "0.3.287", "@anthropic-ai/claude-agent-sdk-linux-arm64-musl": "0.3.287", "@anthropic-ai/claude-agent-sdk-linux-x64": "0.3.287", "@anthropic-ai/claude-agent-sdk-linux-x64-musl": "0.3.287", "@anthropic-ai/claude-agent-sdk-win32-arm64": "0.3.287", "@anthropic-ai/claude-agent-sdk-win32-x64": "0.3.287" }, "peerDependencies": { "@anthropic-ai/sdk": ">=0.93.0", "@modelcontextprotocol/sdk": "^1.29.0", "zod": "^4.0.0" } }, "sha512-DrYUMzmSVfL1VciNDo/9BhxiVnTsSCKVzxLHB3+NvvRiyN4pfWTKFrUzQesPnWswds9x1Ir10Gi6GRsnjT0UkA=="],
++
++    "@anthropic-ai/claude-agent-sdk-darwin-arm64": ["@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.287", "", { "os": "darwin", "cpu": "arm64" }, "sha512-Ic9GCrPBmMroLi7q+IeQQdtVDQLOaaSxkH1NzPsSRZxSvFcMH6M7zz/LahzlLQTdDyebcyMLk4aBXl4H8NnbFw=="],
++
++    "@anthropic-ai/claude-agent-sdk-darwin-x64": ["@anthropic-ai/claude-agent-sdk-darwin-x64@0.3.287", "", { "os": "darwin", "cpu": "x64" }, "sha512-7BxpyKMkzLQxCdq4OEnrjtLRC3O69l0LSBZYyUPXPTCFTnvzqpELjPRUssyW9auKEtVoh8eTySwC2rwGzuMUqA=="],
++
++    "@anthropic-ai/claude-agent-sdk-linux-arm64": ["@anthropic-ai/claude-agent-sdk-linux-arm64@0.3.287", "", { "os": "linux", "cpu": "arm64" }, "sha512-CWqO5p3YSBmpi/qHywul0re6fjljbDMZVj45PouNb1Qqws2Wi2h/Wp/ojOnfQAmq4m29pV2qgDnN2UtjaOobKA=="],
++
++    "@anthropic-ai/claude-agent-sdk-linux-arm64-musl": ["@anthropic-ai/claude-agent-sdk-linux-arm64-musl@0.3.287", "", { "os": "linux", "cpu": "arm64" }, "sha512-2WuRGYigs03B0Z7EnG72Ogiz1cMWIAyTwmV+DpNelhFeKb9VUevLkVRvS9nVQvyin/sO3FCBHV8dYsgZEwpmvQ=="],
++
++    "@anthropic-ai/claude-agent-sdk-linux-x64": ["@anthropic-ai/claude-agent-sdk-linux-x64@0.3.287", "", { "os": "linux", "cpu": "x64" }, "sha512-/6Zw5nym4xfc2eFGaIrS7dt7JoBgASsGUnLWMoPV4M1hGH0tOSPzpixfb4OWO6r9iw9Nn/Zk5Ke1KRuMuja2+Q=="],
++
++    "@anthropic-ai/claude-agent-sdk-linux-x64-musl": ["@anthropic-ai/claude-agent-sdk-linux-x64-musl@0.3.287", "", { "os": "linux", "cpu": "x64" }, "sha512-be7lBO3WihsGbGQbMCAowxmt8vqGgmUo2HkbBee8jrch04LG4LCRj6Ry/gHtYSTle30WAnoyqCLsPHFj064waw=="],
++
++    "@anthropic-ai/claude-agent-sdk-win32-arm64": ["@anthropic-ai/claude-agent-sdk-win32-arm64@0.3.287", "", { "os": "win32", "cpu": "arm64" }, "sha512-6AdDoLnnVG9aRrWoGVQjS3i4+hceCGFEHVPkMBzbVFs76G1WKlY/ZMnELu3X+ZE5QJFT3j4qqmdJ0y+QbrycEg=="],
++
++    "@anthropic-ai/claude-agent-sdk-win32-x64": ["@anthropic-ai/claude-agent-sdk-win32-x64@0.3.287", "", { "os": "win32", "cpu": "x64" }, "sha512-fczDcWG2Hu+nYQgxeQEsGn5l+3M06RpJXysIsu/BmHTPl7UceTfTpSYr6O/9GU/sNhU0CADJaIIZNwQTfK0DWw=="],
++
++    "@anthropic-ai/sdk": ["@anthropic-ai/sdk@0.133.0", "", { "dependencies": { "json-schema-to-ts": "^3.1.1", "standardwebhooks": "^1.0.0" }, "peerDependencies": { "zod": "^3.25.0 || ^4.0.0" }, "optionalPeers": ["zod"], "bin": { "anthropic-ai-sdk": "bin/cli" } }, "sha512-jlqUN8p8ESTJj+GJnA4KjzbEfF1waEoGzRT8jwytlYGFFgv+/DUQOxlYGvYw10UzhD1kwLqYzxvA3FrTB2YWuQ=="],
++
++    "@babel/runtime": ["@babel/runtime@7.29.10", "", {}, "sha512-NpugTzbKgGrNe45Ui32cN8vCFFMxVtP/9rtfwv0nP5FRDAjvYBxJcLVpYA9mr1jxP6cnIT7x9LUzuDTbWYYNRA=="],
++
 +    "@hono/node-server": ["@hono/node-server@2.1.4", "", { "peerDependencies": { "hono": "^4 || ^5.0.0-0" } }, "sha512-2g1qeHl4BduwDn6L8nkAvDrPUWPMlkQ//a5NhP/zIyaXKMjZNRV+cG9Csu+BiJFf6+68pqzjf4Hi5sJGKHuS1g=="],
 +
 +    "@modelcontextprotocol/sdk": ["@modelcontextprotocol/sdk@1.32.1", "", { "dependencies": { "@hono/node-server": "^1.19.9 || ^2.0.5", "ajv": "^8.17.1", "ajv-formats": "^3.0.1", "content-type": "^1.0.5", "cors": "^2.8.5", "cross-spawn": "^7.0.5", "eventsource": "^3.0.2", "eventsource-parser": "^3.0.0", "express": "^5.2.1", "express-rate-limit": "^8.2.1", "hono": "^4.11.4", "jose": "^6.1.3", "json-schema-typed": "^8.0.2", "pkce-challenge": "^5.0.0", "raw-body": "^3.0.0", "zod": "^3.25 || ^4.0", "zod-to-json-schema": "^3.25.1" }, "peerDependencies": { "@cfworker/json-schema": "^4.1.1" }, "optionalPeers": ["@cfworker/json-schema"] }, "sha512-2DdE+SJDtzLEEWzY1ZjY7Q+VcPhcV1KisD3zI4u0XZyktsjHum1mwbMI+JaulUBi2OZk+KJAi2uPXzxichPkdw=="],
++
++    "@stablelib/base64": ["@stablelib/base64@1.0.1", "", {}, "sha512-1bnPQqSxSuc3Ii6MhBysoWCg58j97aUjuCSZrGSmDxNqtytIi0k8utUenAwTZN4V5mXXYGsVUI9zeBqy+jBOSQ=="],
 +
 +    "@types/bun": ["@types/bun@1.4.2", "", { "dependencies": { "bun-types": "1.4.2" } }, "sha512-GimotNn7+ZV0uVArItBbriZsR1oNf0+WTzPkdcFrzShI7k2norL0uzEaJT8T33dWr7O/c9ZDuAFQrctKCi72oQ=="],
 +
@@ -269,6 +766,8 @@ index 0000000000000000000000000000000000000000..fa671dec5887946cb4acf6545fea0741
 +
 +    "depd": ["depd@2.0.0", "", {}, "sha512-g7nH6P6dyDioJogAAGprGpCtVImJhpPk/roCzdb3fIh61/s/nPsfR6onyMwkCAR/OlC3yBC0lESvUoQEAssIrw=="],
 +
++    "diff": ["diff@9.0.0", "", {}, "sha512-svtcdpS8CgJyqAjEQIXdb3OjhFVVYjzGAPO8WGCmRbrml64SPw/jJD4GoE98aR7r25A0XcgrK3F02yw9R/vhQw=="],
++
 +    "dunder-proto": ["dunder-proto@1.0.1", "", { "dependencies": { "call-bind-apply-helpers": "^1.0.1", "es-errors": "^1.3.0", "gopd": "^1.2.0" } }, "sha512-KIN/nDJBQRcXw0MLVhZE9iQHmG68qAVIBg9CqmUYjmQIhgij9U5MFvrqkUL5FbtyyzZuOeOt0zdeRe4UY7ct+A=="],
 +
 +    "ee-first": ["ee-first@1.1.1", "", {}, "sha512-WMwm9LhRUo+WUaRN+vRuETqG89IgZphVSNkdFgeb6sS/E4OrDIN7t48CAewSHXc6C8lefD8KKfr5vY61brQlow=="],
@@ -294,6 +793,8 @@ index 0000000000000000000000000000000000000000..fa671dec5887946cb4acf6545fea0741
 +    "express-rate-limit": ["express-rate-limit@8.7.1", "", { "dependencies": { "debug": "^4.4.3", "ip-address": "^10.2.0" }, "peerDependencies": { "express": ">= 4.11" } }, "sha512-2FXbqkygil3mZiXzEtM0IjE/UBmBNot0J1GEVrJT4JbrvwOSoEtqtO+wHbiMQELWe1eNvHoYRg2dkjOid+6JkA=="],
 +
 +    "fast-deep-equal": ["fast-deep-equal@3.1.3", "", {}, "sha512-f3qQ9oQy9j2AhBe/H9VC91wLmKBCCU/gDOnKNAYG5hswO7BLKj09Hc5HYNz9cGI++xlpDCIgDaitVs03ATR84Q=="],
++
++    "fast-sha256": ["fast-sha256@1.3.0", "", {}, "sha512-n11RGP/lrWEFI/bWdygLxhI+pVeo1ZYIVwvvPkW7azl/rOy+F3HYRZ2K5zeE9mmkhQppyv9sQFx0JM9UabnpPQ=="],
 +
 +    "fast-uri": ["fast-uri@3.1.8", "", {}, "sha512-GZMtZUTNRpOVIECoXwLNZS5xUGE+mVNbTB8h/7Rwh2TFWcBQiPzTgyZi05BF9UMZKkLJv8XBRJTlU7zg8+ZfMg=="],
 +
@@ -332,6 +833,8 @@ index 0000000000000000000000000000000000000000..fa671dec5887946cb4acf6545fea0741
 +    "isexe": ["isexe@2.0.0", "", {}, "sha512-RHxMLp9lnKHGHRng9QFhRCMbYAcVpn69smSGcq3f36xjgVVWThj4qqLbTLlq7Ssj8B+fIQ1EuCEGI2lKsyQeIw=="],
 +
 +    "jose": ["jose@6.2.12", "", {}, "sha512-9NiFmJEex0sy2Dk58j2UGBSHgUs2ypF9eZSu4L6vjOX3Dp96Sw1F3uL+H+D1sx02jZZdzUT0HgvCy59CuvXcWw=="],
++
++    "json-schema-to-ts": ["json-schema-to-ts@3.1.1", "", { "dependencies": { "@babel/runtime": "^7.18.3", "ts-algebra": "^2.0.0" } }, "sha512-+DWg8jCJG2TEnpy7kOm/7/AxaYoaRbjVB4LFZLySZlWn8exGs3A4OLJR966cVvU26N7X9TWxl+Jsw7dzAqKT6g=="],
 +
 +    "json-schema-traverse": ["json-schema-traverse@1.0.0", "", {}, "sha512-NM8/P9n3XjXhIZn1lLhkFaACTOURQXjWhV4BA/RnOv8xvgqtqpAX9IO4mRQxSx1Rlo4tqzeqb0sOlruaOy3dug=="],
 +
@@ -399,9 +902,13 @@ index 0000000000000000000000000000000000000000..fa671dec5887946cb4acf6545fea0741
 +
 +    "side-channel-weakmap": ["side-channel-weakmap@1.0.2", "", { "dependencies": { "call-bound": "^1.0.2", "es-errors": "^1.3.0", "get-intrinsic": "^1.2.5", "object-inspect": "^1.13.3", "side-channel-map": "^1.0.1" } }, "sha512-WPS/HvHQTYnHisLo9McqBHOJk2FkHO/tlpvldyrnem4aeQp4hai3gythswg6p01oSoTl58rcpiFAjF2br2Ak2A=="],
 +
++    "standardwebhooks": ["standardwebhooks@1.1.1", "", { "dependencies": { "@stablelib/base64": "^1.0.0", "fast-sha256": "^1.3.0" } }, "sha512-bCbX9ZEyFkWPsRz7Bl3NuQUJohmwGSev/yhr7vhaGPlc4AfIrspIRa6cPTBuI1ItmrTDJ4d/S2hCsfe4+vQGnQ=="],
++
 +    "statuses": ["statuses@2.0.2", "", {}, "sha512-DvEy55V3DB7uknRo+4iOGT5fP1slR8wQohVdknigZPMpMstaKJQWhwiYBACJE3Ul2pTnATihhBYnRhZQHGBiRw=="],
 +
 +    "toidentifier": ["toidentifier@1.0.1", "", {}, "sha512-o5sSPKEkg/DIQNmH43V0/uerLrpzVedkUh8tGNvaeXpfpuwjKenlSox/2O/BTlZUtEe+JG7s5YhEz608PlAHRA=="],
++
++    "ts-algebra": ["ts-algebra@2.0.0", "", {}, "sha512-FPAhNPFMrkwz76P7cdjdmiShwMynZYN6SgOujD1urY4oNm80Ou9oMdmbR45LotcKOXoy7wSmHkRFE6Mxbrhefw=="],
 +
 +    "type-is": ["type-is@2.1.0", "", { "dependencies": { "content-type": "^2.0.0", "media-typer": "^1.1.0", "mime-types": "^3.0.0" } }, "sha512-faYHw0anBbc/kWF3zFTEnxSFOAGUX9GFbOBthvDdLsIlEoWOFOtS0zgCiQYwIskL9iGXZL3kAXD8OoZ4GmMATA=="],
 +
@@ -419,6 +926,8 @@ index 0000000000000000000000000000000000000000..fa671dec5887946cb4acf6545fea0741
 +
 +    "zod-to-json-schema": ["zod-to-json-schema@3.25.2", "", { "peerDependencies": { "zod": "^3.25.28 || ^4" } }, "sha512-O/PgfnpT1xKSDeQYSCfRI5Gy3hPf91mKVDuYLUHZJMiDFptvP41MSnWofm8dnCm0256ZNfZIM7DSzuSMAFnjHA=="],
 +
++    "@agentclientprotocol/claude-agent-acp/@agentclientprotocol/sdk": ["@agentclientprotocol/sdk@1.7.0", "", { "peerDependencies": { "zod": "^3.25.0 || ^4.0.0" } }, "sha512-ZORuxsuEnLjRly7t6Ad7zAsWitjWsyprswyPUHz/yycPb+tTm3DGa8XheaHhRXqX8LS9snuxaYavXSRA50TlHw=="],
++
 +    "body-parser/content-type": ["content-type@2.1.0", "", {}, "sha512-mj7UPXE0jaqaOsukNZRUEfEi2AcL7C/vwmwcHV0O97eO1E1pxBZuyjlZrx5seTaNBg1U6+o35wpa35Qfcc+7ag=="],
 +
 +    "express/content-type": ["content-type@2.1.0", "", {}, "sha512-mj7UPXE0jaqaOsukNZRUEfEi2AcL7C/vwmwcHV0O97eO1E1pxBZuyjlZrx5seTaNBg1U6+o35wpa35Qfcc+7ag=="],
@@ -430,10 +939,10 @@ index 0000000000000000000000000000000000000000..fa671dec5887946cb4acf6545fea0741
 +}
 diff --git a/external_plugins/voice/call.test.ts b/external_plugins/voice/call.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..58587108956d87a4073680b34f40af64afa389d7
+index 0000000000000000000000000000000000000000..ea7d96e4d56fbe753d30f351b870762770325cd9
 --- /dev/null
 +++ b/external_plugins/voice/call.test.ts
-@@ -0,0 +1,30 @@
+@@ -0,0 +1,69 @@
 +import { expect, test } from 'bun:test'
 +import { Call, transcript } from './call.ts'
 +
@@ -464,23 +973,69 @@ index 0000000000000000000000000000000000000000..58587108956d87a4073680b34f40af64
 +  call.track({ id: 'mail', state: 'running', text: 'drafting the reply' })
 +  expect(call.board()).toBe('Task board:\n- build done: CI is green\n- mail running: drafting the reply')
 +})
++
++test('the record keeps the whole call, each speaker joined like the live captions, with every task change in time', () => {
++  const call = new Call()
++  call.hear({ who: 'you', text: 'check if ', start: 1000, end: 1400 })
++  call.hear({ who: 'voice', text: 'Mm-hmm.', start: 1500, end: 1700 })
++  call.hear({ who: 'you', text: 'the build passed', start: 1600, end: 2000 })
++  call.handOff()
++  call.hear({ who: 'voice', text: ' On it. ', start: 2300, end: 2800 })
++  call.hear({ who: 'you', text: 'thanks', start: 9000, end: 9400 })
++  call.track({ id: 'build', state: 'running', text: 'checking CI' }, 2500)
++  call.track({ id: 'build', state: 'done', text: 'CI is green' }, 8000)
++  expect(call.record()).toEqual({
++    turns: [
++      { who: 'you', at: 1000, text: 'check if the build passed' },
++      { who: 'voice', at: 1500, text: 'Mm-hmm. On it.' },
++      { who: 'you', at: 9000, text: 'thanks' },
++    ],
++    tasks: [
++      { id: 'build', state: 'running', text: 'checking CI', at: 2500 },
++      { id: 'build', state: 'done', text: 'CI is green', at: 8000 },
++    ],
++  })
++})
++
++test("the live view lists tasks by their latest change, a task's step included, and says where sent work went", () => {
++  const call = new Call()
++  call.track({ id: 'build', state: 'running', text: 'checking CI' })
++  call.track({ id: 'orb', state: 'running', text: 'your orb feedback', to: 'voiceapp' })
++  expect(call.see('build', 'Reading ci.yml')).toBe(true)
++  expect(call.see('build', 'Reading ci.yml')).toBe(false)
++  expect(call.see('nothing', 'Reading')).toBe(false)
++  expect(call.activity()).toEqual([
++    { id: 'build', state: 'running', text: 'checking CI', line: 'Reading ci.yml' },
++    { id: 'orb', state: 'running', text: 'your orb feedback', to: 'voiceapp', line: undefined },
++  ])
++  call.track({ id: 'orb', state: 'done', text: 'your orb feedback', to: 'voiceapp' })
++  expect(call.activity()[0]).toMatchObject({ id: 'orb', state: 'done' })
++  expect(call.board()).toBe('Task board:\n- build running: checking CI\n- orb done: your orb feedback (sent to voiceapp)')
++})
 diff --git a/external_plugins/voice/call.ts b/external_plugins/voice/call.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..48caa54c9ff740a272644dc45c23790bc72e3e7d
+index 0000000000000000000000000000000000000000..556122c2e11d2cfed82689803e2e423a2d63de65
 --- /dev/null
 +++ b/external_plugins/voice/call.ts
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,95 @@
 +export type Speaker = 'you' | 'voice'
 +
 +export type Fragment = { who: Speaker; text: string; start: number; end: number }
 +
 +export type Turn = { who: Speaker; text: string; start: number }
 +
-+export type Task = { id: string; state: 'running' | 'done' | 'failed'; text: string }
++export type Task = { id: string; state: 'running' | 'done' | 'failed'; text: string; to?: string; agent?: string }
++
++export type Moment = Task & { at: number }
++
++const PAUSE = 2000
 +
 +export class Call {
 +  private fragments: (Fragment & { sent?: true })[] = []
 +  private tasks = new Map<string, Task>()
++  private moments: Moment[] = []
++  private lines = new Map<string, string>()
++  private recent: string[] = []
 +
 +  hear(fragment: Fragment) {
 +    let i = this.fragments.length
@@ -502,28 +1057,263 @@ index 0000000000000000000000000000000000000000..48caa54c9ff740a272644dc45c23790b
 +      else turns.push({ who: fragment.who, text: fragment.text, start: fragment.start })
 +      joins = true
 +    }
-+    return turns.map(turn => ({ ...turn, text: turn.text.trim() })).filter(turn => turn.text)
++    return tidy(turns)
 +  }
 +
-+  track(task: Task) {
++  track(task: Task, at = 0) {
 +    this.tasks.set(task.id, task)
++    this.moments.push({ ...task, at })
++    this.touch(task.id)
++  }
++
++  task(id: string) {
++    return this.tasks.get(id)
++  }
++
++  see(id: string, line: string) {
++    if (!this.tasks.has(id) || this.lines.get(id) === line) return false
++    this.lines.set(id, line)
++    this.touch(id)
++    return true
++  }
++
++  activity() {
++    return this.recent.map(id => ({ ...this.tasks.get(id)!, line: this.lines.get(id) }))
++  }
++
++  private touch(id: string) {
++    this.recent = [id, ...this.recent.filter(other => other !== id)]
 +  }
 +
 +  board(): string {
 +    if (!this.tasks.size) return 'Task board: nothing running or finished yet.'
-+    return ['Task board:', ...[...this.tasks.values()].map(task => `- ${task.id} ${task.state}: ${task.text}`)].join('\n')
++    return ['Task board:', ...[...this.tasks.values()].map(task => `- ${task.id} ${task.state}: ${task.text}${task.to ? ` (sent to ${task.to})` : ''}`)].join('\n')
 +  }
++
++  record() {
++    const turns: (Turn & { end: number })[] = []
++    for (const { who, text, start, end } of this.fragments) {
++      const last = turns.findLast(turn => turn.who === who)
++      if (last && start - last.end <= PAUSE) {
++        last.text += text
++        last.end = Math.max(last.end, end)
++      } else turns.push({ who, text, start, end })
++    }
++    return {
++      turns: tidy(turns.sort((a, b) => a.start - b.start)).map(({ who, start, text }) => ({ who, at: start, text })),
++      tasks: [...this.moments],
++    }
++  }
++}
++
++function tidy<T extends Turn>(turns: T[]): T[] {
++  return turns.map(turn => ({ ...turn, text: turn.text.trim() })).filter(turn => turn.text)
 +}
 +
 +export function transcript(turns: Turn[]): string {
 +  return turns.map(({ who, text, start }) => `[${(start / 1000).toFixed(1)}s] ${who}: ${text}`).join('\n')
 +}
+diff --git a/external_plugins/voice/calls.test.ts b/external_plugins/voice/calls.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..4f021bfa2dd7b62d9de48f75fef1f6273f0c5e4d
+--- /dev/null
++++ b/external_plugins/voice/calls.test.ts
+@@ -0,0 +1,69 @@
++import { expect, test } from 'bun:test'
++import { mkdtempSync, rmSync } from 'fs'
++import { tmpdir } from 'os'
++import { join } from 'path'
++import { CallLog, ending, type CallRecord } from './calls.ts'
++
++function scratch() {
++  const dir = mkdtempSync(join(tmpdir(), 'calls-'))
++  return { calls: new CallLog(dir), [Symbol.dispose]: () => rmSync(dir, { recursive: true }) }
++}
++
++const record = (id: string, started: string, extra: Partial<CallRecord> = {}): CallRecord => ({
++  id,
++  started,
++  from: 'app',
++  turns: [
++    { who: 'voice', at: 900, text: 'Hey.' },
++    { who: 'you', at: 3400, text: 'Is the build green?' },
++  ],
++  tasks: [],
++  ...extra,
++})
++
++test('the list is newest first, without the turns, with how long and how it began', () => {
++  using log = scratch()
++  const { calls } = log
++  calls.save(record('a', '2026-10-13T01:00:00.000Z', { ended: '2026-10-13T01:04:30.000Z' }))
++  calls.save(record('b', '2026-10-13T03:00:00.000Z'))
++  expect(calls.list()).toEqual([
++    { id: 'b', started: '2026-10-13T03:00:00.000Z', from: 'app', seconds: 3, tasks: 0, preview: 'Is the build green?' },
++    { id: 'a', started: '2026-10-13T01:00:00.000Z', ended: '2026-10-13T01:04:30.000Z', from: 'app', seconds: 270, tasks: 0, preview: 'Is the build green?' },
++  ])
++  expect(calls.get('a')?.turns).toHaveLength(2)
++})
++
++test('ids that are not plain names never reach the disk', () => {
++  using log = scratch()
++  expect(log.calls.get('../.env')).toBeUndefined()
++  expect(log.calls.delete('../.env')).toBe(false)
++})
++
++test('a waiting list request answers as soon as a call changes', async () => {
++  using log = scratch()
++  const { calls } = log
++  const seen = calls.version
++  const changed = calls.changes(seen, 5000)
++  calls.save(record('a', '2026-10-13T01:00:00.000Z'))
++  await changed
++  expect(calls.version).toBeGreaterThan(seen)
++  expect(calls.delete('a')).toBe(true)
++  expect(calls.list()).toEqual([])
++})
++
++test('a list request from before a restart answers right away', async () => {
++  using log = scratch()
++  const started = Date.now()
++  await log.calls.changes(log.calls.version - 1, 5000)
++  expect(Date.now() - started).toBeLessThan(100)
++})
++
++test('how a call ended: the caller, the voice service, or a dropped connection', () => {
++  expect(ending('close_requested', 'close-you-app')).toBe('you')
++  expect(ending('close_requested')).toBe('you')
++  expect(ending('remote_hangup')).toBe('you')
++  expect(ending('close_requested', 'close_hex_1')).toBe('hex')
++  expect(ending('expired')).toBe('expired')
++  expect(ending('connection_lost')).toBe('dropped')
++  expect(ending('connection closed')).toBe('dropped')
++})
+diff --git a/external_plugins/voice/calls.ts b/external_plugins/voice/calls.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..29e167aea4372bd4a01f90e08cc9de67ced99a50
+--- /dev/null
++++ b/external_plugins/voice/calls.ts
+@@ -0,0 +1,86 @@
++import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
++import { join } from 'path'
++import type { Moment, Speaker } from './call.ts'
++import { Changes } from './changes.ts'
++
++export type Source = 'app' | 'web' | 'phone-in' | 'phone-out'
++
++export type Ending = 'you' | 'hex' | 'dropped' | 'expired' | 'no-connect' | 'no-answer' | 'busy'
++
++export type CallRecord = {
++  id: string
++  started: string
++  ended?: string
++  end?: Ending
++  reason?: string
++  from: Source
++  voice?: string
++  title?: string
++  claude?: string
++  turns: { who: Speaker; at: number; text: string }[]
++  tasks: Moment[]
++}
++
++export type CallSummary = Omit<CallRecord, 'turns' | 'tasks'> & { seconds: number; tasks: number; preview: string }
++
++const ID = /^[\w-]+$/
++
++export function ending(reason: string, by?: string): Ending {
++  if (by?.startsWith('close_hex')) return 'hex'
++  if (by?.startsWith('close-you') || reason === 'close_requested' || reason === 'remote_hangup') return 'you'
++  if (reason === 'expired') return 'expired'
++  if (reason === 'content') return 'hex'
++  return 'dropped'
++}
++
++export class CallLog extends Changes {
++  constructor(private dir: string) {
++    super()
++    mkdirSync(dir, { recursive: true })
++  }
++
++  save(record: CallRecord) {
++    const file = this.file(record.id)
++    writeFileSync(`${file}.tmp`, JSON.stringify(record))
++    renameSync(`${file}.tmp`, file)
++    this.changed()
++  }
++
++  get(id: string): CallRecord | undefined {
++    if (!ID.test(id)) return
++    try {
++      return JSON.parse(readFileSync(this.file(id), 'utf8'))
++    } catch {}
++  }
++
++  delete(id: string) {
++    if (!this.get(id)) return false
++    rmSync(this.file(id))
++    this.changed()
++    return true
++  }
++
++  list(): CallSummary[] {
++    return readdirSync(this.dir)
++      .flatMap(name => {
++        const record = name.endsWith('.json') && this.get(name.slice(0, -5))
++        return record ? [summary(record)] : []
++      })
++      .sort((a, b) => b.started.localeCompare(a.started))
++  }
++
++  private file(id: string) {
++    return join(this.dir, `${id}.json`)
++  }
++}
++
++export function summary({ turns, tasks, ...call }: CallRecord): CallSummary {
++  const heard = Math.max(0, ...turns.map(turn => turn.at), ...tasks.map(task => task.at))
++  const ms = call.ended ? Date.parse(call.ended) - Date.parse(call.started) : heard
++  return {
++    ...call,
++    seconds: Math.round(ms / 1000),
++    tasks: new Set(tasks.map(task => task.id)).size,
++    preview: turns.find(turn => turn.who === 'you')?.text.slice(0, 160) ?? '',
++  }
++}
+diff --git a/external_plugins/voice/changes.ts b/external_plugins/voice/changes.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..8b43569416466e50c388e80f9cf8baf9693f9661
+--- /dev/null
++++ b/external_plugins/voice/changes.ts
+@@ -0,0 +1,22 @@
++export class Changes {
++  version = Date.now()
++  private waiting = new Set<() => void>()
++
++  changes(after: number, wait: number) {
++    if (after !== this.version) return Promise.resolve()
++    return new Promise<void>(resolve => {
++      const done = () => {
++        clearTimeout(timer)
++        this.waiting.delete(done)
++        resolve()
++      }
++      const timer = setTimeout(done, wait)
++      this.waiting.add(done)
++    })
++  }
++
++  changed() {
++    this.version = Math.max(this.version + 1, Date.now())
++    for (const done of [...this.waiting]) done()
++  }
++}
 diff --git a/external_plugins/voice/package.json b/external_plugins/voice/package.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..e63d073da4c60ac1f1f1d0728265f43f910ca5aa
+index 0000000000000000000000000000000000000000..4ab482cf406b2c01ac9096478e979660a82f6a1b
 --- /dev/null
 +++ b/external_plugins/voice/package.json
-@@ -0,0 +1,15 @@
+@@ -0,0 +1,17 @@
 +{
 +  "name": "claude-channel-voice",
 +  "version": "0.2.0",
@@ -533,6 +1323,8 @@ index 0000000000000000000000000000000000000000..e63d073da4c60ac1f1f1d0728265f43f
 +    "start": "bun install --no-summary 1>&2 && bun server.ts"
 +  },
 +  "dependencies": {
++    "@agentclientprotocol/claude-agent-acp": "^0.86.0",
++    "@agentclientprotocol/sdk": "^1.7.0",
 +    "@modelcontextprotocol/sdk": "^1.32.1"
 +  },
 +  "devDependencies": {
@@ -541,7 +1333,7 @@ index 0000000000000000000000000000000000000000..e63d073da4c60ac1f1f1d0728265f43f
 +}
 diff --git a/external_plugins/voice/page.html b/external_plugins/voice/page.html
 new file mode 100644
-index 0000000000000000000000000000000000000000..0502c4c9398edaa47623afcbbecf912a58a29998
+index 0000000000000000000000000000000000000000..65202db19b191edaeb1e36547af966cd64eff239
 --- /dev/null
 +++ b/external_plugins/voice/page.html
 @@ -0,0 +1,115 @@
@@ -656,16 +1448,16 @@ index 0000000000000000000000000000000000000000..0502c4c9398edaa47623afcbbecf912a
 +    if (!peer) return call().catch(error => hangUp(error.message))
 +    button.disabled = true
 +    say('ending…')
-+    events.send(JSON.stringify({ type: 'session.close' }))
++    events.send(JSON.stringify({ type: 'session.close', event_id: 'close-you-web' }))
 +  }
 +</script>
 +</html>
 diff --git a/external_plugins/voice/server.ts b/external_plugins/voice/server.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..659db8dc3895a3cb82426d014f7efba1c64ed119
+index 0000000000000000000000000000000000000000..e12147b249088be42654b67cf1a34ece2bf9ed3d
 --- /dev/null
 +++ b/external_plugins/voice/server.ts
-@@ -0,0 +1,400 @@
+@@ -0,0 +1,608 @@
 +#!/usr/bin/env bun
 +import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 +import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
@@ -674,8 +1466,11 @@ index 0000000000000000000000000000000000000000..659db8dc3895a3cb82426d014f7efba1
 +import { readFileSync } from 'fs'
 +import { connect } from 'net'
 +import { homedir } from 'os'
-+import { join } from 'path'
++import { dirname, join } from 'path'
++import { findThread, followAgent, followThread, type Step, type Thread } from './activity.ts'
 +import { Call, transcript, type Speaker, type Task } from './call.ts'
++import { CallLog, ending, type CallRecord, type Ending, type Source } from './calls.ts'
++import { Changes } from './changes.ts'
 +import page from './page.html' with { type: 'text' }
 +
 +const STATE_DIR = join(homedir(), '.claude', 'channels', 'voice')
@@ -697,6 +1492,10 @@ index 0000000000000000000000000000000000000000..659db8dc3895a3cb82426d014f7efba1
 +const PUBLIC_HOST = process.env.VOICE_PUBLIC_URL?.replace(/^\w+:\/\//, '')
 +const HUB = process.env.HEX_HUB
 +const THREAD = process.env.HEX_CHANNEL?.startsWith('plugin:voice@') ? process.env.HEX_THREAD : undefined
++const HEX_STATE = HUB && dirname(dirname(HUB))
++const calls = new CallLog(join(STATE_DIR, 'calls'))
++const activity = new Changes()
++const follows = new Map<string, () => void>()
 +
 +const IDENTITY = (() => {
 +  try {
@@ -730,13 +1529,23 @@ index 0000000000000000000000000000000000000000..659db8dc3895a3cb82426d014f7efba1
 +
 +type Pending = { resolve: () => void; reject: (error: Error) => void }
 +type Ring = { delegation: string; offset: number }
-+type Live = { id: string; socket: WebSocket; call: Call; pending: Map<string, Pending>; rings: Ring[]; speak?: (audio: string) => void }
-+type Phone = { greeting: string; openai?: WebSocket; stream?: string; started?: true }
++type Live = {
++  id: string
++  socket: WebSocket
++  call: Call
++  record: Omit<CallRecord, 'turns' | 'tasks'>
++  pending: Map<string, Pending>
++  rings: Ring[]
++  speak?: (audio: string) => void
++}
++type Dial = { greeting: string; from: Source }
++type Phone = Dial & { openai?: WebSocket; stream?: string; started?: true }
 +
 +let live: Live | undefined
++let ended: string | undefined
 +let hub: ReturnType<typeof connect> | undefined
 +let seq = 0
-+const dials = new Map<string, string>()
++const dials = new Map<string, Dial>()
 +
 +const mcp = new Server(
 +  { name: 'voice', version: '0.1.0' },
@@ -750,9 +1559,12 @@ index 0000000000000000000000000000000000000000..659db8dc3895a3cb82426d014f7efba1
 +
 +Answer every handoff with say(delegation_id, text): the voice says only what you give it, so you are the one talking. It paraphrases aloud, so write one or two plain spoken sentences, no markdown. Use note for facts the voice should know without saying them yet.
 +
-+Keep each turn quick so the next handoff reaches you fast. Run anything longer than a quick lookup as a background subagent, put it on the board with task (running, then done or failed), and say its result when it arrives. Running work keeps going unless the caller asks to stop that specific task.
++Keep each turn quick so the next handoff reaches you fast. Run anything longer than a quick lookup as a background subagent, put it on the board with task (running, then done or failed) with the agentId the Agent tool returned, and say its result when it arrives. The caller sees each step the agent takes. Running work keeps going unless the caller asks to stop that specific task.
++${HEX_STATE ? '\nWork that belongs to a hex thread (a Telegram topic, or a Discord, Buzz or T3 Code thread) goes there with send: it puts the work on the board, the caller sees each step the thread takes, and the board shows it done when the thread is.\n' : ''}
 +
 +phone rings the caller's phone and holds the same kind of call there, for when you're asked to call them.
++
++When a call ends, name it with title: a few plain words for what it was about, shown in the caller's list of past calls.
 +
 +A result too long to speak goes wherever the caller reads, if this session has another channel to reach them; say where you sent it. Voice page: http://localhost:${PORT}.`,
 +  },
@@ -780,15 +1592,45 @@ index 0000000000000000000000000000000000000000..659db8dc3895a3cb82426d014f7efba1
 +    },
 +    {
 +      name: 'task',
-+      description: 'Put a task on the board the voice model reads to answer status questions: running when it starts, then done or failed.',
++      description:
++        "Put a task on the board the voice model reads to answer status questions: running when it starts, then done or failed. After its call ends, pass that call's id to update its record.",
 +      inputSchema: {
 +        type: 'object',
 +        properties: {
 +          id: { type: 'string', description: 'A short name that stays the same across updates' },
++          call: { type: 'string', description: 'The call the task belongs to, once that call has ended; the live call by default' },
 +          state: { type: 'string', enum: ['running', 'done', 'failed'] },
 +          text: { type: 'string', description: 'What it is, and the result once it has one' },
++          agent: { type: 'string', description: 'The agentId the Agent tool returned for the background subagent doing it, so the caller sees its steps live' },
 +        },
 +        required: ['id', 'state', 'text'],
++      },
++    },
++    ...(HEX_STATE
++      ? [
++          {
++            name: 'send',
++            description:
++              "Hand work to a hex thread, by its name or id: your message reaches that thread's session from hex voice, the work goes on the board as running, the caller sees each step the thread takes on it, and the board shows it done or failed when the thread's turn ends with none of its agents still out.",
++            inputSchema: {
++              type: 'object',
++              properties: {
++                thread: { type: 'string', description: "The thread's name (like voiceapp) or id" },
++                about: { type: 'string', description: "A few words for what you sent, shown to the caller, like 'your orb-bounce feedback'" },
++                text: { type: 'string', description: "The message, with the caller's own words" },
++              },
++              required: ['thread', 'about', 'text'],
++            },
++          },
++        ]
++      : []),
++    {
++      name: 'title',
++      description: "Name a call in the caller's list of past calls: a few plain words for what it was about.",
++      inputSchema: {
++        type: 'object',
++        properties: { call: { type: 'string', description: 'The call id from the call ended message' }, title: { type: 'string' } },
++        required: ['call', 'title'],
 +      },
 +    },
 +    {
@@ -803,6 +1645,9 @@ index 0000000000000000000000000000000000000000..659db8dc3895a3cb82426d014f7efba1
 +  const args = (request.params.arguments ?? {}) as Record<string, string>
 +  try {
 +    if (request.params.name === 'phone') return done(await dial(args.to))
++    if (request.params.name === 'title') return done(name(args.call, args.title))
++    if (request.params.name === 'task') return done(await task(args.id, args.state as Task['state'], args.text, args.call, args.agent))
++    if (request.params.name === 'send') return done(await pass(args.thread, args.about, args.text))
 +    if (!live) throw new Error('no call is live')
 +    switch (request.params.name) {
 +      case 'say':
@@ -811,10 +1656,6 @@ index 0000000000000000000000000000000000000000..659db8dc3895a3cb82426d014f7efba1
 +      case 'note':
 +        await send(live, 'session.thinking.append', args.text, args.delegation_id)
 +        return done('noted')
-+      case 'task':
-+        live.call.track({ id: args.id, state: args.state as Task['state'], text: args.text })
-+        await send(live, 'session.thinking.append', live.call.board())
-+        return done('board updated')
 +      default:
 +        throw new Error(`unknown tool ${request.params.name}`)
 +    }
@@ -833,6 +1674,118 @@ index 0000000000000000000000000000000000000000..659db8dc3895a3cb82426d014f7efba1
 +  return new Promise<void>((resolve, reject) => call.pending.set(event_id, { resolve, reject }))
 +}
 +
++function save(call: Live) {
++  calls.save({ ...call.record, ...call.call.record() })
++}
++
++async function task(id: string, state: Task['state'], text: string, call = live?.id ?? ended, agent?: string) {
++  if (!call) throw new Error('no call yet')
++  if (agent || state !== 'running') stop(call, id)
++  const following = live?.id === call && state === 'running' && agent && followAgent(agent, process.env.CLAUDE_CODE_SESSION_ID, step => see(call, id, step))
++  if (following) follows.set(`${call} ${id}`, following)
++  const result = await mark(call, { ...current(call, id), id, state, text, ...(agent && { agent }) })
++  return agent && live?.id === call && !following ? `${result}, but no transcript of agent ${agent} turned up, so the caller won't see its steps` : result
++}
++
++async function pass(name: string, about: string, text: string, call = live?.id ?? ended) {
++  const thread = findThread(HEX_STATE!, name)
++  if (!thread) throw new Error(`no hex thread is named ${name}`)
++  const id = call && fresh(call, about)
++  if (call && id) {
++    await mark(call, { id, state: 'running', text: about, to: thread.name, agent: thread.id })
++    watch(call, id, thread, false)
++  }
++  try {
++    await post(join(HEX_STATE!, thread.app, 'hub.sock'), { type: 'inbound', thread: thread.id, content: text, meta: { user: 'hex voice', ...(id && { voice_task: `${call}:${id}` }) } })
++  } catch (error) {
++    if (call && id) see(call, id, { end: 'failed' })
++    throw error
++  }
++  return id ? `sent to ${thread.name}, on the board as ${id}` : `sent to ${thread.name}`
++}
++
++// A plugin starts with each call's session, so work a past call sent out is picked back up here,
++// read from the start of its thread's session.
++function resume() {
++  if (!HEX_STATE) return
++  const since = Date.now() - 24 * 60 * 60_000
++  for (const { id: call, started } of calls.list()) {
++    if (Date.parse(started) < since) break
++    const latest = new Map(past(call).tasks.map(task => [task.id, task]))
++    for (const task of latest.values()) {
++      const thread = task.state === 'running' && task.to && task.agent && findThread(HEX_STATE, task.agent)
++      if (thread) watch(call, task.id, thread, true)
++    }
++  }
++}
++
++function watch(call: string, id: string, thread: Thread, resumed: boolean) {
++  follows.set(`${call} ${id}`, followThread(thread, dirname(HEX_STATE!), `${call}:${id}`, resumed, step => see(call, id, step)))
++}
++
++function fresh(call: string, about: string) {
++  const base = about.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'sent'
++  let id = base
++  for (let n = 2; current(call, id); n++) id = `${base}-${n}`
++  return id
++}
++
++function current(call: string, id: string): Task | undefined {
++  if (live?.id === call) return live.call.task(id)
++  const moment = past(call).tasks.findLast(task => task.id === id)
++  if (!moment) return
++  const { at, ...task } = moment
++  return task
++}
++
++async function mark(call: string, task: Task) {
++  if (live?.id === call) {
++    live.call.track(task, Date.now() - Date.parse(live.record.started))
++    save(live)
++    activity.changed()
++    await send(live, 'session.thinking.append', live.call.board())
++    return 'board updated'
++  }
++  const record = past(call)
++  calls.save({ ...record, tasks: [...record.tasks, { ...task, at: Date.now() - Date.parse(record.started) }] })
++  return 'that call has ended, so only its record changed'
++}
++
++function see(call: string, id: string, { line, end }: Step) {
++  if (line && live?.id === call && live.call.see(id, line)) activity.changed()
++  const task = end && current(call, id)
++  if (!task) return
++  stop(call, id)
++  mark(call, { ...task, state: end }).catch(error => trace(`couldn't mark ${id} ${end}: ${error.message}`))
++}
++
++function stop(call: string, id: string) {
++  follows.get(`${call} ${id}`)?.()
++  follows.delete(`${call} ${id}`)
++}
++
++function post(path: string, message: object) {
++  return new Promise<void>((resolve, reject) => {
++    const socket = connect(path)
++    socket.on('connect', () => socket.end(JSON.stringify(message) + '\n', resolve))
++    socket.on('error', error => reject(new Error(`hex's hub isn't answering at ${path} (${error.message})`)))
++  })
++}
++
++function name(call: string, title: string) {
++  if (live?.id === call) {
++    live.record.title = title
++    save(live)
++  } else calls.save({ ...past(call), title })
++  return 'named'
++}
++
++function past(id: string) {
++  const record = calls.get(id)
++  if (!record) throw new Error(`no call ${id}`)
++  return record
++}
++
 +function deliver(content: string, meta: Record<string, string>) {
 +  void mcp.notification({ method: 'notifications/claude/channel', params: { content, meta } })
 +}
@@ -844,6 +1797,7 @@ index 0000000000000000000000000000000000000000..659db8dc3895a3cb82426d014f7efba1
 +    delegation_id: delegation,
 +    at: `${(offset / 1000).toFixed(1)}s`,
 +  })
++  save(call)
 +}
 +
 +function hear(call: Live, who: Speaker, event: { delta: string; start_ms: number; end_ms: number }) {
@@ -851,21 +1805,42 @@ index 0000000000000000000000000000000000000000..659db8dc3895a3cb82426d014f7efba1
 +  while (call.rings[0] && call.rings[0].offset <= event.start_ms) ring(call, call.rings.shift()!)
 +}
 +
-+function finish(call: Live, reason: string) {
++const ENDINGS: Record<Ending, string> = {
++  you: 'the caller hung up',
++  hex: 'the voice service ended it',
++  dropped: 'the connection dropped',
++  expired: 'it reached the time limit',
++  'no-connect': 'it never connected',
++  'no-answer': 'nobody answered',
++  busy: 'the line was busy',
++}
++
++function finish(call: Live, reason: string, by?: string) {
 +  if (live !== call) return
 +  live = undefined
++  ended = call.id
++  const end = ending(reason, by)
 +  for (const pending of call.pending.values()) pending.reject(new Error(`the call ended (${reason})`))
 +  for (const pending of call.rings) ring(call, pending)
 +  const rest = call.call.handOff()
-+  deliver(['The call ended.', ...(rest.length ? ['Last words:', transcript(rest)] : [])].join('\n'), { call: call.id, ended: reason })
++  call.record = { ...call.record, ended: new Date().toISOString(), end, reason }
++  save(call)
++  activity.changed()
++  deliver(
++    [`The call ended: ${ENDINGS[end]} (${reason}). Name it with title.`, ...(rest.length ? ['Last words:', transcript(rest)] : [])].join('\n'),
++    { call: call.id, ended: end, reason },
++  )
 +  hub?.write(JSON.stringify({ type: 'renew', thread: THREAD }) + '\n')
 +  call.socket.close()
 +}
 +
-+function follow(id: string, socket: WebSocket, speak?: Live['speak']) {
++function follow(id: string, socket: WebSocket, from: Source, voice?: string, speak?: Live['speak']) {
 +  if (live) finish(live, 'replaced by a new call')
-+  const call: Live = { id, socket, call: new Call(), pending: new Map(), rings: [], speak }
++  const record = { id, started: new Date().toISOString(), from, voice, claude: process.env.CLAUDE_CODE_SESSION_ID }
++  const call: Live = { id, socket, call: new Call(), record, pending: new Map(), rings: [], speak }
 +  live = call
++  save(call)
++  activity.changed()
 +  deliver('A call started. Send the voice what it should know right away, with note.', { call: id, started: 'true' })
 +  socket.onmessage = ({ data }) => {
 +    const event = JSON.parse(String(data))
@@ -892,14 +1867,14 @@ index 0000000000000000000000000000000000000000..659db8dc3895a3cb82426d014f7efba1
 +      case 'session.output_audio.delta':
 +        return call.speak?.(event.delta)
 +      case 'session.closed':
-+        return finish(call, event.reason ?? 'closed')
++        return finish(call, event.reason ?? 'closed', event.client_event_id)
 +    }
 +  }
 +  socket.onclose = () => finish(call, 'connection closed')
 +}
 +
-+function attach(id: string) {
-+  follow(id, new WebSocket(`${API}/${id}/attach`, { headers: { Authorization: `Bearer ${KEY}` } } as any))
++function attach(id: string, from: Source, voice?: string) {
++  follow(id, new WebSocket(`${API}/${id}/attach`, { headers: { Authorization: `Bearer ${KEY}` } } as any), from, voice)
 +}
 +
 +function session(extra: object = {}) {
@@ -916,7 +1891,7 @@ index 0000000000000000000000000000000000000000..659db8dc3895a3cb82426d014f7efba1
 +    throw new Error(`phone calls need TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_NUMBER and VOICE_PUBLIC_URL in ${join(STATE_DIR, '.env')}`)
 +  if (!to) throw new Error('no number to call: pass to, or set CALLER_NUMBER')
 +  const token = crypto.randomUUID()
-+  dials.set(token, 'You placed this phone call. Greet them briefly first, then listen.')
++  dials.set(token, { greeting: 'You placed this phone call. Greet them briefly first, then listen.', from: 'phone-out' })
 +  const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Calls.json`, {
 +    method: 'POST',
 +    headers: { Authorization: `Basic ${btoa(`${TWILIO_SID}:${TWILIO_TOKEN}`)}` },
@@ -946,7 +1921,7 @@ index 0000000000000000000000000000000000000000..659db8dc3895a3cb82426d014f7efba1
 +    if (event.type === 'error' && !twilio.data.started) trace(`OpenAI refused the phone session: ${JSON.stringify(event.error)}`)
 +    if (event.type !== 'session.started') return
 +    twilio.data.started = true
-+    follow(event.session.id, openai, audio => twilio.send(JSON.stringify({ event: 'media', streamSid: twilio.data.stream, media: { payload: audio } })))
++    follow(event.session.id, openai, twilio.data.from, VOICE, audio => twilio.send(JSON.stringify({ event: 'media', streamSid: twilio.data.stream, media: { payload: audio } })))
 +    openai.send(JSON.stringify({ type: 'session.instructions.append', delegation_id: null, content: twilio.data.greeting }))
 +  })
 +  openai.addEventListener('close', ({ code, reason }) => {
@@ -973,7 +1948,7 @@ index 0000000000000000000000000000000000000000..659db8dc3895a3cb82426d014f7efba1
 +  const signature = createHmac('sha1', TWILIO_TOKEN ?? '').update(`https://${PUBLIC_HOST}/twilio/incoming${params}`).digest('base64')
 +  if (!TWILIO_TOKEN || request.headers.get('x-twilio-signature') !== signature || form.get('From') !== CALLER_NUMBER) return twiml('<Reject />')
 +  const token = crypto.randomUUID()
-+  dials.set(token, 'They called you. Answer briefly, then listen.')
++  dials.set(token, { greeting: 'They called you. Answer briefly, then listen.', from: 'phone-in' })
 +  return stream(token)
 +}
 +
@@ -988,12 +1963,12 @@ index 0000000000000000000000000000000000000000..659db8dc3895a3cb82426d014f7efba1
 +
 +function hangUp(twilio: Bun.ServerWebSocket<Phone>) {
 +  const openai = twilio.data.openai
-+  if (openai?.readyState === WebSocket.OPEN) openai.send(JSON.stringify({ type: 'session.close' }))
++  if (openai?.readyState === WebSocket.OPEN) openai.send(JSON.stringify({ type: 'session.close', event_id: 'close-you-phone' }))
 +}
 +
 +async function start(request: Request) {
 +  if (!KEY) return new Response(`Set OPENAI_API_KEY in ${join(STATE_DIR, '.env')}`, { status: 503 })
-+  const { sdp, voice = VOICE } = (await request.json()) as { sdp?: string; voice?: string }
++  const { sdp, voice = VOICE, from } = (await request.json()) as { sdp?: string; voice?: string; from?: string }
 +  if (!sdp) return new Response('An SDP offer is required', { status: 400 })
 +  const response = await fetch(API, {
 +    method: 'POST',
@@ -1008,7 +1983,7 @@ index 0000000000000000000000000000000000000000..659db8dc3895a3cb82426d014f7efba1
 +  })
 +  if (!response.ok) return new Response(await response.text(), { status: response.status })
 +  const result = (await response.json()) as { session: { id: string } }
-+  attach(result.session.id)
++  attach(result.session.id, from === 'app' ? 'app' : 'web', voice)
 +  return Response.json(result, { status: 201 })
 +}
 +
@@ -1036,25 +2011,50 @@ index 0000000000000000000000000000000000000000..659db8dc3895a3cb82426d014f7efba1
 +}
 +
 +await mcp.connect(new StdioServerTransport())
++resume()
 +process.stdin.on('end', () => process.exit(0))
 +process.stdin.on('close', () => process.exit(0))
 +
++async function showActivity(url: URL) {
++  const after = url.searchParams.get('after')
++  if (after) await activity.changes(Number(after), 25_000)
++  return Response.json({ version: activity.version, call: live?.id ?? null, tasks: live?.call.activity() ?? [] })
++}
++
++async function listCalls(url: URL) {
++  const after = url.searchParams.get('after')
++  if (after) await calls.changes(Number(after), 25_000)
++  return Response.json({ version: calls.version, live: live?.id, calls: calls.list() })
++}
++
 +Bun.serve<Phone>({
 +  port: PORT,
++  idleTimeout: 40,
 +  hostname: '127.0.0.1',
 +  fetch(request, server) {
 +    const { pathname } = new URL(request.url)
 +    if (pathname === '/twilio/incoming' && request.method === 'POST') return pickUp(request)
 +    const [, token, twimlPath] = pathname.match(/^\/twilio\/([\w-]+)(\/twiml)?$/) ?? []
-+    const greeting = dials.get(token)
-+    if (token) trace(`Twilio ${request.method} ${twimlPath ? 'TwiML' : 'stream'}, ${greeting ? 'known' : 'unknown'} token`)
-+    if (greeting && twimlPath) return stream(token)
-+    if (greeting && dials.delete(token)) return server.upgrade(request, { data: { greeting } }) ? undefined : new Response('upgrade failed', { status: 400 })
++    const dialed = dials.get(token)
++    if (token) trace(`Twilio ${request.method} ${twimlPath ? 'TwiML' : 'stream'}, ${dialed ? 'known' : 'unknown'} token`)
++    if (dialed && twimlPath) return stream(token)
++    if (dialed && dials.delete(token)) return server.upgrade(request, { data: { ...dialed } }) ? undefined : new Response('upgrade failed', { status: 400 })
 +    if (pathname === '/') return new Response(page, { headers: { 'content-type': 'text/html; charset=utf-8' } })
 +    if (pathname === '/session' && request.method === 'POST') return start(request)
 +    if (pathname === '/session' && request.method === 'DELETE') {
-+      live?.socket.send(JSON.stringify({ type: 'session.close' }))
++      live?.socket.send(JSON.stringify({ type: 'session.close', event_id: 'close-you-app' }))
 +      return new Response(null, { status: 204 })
++    }
++    if (pathname === '/calls' && request.method === 'GET') return listCalls(new URL(request.url))
++    if (pathname === '/activity' && request.method === 'GET') return showActivity(new URL(request.url))
++    const [, callId] = pathname.match(/^\/calls\/([\w-]+)$/) ?? []
++    if (callId && request.method === 'GET') {
++      const record = calls.get(callId)
++      return record ? Response.json(record) : new Response('404', { status: 404 })
++    }
++    if (callId && request.method === 'DELETE') {
++      if (live?.id === callId) return new Response('That call is still going', { status: 409 })
++      return new Response(null, { status: calls.delete(callId) ? 204 : 404 })
 +    }
 +    if (pathname === '/phone' && request.method === 'POST')
 +      return dial().then(text => new Response(text), error => new Response(error.message, { status: 502 }))

@@ -1,6 +1,7 @@
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import type { Moment, Speaker } from './call.ts'
+import { Changes } from './changes.ts'
 
 export type Source = 'app' | 'web' | 'phone-in' | 'phone-out'
 
@@ -32,11 +33,9 @@ export function ending(reason: string, by?: string): Ending {
   return 'dropped'
 }
 
-export class CallLog {
-  version = Date.now()
-  private waiting = new Set<() => void>()
-
+export class CallLog extends Changes {
   constructor(private dir: string) {
+    super()
     mkdirSync(dir, { recursive: true })
   }
 
@@ -68,24 +67,6 @@ export class CallLog {
         return record ? [summary(record)] : []
       })
       .sort((a, b) => b.started.localeCompare(a.started))
-  }
-
-  changes(after: number, wait: number) {
-    if (after !== this.version) return Promise.resolve()
-    return new Promise<void>(resolve => {
-      const done = () => {
-        clearTimeout(timer)
-        this.waiting.delete(done)
-        resolve()
-      }
-      const timer = setTimeout(done, wait)
-      this.waiting.add(done)
-    })
-  }
-
-  private changed() {
-    this.version = Math.max(this.version + 1, Date.now())
-    for (const done of [...this.waiting]) done()
   }
 
   private file(id: string) {

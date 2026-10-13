@@ -6,9 +6,11 @@ import { createHmac } from 'crypto'
 import { readFileSync } from 'fs'
 import { connect } from 'net'
 import { homedir } from 'os'
-import { join } from 'path'
+import { dirname, join } from 'path'
+import { findThread, followAgent, followThread, type Step, type Thread } from './activity.ts'
 import { Call, transcript, type Speaker, type Task } from './call.ts'
 import { CallLog, ending, type CallRecord, type Ending, type Source } from './calls.ts'
+import { Changes } from './changes.ts'
 import page from './page.html' with { type: 'text' }
 
 const STATE_DIR = join(homedir(), '.claude', 'channels', 'voice')
@@ -30,7 +32,10 @@ const CALLER_NUMBER = process.env.CALLER_NUMBER
 const PUBLIC_HOST = process.env.VOICE_PUBLIC_URL?.replace(/^\w+:\/\//, '')
 const HUB = process.env.HEX_HUB
 const THREAD = process.env.HEX_CHANNEL?.startsWith('plugin:voice@') ? process.env.HEX_THREAD : undefined
+const HEX_STATE = HUB && dirname(dirname(HUB))
 const calls = new CallLog(join(STATE_DIR, 'calls'))
+const activity = new Changes()
+const follows = new Map<string, () => void>()
 
 const IDENTITY = (() => {
   try {
@@ -94,7 +99,8 @@ Each handoff arrives as <channel source="voice" delegation_id="..."> with the tr
 
 Answer every handoff with say(delegation_id, text): the voice says only what you give it, so you are the one talking. It paraphrases aloud, so write one or two plain spoken sentences, no markdown. Use note for facts the voice should know without saying them yet.
 
-Keep each turn quick so the next handoff reaches you fast. Run anything longer than a quick lookup as a background subagent, put it on the board with task (running, then done or failed), and say its result when it arrives. Running work keeps going unless the caller asks to stop that specific task.
+Keep each turn quick so the next handoff reaches you fast. Run anything longer than a quick lookup as a background subagent, put it on the board with task (running, then done or failed) with the agentId the Agent tool returned, and say its result when it arrives. The caller sees each step the agent takes. Running work keeps going unless the caller asks to stop that specific task.
+${HEX_STATE ? '\nWork that belongs to a hex thread (a Telegram topic, or a Discord, Buzz or T3 Code thread) goes there with send: it puts the work on the board, the caller sees each step the thread takes, and the board shows it done when the thread is.\n' : ''}
 
 phone rings the caller's phone and holds the same kind of call there, for when you're asked to call them.
 
@@ -135,10 +141,29 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           call: { type: 'string', description: 'The call the task belongs to, once that call has ended; the live call by default' },
           state: { type: 'string', enum: ['running', 'done', 'failed'] },
           text: { type: 'string', description: 'What it is, and the result once it has one' },
+          agent: { type: 'string', description: 'The agentId the Agent tool returned for the background subagent doing it, so the caller sees its steps live' },
         },
         required: ['id', 'state', 'text'],
       },
     },
+    ...(HEX_STATE
+      ? [
+          {
+            name: 'send',
+            description:
+              "Hand work to a hex thread, by its name or id: your message reaches that thread's session from hex voice, the work goes on the board as running, the caller sees each step the thread takes on it, and the board shows it done or failed when the thread's turn ends with none of its agents still out.",
+            inputSchema: {
+              type: 'object',
+              properties: {
+                thread: { type: 'string', description: "The thread's name (like voiceapp) or id" },
+                about: { type: 'string', description: "A few words for what you sent, shown to the caller, like 'your orb-bounce feedback'" },
+                text: { type: 'string', description: "The message, with the caller's own words" },
+              },
+              required: ['thread', 'about', 'text'],
+            },
+          },
+        ]
+      : []),
     {
       name: 'title',
       description: "Name a call in the caller's list of past calls: a few plain words for what it was about.",
@@ -161,7 +186,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async request => {
   try {
     if (request.params.name === 'phone') return done(await dial(args.to))
     if (request.params.name === 'title') return done(name(args.call, args.title))
-    if (request.params.name === 'task') return done(await task(args.id, args.state as Task['state'], args.text, args.call))
+    if (request.params.name === 'task') return done(await task(args.id, args.state as Task['state'], args.text, args.call, args.agent))
+    if (request.params.name === 'send') return done(await pass(args.thread, args.about, args.text))
     if (!live) throw new Error('no call is live')
     switch (request.params.name) {
       case 'say':
@@ -192,17 +218,98 @@ function save(call: Live) {
   calls.save({ ...call.record, ...call.call.record() })
 }
 
-async function task(id: string, state: Task['state'], text: string, call = live?.id ?? ended) {
+async function task(id: string, state: Task['state'], text: string, call = live?.id ?? ended, agent?: string) {
   if (!call) throw new Error('no call yet')
+  if (agent || state !== 'running') stop(call, id)
+  const following = live?.id === call && state === 'running' && agent && followAgent(agent, process.env.CLAUDE_CODE_SESSION_ID, step => see(call, id, step))
+  if (following) follows.set(`${call} ${id}`, following)
+  const result = await mark(call, { ...current(call, id), id, state, text, ...(agent && { agent }) })
+  return agent && live?.id === call && !following ? `${result}, but no transcript of agent ${agent} turned up, so the caller won't see its steps` : result
+}
+
+async function pass(name: string, about: string, text: string, call = live?.id ?? ended) {
+  const thread = findThread(HEX_STATE!, name)
+  if (!thread) throw new Error(`no hex thread is named ${name}`)
+  const id = call && fresh(call, about)
+  if (call && id) {
+    await mark(call, { id, state: 'running', text: about, to: thread.name, agent: thread.id })
+    watch(call, id, thread, false)
+  }
+  try {
+    await post(join(HEX_STATE!, thread.app, 'hub.sock'), { type: 'inbound', thread: thread.id, content: text, meta: { user: 'hex voice', ...(id && { voice_task: `${call}:${id}` }) } })
+  } catch (error) {
+    if (call && id) see(call, id, { end: 'failed' })
+    throw error
+  }
+  return id ? `sent to ${thread.name}, on the board as ${id}` : `sent to ${thread.name}`
+}
+
+// A plugin starts with each call's session, so work a past call sent out is picked back up here,
+// read from the start of its thread's session.
+function resume() {
+  if (!HEX_STATE) return
+  const since = Date.now() - 24 * 60 * 60_000
+  for (const { id: call, started } of calls.list()) {
+    if (Date.parse(started) < since) break
+    const latest = new Map(past(call).tasks.map(task => [task.id, task]))
+    for (const task of latest.values()) {
+      const thread = task.state === 'running' && task.to && task.agent && findThread(HEX_STATE, task.agent)
+      if (thread) watch(call, task.id, thread, true)
+    }
+  }
+}
+
+function watch(call: string, id: string, thread: Thread, resumed: boolean) {
+  follows.set(`${call} ${id}`, followThread(thread, dirname(HEX_STATE!), `${call}:${id}`, resumed, step => see(call, id, step)))
+}
+
+function fresh(call: string, about: string) {
+  const base = about.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'sent'
+  let id = base
+  for (let n = 2; current(call, id); n++) id = `${base}-${n}`
+  return id
+}
+
+function current(call: string, id: string): Task | undefined {
+  if (live?.id === call) return live.call.task(id)
+  const moment = past(call).tasks.findLast(task => task.id === id)
+  if (!moment) return
+  const { at, ...task } = moment
+  return task
+}
+
+async function mark(call: string, task: Task) {
   if (live?.id === call) {
-    live.call.track({ id, state, text }, Date.now() - Date.parse(live.record.started))
+    live.call.track(task, Date.now() - Date.parse(live.record.started))
     save(live)
+    activity.changed()
     await send(live, 'session.thinking.append', live.call.board())
     return 'board updated'
   }
   const record = past(call)
-  calls.save({ ...record, tasks: [...record.tasks, { id, state, text, at: Date.now() - Date.parse(record.started) }] })
+  calls.save({ ...record, tasks: [...record.tasks, { ...task, at: Date.now() - Date.parse(record.started) }] })
   return 'that call has ended, so only its record changed'
+}
+
+function see(call: string, id: string, { line, end }: Step) {
+  if (line && live?.id === call && live.call.see(id, line)) activity.changed()
+  const task = end && current(call, id)
+  if (!task) return
+  stop(call, id)
+  mark(call, { ...task, state: end }).catch(error => trace(`couldn't mark ${id} ${end}: ${error.message}`))
+}
+
+function stop(call: string, id: string) {
+  follows.get(`${call} ${id}`)?.()
+  follows.delete(`${call} ${id}`)
+}
+
+function post(path: string, message: object) {
+  return new Promise<void>((resolve, reject) => {
+    const socket = connect(path)
+    socket.on('connect', () => socket.end(JSON.stringify(message) + '\n', resolve))
+    socket.on('error', error => reject(new Error(`hex's hub isn't answering at ${path} (${error.message})`)))
+  })
 }
 
 function name(call: string, title: string) {
@@ -258,6 +365,7 @@ function finish(call: Live, reason: string, by?: string) {
   const rest = call.call.handOff()
   call.record = { ...call.record, ended: new Date().toISOString(), end, reason }
   save(call)
+  activity.changed()
   deliver(
     [`The call ended: ${ENDINGS[end]} (${reason}). Name it with title.`, ...(rest.length ? ['Last words:', transcript(rest)] : [])].join('\n'),
     { call: call.id, ended: end, reason },
@@ -272,6 +380,7 @@ function follow(id: string, socket: WebSocket, from: Source, voice?: string, spe
   const call: Live = { id, socket, call: new Call(), record, pending: new Map(), rings: [], speak }
   live = call
   save(call)
+  activity.changed()
   deliver('A call started. Send the voice what it should know right away, with note.', { call: id, started: 'true' })
   socket.onmessage = ({ data }) => {
     const event = JSON.parse(String(data))
@@ -442,8 +551,15 @@ mcp.oninitialized = () => {
 }
 
 await mcp.connect(new StdioServerTransport())
+resume()
 process.stdin.on('end', () => process.exit(0))
 process.stdin.on('close', () => process.exit(0))
+
+async function showActivity(url: URL) {
+  const after = url.searchParams.get('after')
+  if (after) await activity.changes(Number(after), 25_000)
+  return Response.json({ version: activity.version, call: live?.id ?? null, tasks: live?.call.activity() ?? [] })
+}
 
 async function listCalls(url: URL) {
   const after = url.searchParams.get('after')
@@ -470,6 +586,7 @@ Bun.serve<Phone>({
       return new Response(null, { status: 204 })
     }
     if (pathname === '/calls' && request.method === 'GET') return listCalls(new URL(request.url))
+    if (pathname === '/activity' && request.method === 'GET') return showActivity(new URL(request.url))
     const [, callId] = pathname.match(/^\/calls\/([\w-]+)$/) ?? []
     if (callId && request.method === 'GET') {
       const record = calls.get(callId)

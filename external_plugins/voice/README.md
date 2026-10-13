@@ -82,6 +82,40 @@ updating its record.
 | `GET /calls/<id>` | one whole call |
 | `DELETE /calls/<id>` | deletes a finished call |
 
+## Agent activity
+
+While a call is live, the app can show one line of what hex's agents are
+doing: "Reading server.ts", "Started an agent: tune the glide", or the agent's
+own words. Each line comes from the agent's Claude Code transcript, read as
+Claude Code writes it and turned into ACP `session/update` notifications (the
+same conversion hex uses for Buzz and T3 Code), then into a few plain words.
+
+```
+ Claude's background subagent ── task(id, running, text, agent) ─┐
+ another hex thread ────────────── send(thread, about, text) ─────┤
+                                                                  ▼
+                     its transcript (.jsonl) ── ACP updates ── one line per task
+                                                                  │
+                                         GET /activity?after=<version>
+                                                                  ▼
+                                                     the app's live line
+```
+
+- `task` with `agent` (the agentId the Agent tool returned) follows that
+  subagent until the task is done or failed.
+- `send` (in hex) delivers a message to a Telegram topic, or a Discord, Buzz
+  or T3 Code thread, puts it on the board, follows that thread's session from
+  the moment it takes the message in, background agents included, and marks
+  it done when a turn ends with none of them still out (failed if the turn
+  ends on an API error). It keeps updating the call's record after you hang
+  up: the plugin that starts with the next session picks unfinished sends
+  from the last day back up, reading their threads from the start.
+
+| Request | Answers |
+| --- | --- |
+| `GET /activity` | `{ version, call, tasks }`: the live call's tasks, most recently changed first, each with its latest `line` |
+| `GET /activity?after=<version>` | the same, once anything has changed since that version (or after 25 seconds) |
+
 ## Setup
 
 1. Put an OpenAI API key with access to `gpt-live-1` (a paid tier) in

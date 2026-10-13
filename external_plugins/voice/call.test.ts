@@ -51,3 +51,19 @@ test('the record keeps the whole call, each speaker joined like the live caption
     ],
   })
 })
+
+test("the live view lists tasks by their latest change, a task's step included, and says where sent work went", () => {
+  const call = new Call()
+  call.track({ id: 'build', state: 'running', text: 'checking CI' })
+  call.track({ id: 'orb', state: 'running', text: 'your orb feedback', to: 'voiceapp' })
+  expect(call.see('build', 'Reading ci.yml')).toBe(true)
+  expect(call.see('build', 'Reading ci.yml')).toBe(false)
+  expect(call.see('nothing', 'Reading')).toBe(false)
+  expect(call.activity()).toEqual([
+    { id: 'build', state: 'running', text: 'checking CI', line: 'Reading ci.yml' },
+    { id: 'orb', state: 'running', text: 'your orb feedback', to: 'voiceapp', line: undefined },
+  ])
+  call.track({ id: 'orb', state: 'done', text: 'your orb feedback', to: 'voiceapp' })
+  expect(call.activity()[0]).toMatchObject({ id: 'orb', state: 'done' })
+  expect(call.board()).toBe('Task board:\n- build running: checking CI\n- orb done: your orb feedback (sent to voiceapp)')
+})

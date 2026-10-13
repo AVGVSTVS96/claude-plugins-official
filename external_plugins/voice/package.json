@@ -7,6 +7,8 @@
     "start": "bun install --no-summary 1>&2 && bun server.ts"
   },
   "dependencies": {
+    "@agentclientprotocol/claude-agent-acp": "^0.86.0",
+    "@agentclientprotocol/sdk": "^1.7.0",
     "@modelcontextprotocol/sdk": "^1.32.1"
   },
   "devDependencies": {

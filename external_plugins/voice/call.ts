@@ -4,7 +4,7 @@ export type Fragment = { who: Speaker; text: string; start: number; end: number 
 
 export type Turn = { who: Speaker; text: string; start: number }
 
-export type Task = { id: string; state: 'running' | 'done' | 'failed'; text: string }
+export type Task = { id: string; state: 'running' | 'done' | 'failed'; text: string; to?: string; agent?: string }
 
 export type Moment = Task & { at: number }
 
@@ -14,6 +14,8 @@ export class Call {
   private fragments: (Fragment & { sent?: true })[] = []
   private tasks = new Map<string, Task>()
   private moments: Moment[] = []
+  private lines = new Map<string, string>()
+  private recent: string[] = []
 
   hear(fragment: Fragment) {
     let i = this.fragments.length
@@ -41,11 +43,31 @@ export class Call {
   track(task: Task, at = 0) {
     this.tasks.set(task.id, task)
     this.moments.push({ ...task, at })
+    this.touch(task.id)
+  }
+
+  task(id: string) {
+    return this.tasks.get(id)
+  }
+
+  see(id: string, line: string) {
+    if (!this.tasks.has(id) || this.lines.get(id) === line) return false
+    this.lines.set(id, line)
+    this.touch(id)
+    return true
+  }
+
+  activity() {
+    return this.recent.map(id => ({ ...this.tasks.get(id)!, line: this.lines.get(id) }))
+  }
+
+  private touch(id: string) {
+    this.recent = [id, ...this.recent.filter(other => other !== id)]
   }
 
   board(): string {
     if (!this.tasks.size) return 'Task board: nothing running or finished yet.'
-    return ['Task board:', ...[...this.tasks.values()].map(task => `- ${task.id} ${task.state}: ${task.text}`)].join('\n')
+    return ['Task board:', ...[...this.tasks.values()].map(task => `- ${task.id} ${task.state}: ${task.text}${task.to ? ` (sent to ${task.to})` : ''}`)].join('\n')
   }
 
   record() {
