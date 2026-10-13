@@ -242,8 +242,10 @@ const ENDINGS: Record<Ending, string> = {
   you: 'the caller hung up',
   hex: 'the voice service ended it',
   dropped: 'the connection dropped',
+  expired: 'it reached the time limit',
   'no-connect': 'it never connected',
   'no-answer': 'nobody answered',
+  busy: 'the line was busy',
 }
 
 function finish(call: Live, reason: string, by?: string) {

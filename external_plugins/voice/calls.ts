@@ -4,7 +4,7 @@ import type { Moment, Speaker } from './call.ts'
 
 export type Source = 'app' | 'web' | 'phone-in' | 'phone-out'
 
-export type Ending = 'you' | 'hex' | 'dropped' | 'no-connect' | 'no-answer'
+export type Ending = 'you' | 'hex' | 'dropped' | 'expired' | 'no-connect' | 'no-answer' | 'busy'
 
 export type CallRecord = {
   id: string
@@ -25,8 +25,10 @@ export type CallSummary = Omit<CallRecord, 'turns' | 'tasks'> & { seconds: numbe
 const ID = /^[\w-]+$/
 
 export function ending(reason: string, by?: string): Ending {
+  if (by?.startsWith('close_hex')) return 'hex'
   if (by?.startsWith('close-you') || reason === 'close_requested' || reason === 'remote_hangup') return 'you'
-  if (reason === 'expired' || reason === 'content') return 'hex'
+  if (reason === 'expired') return 'expired'
+  if (reason === 'content') return 'hex'
   return 'dropped'
 }
 

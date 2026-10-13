@@ -65,8 +65,8 @@ task change, and when it ends, so a crash keeps almost all of it.
 ```
 
 `from` is where the call came from: `app`, `web` (the call page), `phone-in`
-or `phone-out`. `end` is how it ended: `you` (the caller hung up), `hex` (the
-voice service ended it), `dropped`, `no-connect` or `no-answer`; `reason` is
+or `phone-out`. `end` is how it ended: `you` (the caller hung up), `hex` (hex
+hung up), `dropped`, `expired`, `no-connect`, `no-answer` or `busy`; `reason` is
 the raw reason. Every way the caller ends a call (the page, an app, the phone,
 `DELETE /session`) sends `session.close` with an `event_id` starting
 `close-you`. `at` is milliseconds from the start of the call; `claude` is
