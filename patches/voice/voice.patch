@@ -33,10 +33,10 @@ index 0000000000000000000000000000000000000000..07fdedd6c4bc9e7072f8d860f7eadd42
 +}
 diff --git a/external_plugins/voice/README.md b/external_plugins/voice/README.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..7591456c43aaba663c2ab25abcab63dd7f06a52d
+index 0000000000000000000000000000000000000000..aceb1703508d3bd95ba1d04f0bf22a2c0b3962f6
 --- /dev/null
 +++ b/external_plugins/voice/README.md
-@@ -0,0 +1,133 @@
+@@ -0,0 +1,136 @@
 +# voice
 +
 +Live voice calls for Claude Code. OpenAI's `gpt-live-1` talks with you in real
@@ -116,7 +116,10 @@ index 0000000000000000000000000000000000000000..7591456c43aaba663c2ab25abcab63dd
 +
 +   In [hex](https://github.com/AVGVSTVS96/hex), the hub runs `bot.ts`, which
 +   keeps a session named `voice` always running with this channel, so the
-+   call page comes back by itself after restarts and updates.
++   call page comes back by itself after restarts and updates. Each call gets
++   a new session: when a call ends, the plugin asks the hub to renew, and once
++   that turn is done the hub starts `voice` over fresh, with its own OptChat
++   chat of past calls instead of one context that grows with every call.
 +
 +3. Open the call page. The browser only allows the microphone on `localhost`
 +   or HTTPS:
@@ -172,10 +175,10 @@ index 0000000000000000000000000000000000000000..7591456c43aaba663c2ab25abcab63dd
 +- One call at a time. A new call ends the previous one.
 diff --git a/external_plugins/voice/bot.ts b/external_plugins/voice/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..1e7cc26cdc2506b96d7dc4dfa64731dfe4846079
+index 0000000000000000000000000000000000000000..007421169754f227c723ca5a22ca49a2f7237eaa
 --- /dev/null
 +++ b/external_plugins/voice/bot.ts
-@@ -0,0 +1,21 @@
+@@ -0,0 +1,22 @@
 +import { mkdirSync } from 'fs'
 +import { join } from 'path'
 +import { startHub } from '../../hub/hub.ts'
@@ -190,6 +193,7 @@ index 0000000000000000000000000000000000000000..1e7cc26cdc2506b96d7dc4dfa64731df
 +  main: 'voice',
 +  mainName: 'voice',
 +  hexDir: HEX_DIR,
++  fresh: () => true,
 +  launcher: process.env.HEX_LAUNCHER,
 +  call: async (_, tool) => {
 +    throw new Error(`unknown tool: ${tool}`)
@@ -651,10 +655,10 @@ index 0000000000000000000000000000000000000000..0502c4c9398edaa47623afcbbecf912a
 +</html>
 diff --git a/external_plugins/voice/server.ts b/external_plugins/voice/server.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..a9de7d448dc8e7aa718dd085b7b45a547f33ca4d
+index 0000000000000000000000000000000000000000..21a1c8723a0f3705e40cb3d475f670b4bb3aa447
 --- /dev/null
 +++ b/external_plugins/voice/server.ts
-@@ -0,0 +1,381 @@
+@@ -0,0 +1,383 @@
 +#!/usr/bin/env bun
 +import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 +import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
@@ -723,6 +727,7 @@ index 0000000000000000000000000000000000000000..a9de7d448dc8e7aa718dd085b7b45a54
 +type Phone = { greeting: string; openai?: WebSocket; stream?: string; started?: true }
 +
 +let live: Live | undefined
++let hub: ReturnType<typeof connect> | undefined
 +let seq = 0
 +const dials = new Map<string, string>()
 +
@@ -846,6 +851,7 @@ index 0000000000000000000000000000000000000000..a9de7d448dc8e7aa718dd085b7b45a54
 +  for (const pending of call.rings) ring(call, pending)
 +  const rest = call.call.handOff()
 +  deliver(['The call ended.', ...(rest.length ? ['Last words:', transcript(rest)] : [])].join('\n'), { call: call.id, ended: reason })
++  hub?.write(JSON.stringify({ type: 'renew', thread: THREAD }) + '\n')
 +  call.socket.close()
 +}
 +
@@ -988,7 +994,7 @@ index 0000000000000000000000000000000000000000..a9de7d448dc8e7aa718dd085b7b45a54
 +}
 +
 +function joinHub() {
-+  const socket = connect(HUB!)
++  const socket = (hub = connect(HUB!))
 +  let buffer = ''
 +  socket.setEncoding('utf8')
 +  socket.on('connect', () => {

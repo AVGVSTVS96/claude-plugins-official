@@ -1,9 +1,9 @@
 diff --git a/hub/hub.test.ts b/hub/hub.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..8293ace26278cd79ad798a5fb8ced78c99223121
+index 0000000000000000000000000000000000000000..9008fccc50f13a5b956584df9b91b2a34b0c1f2e
 --- /dev/null
 +++ b/hub/hub.test.ts
-@@ -0,0 +1,680 @@
+@@ -0,0 +1,695 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { connect, createServer, type Socket } from 'net'
 +import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, chmodSync, existsSync } from 'fs'
@@ -464,6 +464,21 @@ index 0000000000000000000000000000000000000000..8293ace26278cd79ad798a5fb8ced78c
 +  expect(calls().some(args => args[0] === 'stop' || args[0] === '--bg')).toBe(false)
 +})
 +
++test('a thread that asks to renew stops once its turn ends, and its main thread starts over as a new session', async () => {
++  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'idle' }], relaunch: 50, fresh: () => true })
++  const { socket, send } = await session('voice')
++  send({ type: 'state', thread: 'voice', busy: true })
++  send({ type: 'renew', thread: 'voice' })
++  await Bun.sleep(100)
++  expect(calls().some(args => args[0] === 'stop')).toBe(false)
++  send({ type: 'state', thread: 'voice', busy: false })
++  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
++  const before = calls().filter(args => args[0] === '--bg').length
++  socket.destroy()
++  const args = await until(() => calls().filter(args => args[0] === '--bg')[before])
++  expect(args).not.toContain('--resume')
++})
++
 +test('closing an idle thread stops its session right away, then forgets the thread', async () => {
 +  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } } })
 +  const { socket } = await session('chat:7')
@@ -686,10 +701,10 @@ index 0000000000000000000000000000000000000000..8293ace26278cd79ad798a5fb8ced78c
 +})
 diff --git a/hub/hub.ts b/hub/hub.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..6ab37558f4c80d8d413a7db95fbc46dff9e57741
+index 0000000000000000000000000000000000000000..a6150cd2c574e4112d997a2026d968b8a8cd58ca
 --- /dev/null
 +++ b/hub/hub.ts
-@@ -0,0 +1,488 @@
+@@ -0,0 +1,493 @@
 +import { createServer, type Socket } from 'net'
 +import { execFile, spawn } from 'child_process'
 +import { createHash } from 'crypto'
@@ -772,6 +787,7 @@ index 0000000000000000000000000000000000000000..6ab37558f4c80d8d413a7db95fbc46df
 +  const launching = new Map<string, FSWatcher | undefined>()
 +  const idle = new Map<string, ReturnType<typeof setTimeout>>()
 +  const busy = new Set<string>()
++  const renewing = new Set<string>()
 +  const retiring = new Set<string>()
 +  const leaving = new Map<string, (session: string) => void>()
 +  const unsaved = new Map<string, string>()
@@ -809,6 +825,8 @@ index 0000000000000000000000000000000000000000..6ab37558f4c80d8d413a7db95fbc46df
 +    claim(thread)
 +    if (working) busy.add(thread)
 +    else busy.delete(thread)
++    // A thread that asked to renew (a voice call ended) stops at its next rest, so it starts over fresh.
++    if (!working && renewing.has(thread)) stopIfIdle(thread)
 +    rest(thread)
 +  }
 +
@@ -1061,6 +1079,7 @@ index 0000000000000000000000000000000000000000..6ab37558f4c80d8d413a7db95fbc46df
 +
 +  function welcome(thread: string, session: string, socket: Socket) {
 +    live.set(thread, socket)
++    renewing.delete(thread)
 +    settle(thread)
 +    const known = threads[thread] ?? (threads[thread] = { name: thread })
 +    if (session && known.session !== session) unsaved.set(thread, session)
@@ -1106,6 +1125,7 @@ index 0000000000000000000000000000000000000000..6ab37558f4c80d8d413a7db95fbc46df
 +    function handle(request: any) {
 +      if (request.type === 'hello') welcome(thread = request.thread, request.session, socket)
 +      if (request.type === 'state') setState(request.thread, request.busy, request.background === true)
++      if (request.type === 'renew') renewing.add(request.thread)
 +      if (request.type === 'open') launch(request.thread, request.name, request.prompt)
 +      if (request.type === 'permission_request') permission?.(thread, request)
 +      if (request.type === 'inbound') deliver(request.thread, threads[request.thread]?.name ?? request.thread, { content: request.content, meta: request.meta })

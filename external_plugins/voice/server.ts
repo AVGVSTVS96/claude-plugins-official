@@ -66,6 +66,7 @@ type Live = { id: string; socket: WebSocket; call: Call; pending: Map<string, Pe
 type Phone = { greeting: string; openai?: WebSocket; stream?: string; started?: true }
 
 let live: Live | undefined
+let hub: ReturnType<typeof connect> | undefined
 let seq = 0
 const dials = new Map<string, string>()
 
@@ -189,6 +190,7 @@ function finish(call: Live, reason: string) {
   for (const pending of call.rings) ring(call, pending)
   const rest = call.call.handOff()
   deliver(['The call ended.', ...(rest.length ? ['Last words:', transcript(rest)] : [])].join('\n'), { call: call.id, ended: reason })
+  hub?.write(JSON.stringify({ type: 'renew', thread: THREAD }) + '\n')
   call.socket.close()
 }
 
@@ -331,7 +333,7 @@ async function start(request: Request) {
 }
 
 function joinHub() {
-  const socket = connect(HUB!)
+  const socket = (hub = connect(HUB!))
   let buffer = ''
   socket.setEncoding('utf8')
   socket.on('connect', () => {

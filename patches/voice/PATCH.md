@@ -4,7 +4,7 @@ id: voice
 summary: Add a voice channel where OpenAI's gpt-live-1 holds a live call and hands every real request to the Claude Code session.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: voice.patch
-patch_sha256: 71eb31b043757ab081dd1bdb5172c9223e13b808e813a0aa539248b3a6d4b49d
+patch_sha256: 8353a32057fbb25182a692e777baf9148624ae8556a3221f31f81a2dea7cebbf
 ---
 
 ## Intent
@@ -32,6 +32,8 @@ plugin with no hub code.
   `voice`, always running as its main thread, so the call page is back as
   soon as the hub restarts it. That session's `server.ts` says hello on the
   hub socket, which also lets other sessions message it as `inbound`.
+  `voice` is a fresh thread, and when a call ends `server.ts` sends the hub
+  `renew`, so every call starts in a new session that reads the call chat.
 - `dial` (the `phone` tool, or `POST /phone`) has Twilio ring a number; its
   TwiML comes from `/twilio/<one-time token>/twiml` (trial accounts can't pass
   TwiML inline) and streams the call to `wss://VOICE_PUBLIC_URL/twilio/<token>`. The plugin accepts only a token it issued, opens a `gpt-live-1`

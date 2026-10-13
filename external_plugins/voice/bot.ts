@@ -12,6 +12,7 @@ startHub({
   main: 'voice',
   mainName: 'voice',
   hexDir: HEX_DIR,
+  fresh: () => true,
   launcher: process.env.HEX_LAUNCHER,
   call: async (_, tool) => {
     throw new Error(`unknown tool: ${tool}`)

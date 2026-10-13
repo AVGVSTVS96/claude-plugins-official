@@ -80,6 +80,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', general =
   const launching = new Map<string, FSWatcher | undefined>()
   const idle = new Map<string, ReturnType<typeof setTimeout>>()
   const busy = new Set<string>()
+  const renewing = new Set<string>()
   const retiring = new Set<string>()
   const leaving = new Map<string, (session: string) => void>()
   const unsaved = new Map<string, string>()
@@ -117,6 +118,8 @@ export function startHub({ stateDir, channel, main, mainName = 'main', general =
     claim(thread)
     if (working) busy.add(thread)
     else busy.delete(thread)
+    // A thread that asked to renew (a voice call ended) stops at its next rest, so it starts over fresh.
+    if (!working && renewing.has(thread)) stopIfIdle(thread)
     rest(thread)
   }
 
@@ -369,6 +372,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', general =
 
   function welcome(thread: string, session: string, socket: Socket) {
     live.set(thread, socket)
+    renewing.delete(thread)
     settle(thread)
     const known = threads[thread] ?? (threads[thread] = { name: thread })
     if (session && known.session !== session) unsaved.set(thread, session)
@@ -414,6 +418,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', general =
     function handle(request: any) {
       if (request.type === 'hello') welcome(thread = request.thread, request.session, socket)
       if (request.type === 'state') setState(request.thread, request.busy, request.background === true)
+      if (request.type === 'renew') renewing.add(request.thread)
       if (request.type === 'open') launch(request.thread, request.name, request.prompt)
       if (request.type === 'permission_request') permission?.(thread, request)
       if (request.type === 'inbound') deliver(request.thread, threads[request.thread]?.name ?? request.thread, { content: request.content, meta: request.meta })

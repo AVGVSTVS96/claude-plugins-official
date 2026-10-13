@@ -458,6 +458,21 @@ test('a fresh thread keeps its session while it waits on a permission prompt or 
   expect(calls().some(args => args[0] === 'stop' || args[0] === '--bg')).toBe(false)
 })
 
+test('a thread that asks to renew stops once its turn ends, and its main thread starts over as a new session', async () => {
+  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'idle' }], relaunch: 50, fresh: () => true })
+  const { socket, send } = await session('voice')
+  send({ type: 'state', thread: 'voice', busy: true })
+  send({ type: 'renew', thread: 'voice' })
+  await Bun.sleep(100)
+  expect(calls().some(args => args[0] === 'stop')).toBe(false)
+  send({ type: 'state', thread: 'voice', busy: false })
+  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
+  const before = calls().filter(args => args[0] === '--bg').length
+  socket.destroy()
+  const args = await until(() => calls().filter(args => args[0] === '--bg')[before])
+  expect(args).not.toContain('--resume')
+})
+
 test('closing an idle thread stops its session right away, then forgets the thread', async () => {
   start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } } })
   const { socket } = await session('chat:7')

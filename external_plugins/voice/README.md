@@ -77,7 +77,10 @@ Claude to stop that task.
 
    In [hex](https://github.com/AVGVSTVS96/hex), the hub runs `bot.ts`, which
    keeps a session named `voice` always running with this channel, so the
-   call page comes back by itself after restarts and updates.
+   call page comes back by itself after restarts and updates. Each call gets
+   a new session: when a call ends, the plugin asks the hub to renew, and once
+   that turn is done the hub starts `voice` over fresh, with its own OptChat
+   chat of past calls instead of one context that grows with every call.
 
 3. Open the call page. The browser only allows the microphone on `localhost`
    or HTTPS:
