@@ -8,7 +8,7 @@ export type Update = SessionNotification['update']
 export type Step = { line?: string; end?: 'done' | 'failed' }
 export type Thread = { app: string; id: string; name: string; cwd?: string; threads: string }
 
-const PROJECTS = join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'projects')
+const projects = () => join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'projects')
 const client = { sessionUpdate: async () => {} } as unknown as Parameters<typeof toAcpNotifications>[4]
 const logger = { log: () => {}, error: (...args: unknown[]) => process.stderr.write(`voice: activity: ${args.join(' ')}\n`) }
 const ID = /^[\w-]+$/
@@ -130,7 +130,7 @@ export function followAgent(agent: string, session: string | undefined, onStep: 
   if (!ID.test(agent)) return
   const patterns = [...(session && ID.test(session) ? [`*/${session}/subagents/agent-${agent}.jsonl`] : []), `*/*/subagents/agent-${agent}.jsonl`]
   for (const pattern of patterns)
-    for (const path of new Bun.Glob(pattern).scanSync({ cwd: PROJECTS, absolute: true }))
+    for (const path of new Bun.Glob(pattern).scanSync({ cwd: projects(), absolute: true }))
       return followTranscript(path, 0, (_, updates) => lines(updates(), onStep))
 }
 
@@ -169,7 +169,7 @@ export function followThread(thread: Thread, hexDir: string, tag: string, resume
     const fresh = resumed || session !== undefined
     stopSession()
     session = next
-    project = join(PROJECTS, (thread.cwd ?? hexDir).replace(/[^a-zA-Z0-9]/g, '-'))
+    project = join(projects(), (thread.cwd ?? hexDir).replace(/[^a-zA-Z0-9]/g, '-'))
     stopSession = followTranscript(join(project, `${session}.jsonl`), fresh ? 0 : 'end', take)
   }
 
