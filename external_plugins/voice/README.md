@@ -45,7 +45,36 @@ Claude to stop that task.
    only says Claude's answers. Claude is a dispatcher with work in background
    subagents, so answering never stops running work; the board keeps the
    voice aware of it.
-6. When the call ends, Claude gets the last words and a "call ended" message.
+6. When the call ends, Claude gets the last words and a "call ended" message,
+   and names the call with `title`.
+
+## Call history
+
+Every call is saved as one JSON file in `~/.claude/channels/voice/calls/`,
+named by its `gpt-live-1` session id: when it starts, after every handoff and
+task change, and when it ends, so a crash keeps almost all of it.
+
+```json
+{
+  "id": "sess_...", "started": "2026-10-13T03:05:12.000Z", "ended": "...",
+  "end": "closed", "from": "app", "voice": "marin", "title": "Voice app history",
+  "claude": "c0f06426-...",
+  "turns": [{ "who": "you", "at": 3400, "text": "Hello there" }],
+  "tasks": [{ "id": "plan", "state": "running", "at": 61200, "text": "..." }]
+}
+```
+
+`from` is where the call came from: `app`, `web` (the call page), `phone-in`
+or `phone-out`. `at` is milliseconds from the start of the call; `claude` is
+the Claude Code session that did the work. Each speaker's words are joined
+the way live captions show them: a pause of over two seconds starts a new turn.
+
+| Request | Answers |
+| --- | --- |
+| `GET /calls` | `{ version, live, calls }`, newest first, each without its turns, with `seconds` and a `preview` of the caller's first words |
+| `GET /calls?after=<version>` | the same, once anything has changed since that version (or after 25 seconds) |
+| `GET /calls/<id>` | one whole call |
+| `DELETE /calls/<id>` | deletes a finished call |
 
 ## Setup
 
@@ -93,7 +122,8 @@ Claude to stop that task.
 The page listens on `127.0.0.1` only, and the API key never leaves the plugin.
 
 An app can hold the same call: POST its WebRTC offer to `/session` as
-`{ "sdp": "...", "voice": "marin" }` (the voice is optional), and it gets
+`{ "sdp": "...", "voice": "marin", "from": "app" }` (the voice is optional; `from`
+marks the call as the app's in the call history), and it gets
 OpenAI's session back, with the answer SDP in `transport.sdp`. Its data
 channel may send `session.input_audio.mute`, `session.input_audio.unmute` and
 `session.close`; `DELETE /session` ends the call from outside it.

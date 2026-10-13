@@ -8,6 +8,7 @@ import { connect } from 'net'
 import { homedir } from 'os'
 import { join } from 'path'
 import { Call, transcript, type Speaker, type Task } from './call.ts'
+import { CallLog, type CallRecord, type Source } from './calls.ts'
 import page from './page.html' with { type: 'text' }
 
 const STATE_DIR = join(homedir(), '.claude', 'channels', 'voice')
@@ -29,6 +30,7 @@ const CALLER_NUMBER = process.env.CALLER_NUMBER
 const PUBLIC_HOST = process.env.VOICE_PUBLIC_URL?.replace(/^\w+:\/\//, '')
 const HUB = process.env.HEX_HUB
 const THREAD = process.env.HEX_CHANNEL?.startsWith('plugin:voice@') ? process.env.HEX_THREAD : undefined
+const calls = new CallLog(join(STATE_DIR, 'calls'))
 
 const IDENTITY = (() => {
   try {
@@ -62,13 +64,22 @@ Backend work keeps running while you talk, and several tasks can run at once. A 
 
 type Pending = { resolve: () => void; reject: (error: Error) => void }
 type Ring = { delegation: string; offset: number }
-type Live = { id: string; socket: WebSocket; call: Call; pending: Map<string, Pending>; rings: Ring[]; speak?: (audio: string) => void }
-type Phone = { greeting: string; openai?: WebSocket; stream?: string; started?: true }
+type Live = {
+  id: string
+  socket: WebSocket
+  call: Call
+  record: Omit<CallRecord, 'turns' | 'tasks'>
+  pending: Map<string, Pending>
+  rings: Ring[]
+  speak?: (audio: string) => void
+}
+type Dial = { greeting: string; from: Source }
+type Phone = Dial & { openai?: WebSocket; stream?: string; started?: true }
 
 let live: Live | undefined
 let hub: ReturnType<typeof connect> | undefined
 let seq = 0
-const dials = new Map<string, string>()
+const dials = new Map<string, Dial>()
 
 const mcp = new Server(
   { name: 'voice', version: '0.1.0' },
@@ -85,6 +96,8 @@ Answer every handoff with say(delegation_id, text): the voice says only what you
 Keep each turn quick so the next handoff reaches you fast. Run anything longer than a quick lookup as a background subagent, put it on the board with task (running, then done or failed), and say its result when it arrives. Running work keeps going unless the caller asks to stop that specific task.
 
 phone rings the caller's phone and holds the same kind of call there, for when you're asked to call them.
+
+When a call ends, name it with title: a few plain words for what it was about, shown in the caller's list of past calls.
 
 A result too long to speak goes wherever the caller reads, if this session has another channel to reach them; say where you sent it. Voice page: http://localhost:${PORT}.`,
   },
@@ -124,6 +137,15 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: 'title',
+      description: "Name a call in the caller's list of past calls: a few plain words for what it was about.",
+      inputSchema: {
+        type: 'object',
+        properties: { call: { type: 'string', description: 'The call id from the call ended message' }, title: { type: 'string' } },
+        required: ['call', 'title'],
+      },
+    },
+    {
       name: 'phone',
       description: "Ring a phone and hold the call there: the caller's own number unless to is given (E.164, like +14155550123).",
       inputSchema: { type: 'object', properties: { to: { type: 'string' } } },
@@ -135,6 +157,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async request => {
   const args = (request.params.arguments ?? {}) as Record<string, string>
   try {
     if (request.params.name === 'phone') return done(await dial(args.to))
+    if (request.params.name === 'title') return done(name(args.call, args.title))
     if (!live) throw new Error('no call is live')
     switch (request.params.name) {
       case 'say':
@@ -144,7 +167,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async request => {
         await send(live, 'session.thinking.append', args.text, args.delegation_id)
         return done('noted')
       case 'task':
-        live.call.track({ id: args.id, state: args.state as Task['state'], text: args.text })
+        live.call.track({ id: args.id, state: args.state as Task['state'], text: args.text }, Date.now() - Date.parse(live.record.started))
+        save(live)
         await send(live, 'session.thinking.append', live.call.board())
         return done('board updated')
       default:
@@ -165,6 +189,22 @@ function send(call: Live, type: string, content: string, delegation?: string) {
   return new Promise<void>((resolve, reject) => call.pending.set(event_id, { resolve, reject }))
 }
 
+function save(call: Live) {
+  calls.save({ ...call.record, ...call.call.record() })
+}
+
+function name(id: string, title: string) {
+  if (live?.id === id) {
+    live.record.title = title
+    save(live)
+    return 'named'
+  }
+  const record = calls.get(id)
+  if (!record) throw new Error(`no call ${id}`)
+  calls.save({ ...record, title })
+  return 'named'
+}
+
 function deliver(content: string, meta: Record<string, string>) {
   void mcp.notification({ method: 'notifications/claude/channel', params: { content, meta } })
 }
@@ -176,6 +216,7 @@ function ring(call: Live, { delegation, offset }: Ring) {
     delegation_id: delegation,
     at: `${(offset / 1000).toFixed(1)}s`,
   })
+  save(call)
 }
 
 function hear(call: Live, who: Speaker, event: { delta: string; start_ms: number; end_ms: number }) {
@@ -189,15 +230,22 @@ function finish(call: Live, reason: string) {
   for (const pending of call.pending.values()) pending.reject(new Error(`the call ended (${reason})`))
   for (const pending of call.rings) ring(call, pending)
   const rest = call.call.handOff()
-  deliver(['The call ended.', ...(rest.length ? ['Last words:', transcript(rest)] : [])].join('\n'), { call: call.id, ended: reason })
+  call.record = { ...call.record, ended: new Date().toISOString(), end: reason }
+  save(call)
+  deliver(
+    ['The call ended. Name it with title.', ...(rest.length ? ['Last words:', transcript(rest)] : [])].join('\n'),
+    { call: call.id, ended: reason },
+  )
   hub?.write(JSON.stringify({ type: 'renew', thread: THREAD }) + '\n')
   call.socket.close()
 }
 
-function follow(id: string, socket: WebSocket, speak?: Live['speak']) {
+function follow(id: string, socket: WebSocket, from: Source, voice?: string, speak?: Live['speak']) {
   if (live) finish(live, 'replaced by a new call')
-  const call: Live = { id, socket, call: new Call(), pending: new Map(), rings: [], speak }
+  const record = { id, started: new Date().toISOString(), from, voice, claude: process.env.CLAUDE_CODE_SESSION_ID }
+  const call: Live = { id, socket, call: new Call(), record, pending: new Map(), rings: [], speak }
   live = call
+  save(call)
   deliver('A call started. Send the voice what it should know right away, with note.', { call: id, started: 'true' })
   socket.onmessage = ({ data }) => {
     const event = JSON.parse(String(data))
@@ -230,8 +278,8 @@ function follow(id: string, socket: WebSocket, speak?: Live['speak']) {
   socket.onclose = () => finish(call, 'connection closed')
 }
 
-function attach(id: string) {
-  follow(id, new WebSocket(`${API}/${id}/attach`, { headers: { Authorization: `Bearer ${KEY}` } } as any))
+function attach(id: string, from: Source, voice?: string) {
+  follow(id, new WebSocket(`${API}/${id}/attach`, { headers: { Authorization: `Bearer ${KEY}` } } as any), from, voice)
 }
 
 function session(extra: object = {}) {
@@ -248,7 +296,7 @@ async function dial(to = CALLER_NUMBER) {
     throw new Error(`phone calls need TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_NUMBER and VOICE_PUBLIC_URL in ${join(STATE_DIR, '.env')}`)
   if (!to) throw new Error('no number to call: pass to, or set CALLER_NUMBER')
   const token = crypto.randomUUID()
-  dials.set(token, 'You placed this phone call. Greet them briefly first, then listen.')
+  dials.set(token, { greeting: 'You placed this phone call. Greet them briefly first, then listen.', from: 'phone-out' })
   const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Calls.json`, {
     method: 'POST',
     headers: { Authorization: `Basic ${btoa(`${TWILIO_SID}:${TWILIO_TOKEN}`)}` },
@@ -278,7 +326,7 @@ function answer(twilio: Bun.ServerWebSocket<Phone>) {
     if (event.type === 'error' && !twilio.data.started) trace(`OpenAI refused the phone session: ${JSON.stringify(event.error)}`)
     if (event.type !== 'session.started') return
     twilio.data.started = true
-    follow(event.session.id, openai, audio => twilio.send(JSON.stringify({ event: 'media', streamSid: twilio.data.stream, media: { payload: audio } })))
+    follow(event.session.id, openai, twilio.data.from, VOICE, audio => twilio.send(JSON.stringify({ event: 'media', streamSid: twilio.data.stream, media: { payload: audio } })))
     openai.send(JSON.stringify({ type: 'session.instructions.append', delegation_id: null, content: twilio.data.greeting }))
   })
   openai.addEventListener('close', ({ code, reason }) => {
@@ -305,7 +353,7 @@ async function pickUp(request: Request) {
   const signature = createHmac('sha1', TWILIO_TOKEN ?? '').update(`https://${PUBLIC_HOST}/twilio/incoming${params}`).digest('base64')
   if (!TWILIO_TOKEN || request.headers.get('x-twilio-signature') !== signature || form.get('From') !== CALLER_NUMBER) return twiml('<Reject />')
   const token = crypto.randomUUID()
-  dials.set(token, 'They called you. Answer briefly, then listen.')
+  dials.set(token, { greeting: 'They called you. Answer briefly, then listen.', from: 'phone-in' })
   return stream(token)
 }
 
@@ -325,7 +373,7 @@ function hangUp(twilio: Bun.ServerWebSocket<Phone>) {
 
 async function start(request: Request) {
   if (!KEY) return new Response(`Set OPENAI_API_KEY in ${join(STATE_DIR, '.env')}`, { status: 503 })
-  const { sdp, voice = VOICE } = (await request.json()) as { sdp?: string; voice?: string }
+  const { sdp, voice = VOICE, from } = (await request.json()) as { sdp?: string; voice?: string; from?: string }
   if (!sdp) return new Response('An SDP offer is required', { status: 400 })
   const response = await fetch(API, {
     method: 'POST',
@@ -340,7 +388,7 @@ async function start(request: Request) {
   })
   if (!response.ok) return new Response(await response.text(), { status: response.status })
   const result = (await response.json()) as { session: { id: string } }
-  attach(result.session.id)
+  attach(result.session.id, from === 'app' ? 'app' : 'web', voice)
   return Response.json(result, { status: 201 })
 }
 
@@ -371,22 +419,39 @@ await mcp.connect(new StdioServerTransport())
 process.stdin.on('end', () => process.exit(0))
 process.stdin.on('close', () => process.exit(0))
 
+async function listCalls(url: URL) {
+  const after = url.searchParams.get('after')
+  if (after) await calls.changes(Number(after), 25_000)
+  return Response.json({ version: calls.version, live: live?.id, calls: calls.list() })
+}
+
 Bun.serve<Phone>({
   port: PORT,
+  idleTimeout: 40,
   hostname: '127.0.0.1',
   fetch(request, server) {
     const { pathname } = new URL(request.url)
     if (pathname === '/twilio/incoming' && request.method === 'POST') return pickUp(request)
     const [, token, twimlPath] = pathname.match(/^\/twilio\/([\w-]+)(\/twiml)?$/) ?? []
-    const greeting = dials.get(token)
-    if (token) trace(`Twilio ${request.method} ${twimlPath ? 'TwiML' : 'stream'}, ${greeting ? 'known' : 'unknown'} token`)
-    if (greeting && twimlPath) return stream(token)
-    if (greeting && dials.delete(token)) return server.upgrade(request, { data: { greeting } }) ? undefined : new Response('upgrade failed', { status: 400 })
+    const dialed = dials.get(token)
+    if (token) trace(`Twilio ${request.method} ${twimlPath ? 'TwiML' : 'stream'}, ${dialed ? 'known' : 'unknown'} token`)
+    if (dialed && twimlPath) return stream(token)
+    if (dialed && dials.delete(token)) return server.upgrade(request, { data: { ...dialed } }) ? undefined : new Response('upgrade failed', { status: 400 })
     if (pathname === '/') return new Response(page, { headers: { 'content-type': 'text/html; charset=utf-8' } })
     if (pathname === '/session' && request.method === 'POST') return start(request)
     if (pathname === '/session' && request.method === 'DELETE') {
       live?.socket.send(JSON.stringify({ type: 'session.close' }))
       return new Response(null, { status: 204 })
+    }
+    if (pathname === '/calls' && request.method === 'GET') return listCalls(new URL(request.url))
+    const [, callId] = pathname.match(/^\/calls\/([\w-]+)$/) ?? []
+    if (callId && request.method === 'GET') {
+      const record = calls.get(callId)
+      return record ? Response.json(record) : new Response('404', { status: 404 })
+    }
+    if (callId && request.method === 'DELETE') {
+      if (live?.id === callId) return new Response('That call is still going', { status: 409 })
+      return new Response(null, { status: calls.delete(callId) ? 204 : 404 })
     }
     if (pathname === '/phone' && request.method === 'POST')
       return dial().then(text => new Response(text), error => new Response(error.message, { status: 502 }))
