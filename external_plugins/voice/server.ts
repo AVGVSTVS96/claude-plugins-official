@@ -2,6 +2,7 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
+import { createHmac } from 'crypto'
 import { readFileSync } from 'fs'
 import { connect } from 'net'
 import { homedir } from 'os'
@@ -62,11 +63,11 @@ Backend work keeps running while you talk, and several tasks can run at once. A 
 type Pending = { resolve: () => void; reject: (error: Error) => void }
 type Ring = { delegation: string; offset: number }
 type Live = { id: string; socket: WebSocket; call: Call; pending: Map<string, Pending>; rings: Ring[]; speak?: (audio: string) => void }
-type Phone = { openai?: WebSocket; stream?: string; started?: true }
+type Phone = { greeting: string; openai?: WebSocket; stream?: string; started?: true }
 
 let live: Live | undefined
 let seq = 0
-const dials = new Set<string>()
+const dials = new Map<string, string>()
 
 const mcp = new Server(
   { name: 'voice', version: '0.1.0' },
@@ -245,7 +246,7 @@ async function dial(to = CALLER_NUMBER) {
     throw new Error(`phone calls need TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_NUMBER and VOICE_PUBLIC_URL in ${join(STATE_DIR, '.env')}`)
   if (!to) throw new Error('no number to call: pass to, or set CALLER_NUMBER')
   const token = crypto.randomUUID()
-  dials.add(token)
+  dials.set(token, 'You placed this phone call. Greet them briefly first, then listen.')
   const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Calls.json`, {
     method: 'POST',
     headers: { Authorization: `Basic ${btoa(`${TWILIO_SID}:${TWILIO_TOKEN}`)}` },
@@ -275,9 +276,27 @@ function answer(twilio: Bun.ServerWebSocket<Phone>) {
     if (event.type !== 'session.started') return
     twilio.data.started = true
     follow(event.session.id, openai, audio => twilio.send(JSON.stringify({ event: 'media', streamSid: twilio.data.stream, media: { payload: audio } })))
-    openai.send(JSON.stringify({ type: 'session.instructions.append', delegation_id: null, content: 'You placed this phone call. Greet them briefly first, then listen.' }))
+    openai.send(JSON.stringify({ type: 'session.instructions.append', delegation_id: null, content: twilio.data.greeting }))
   })
   openai.addEventListener('close', () => twilio.close())
+}
+
+function twiml(body: string) {
+  return new Response(`<Response>${body}</Response>`, { headers: { 'content-type': 'text/xml' } })
+}
+
+function stream(token: string) {
+  return twiml(`<Connect><Stream url="wss://${PUBLIC_HOST}/twilio/${token}" /></Connect>`)
+}
+
+async function pickUp(request: Request) {
+  const form = await request.formData()
+  const params = [...form.keys()].sort().map(key => key + form.get(key)).join('')
+  const signature = createHmac('sha1', TWILIO_TOKEN ?? '').update(`https://${PUBLIC_HOST}/twilio/incoming${params}`).digest('base64')
+  if (!TWILIO_TOKEN || request.headers.get('x-twilio-signature') !== signature || form.get('From') !== CALLER_NUMBER) return twiml('<Reject />')
+  const token = crypto.randomUUID()
+  dials.set(token, 'They called you. Answer briefly, then listen.')
+  return stream(token)
 }
 
 function hearPhone(twilio: Bun.ServerWebSocket<Phone>, raw: string | Buffer) {
@@ -343,10 +362,11 @@ Bun.serve<Phone>({
   hostname: '127.0.0.1',
   fetch(request, server) {
     const { pathname } = new URL(request.url)
-    const [, token, twiml] = pathname.match(/^\/twilio\/([\w-]+)(\/twiml)?$/) ?? []
-    if (twiml && dials.has(token))
-      return new Response(`<Response><Connect><Stream url="wss://${PUBLIC_HOST}/twilio/${token}" /></Connect></Response>`, { headers: { 'content-type': 'text/xml' } })
-    if (token && !twiml && dials.delete(token)) return server.upgrade(request, { data: {} }) ? undefined : new Response('upgrade failed', { status: 400 })
+    if (pathname === '/twilio/incoming' && request.method === 'POST') return pickUp(request)
+    const [, token, twimlPath] = pathname.match(/^\/twilio\/([\w-]+)(\/twiml)?$/) ?? []
+    const greeting = dials.get(token)
+    if (greeting && twimlPath) return stream(token)
+    if (greeting && dials.delete(token)) return server.upgrade(request, { data: { greeting } }) ? undefined : new Response('upgrade failed', { status: 400 })
     if (pathname === '/') return new Response(page, { headers: { 'content-type': 'text/html; charset=utf-8' } })
     if (pathname === '/session' && request.method === 'POST') return start(request)
     if (pathname === '/phone' && request.method === 'POST')

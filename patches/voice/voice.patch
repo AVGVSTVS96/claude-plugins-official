@@ -33,10 +33,10 @@ index 0000000000000000000000000000000000000000..07fdedd6c4bc9e7072f8d860f7eadd42
 +}
 diff --git a/external_plugins/voice/README.md b/external_plugins/voice/README.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..082549cd4ea9239ce7193362d80b9e8e4fd27117
+index 0000000000000000000000000000000000000000..7591456c43aaba663c2ab25abcab63dd7f06a52d
 --- /dev/null
 +++ b/external_plugins/voice/README.md
-@@ -0,0 +1,129 @@
+@@ -0,0 +1,133 @@
 +# voice
 +
 +Live voice calls for Claude Code. OpenAI's `gpt-live-1` talks with you in real
@@ -157,6 +157,10 @@ index 0000000000000000000000000000000000000000..082549cd4ea9239ce7193362d80b9e8e
 +`tailscale funnel --bg --https=8443 --set-path=/twilio http://127.0.0.1:8790/twilio`
 +(`VOICE_PUBLIC_URL=<host>.<tailnet>.ts.net:8443`). Each call's stream URL
 +carries a one-time token, so nothing else gets through.
++
++To call in, set your Twilio number's voice webhook (HTTP POST) to
++`https://<VOICE_PUBLIC_URL>/twilio/incoming`. The plugin picks up only calls
++Twilio signed whose caller is `CALLER_NUMBER`, and rejects the rest.
 +
 +## Limits
 +
@@ -647,14 +651,15 @@ index 0000000000000000000000000000000000000000..0502c4c9398edaa47623afcbbecf912a
 +</html>
 diff --git a/external_plugins/voice/server.ts b/external_plugins/voice/server.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..d404371272a62a8b863ad46cbc765d076a41638d
+index 0000000000000000000000000000000000000000..a9de7d448dc8e7aa718dd085b7b45a547f33ca4d
 --- /dev/null
 +++ b/external_plugins/voice/server.ts
-@@ -0,0 +1,361 @@
+@@ -0,0 +1,381 @@
 +#!/usr/bin/env bun
 +import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 +import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 +import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
++import { createHmac } from 'crypto'
 +import { readFileSync } from 'fs'
 +import { connect } from 'net'
 +import { homedir } from 'os'
@@ -715,11 +720,11 @@ index 0000000000000000000000000000000000000000..d404371272a62a8b863ad46cbc765d07
 +type Pending = { resolve: () => void; reject: (error: Error) => void }
 +type Ring = { delegation: string; offset: number }
 +type Live = { id: string; socket: WebSocket; call: Call; pending: Map<string, Pending>; rings: Ring[]; speak?: (audio: string) => void }
-+type Phone = { openai?: WebSocket; stream?: string; started?: true }
++type Phone = { greeting: string; openai?: WebSocket; stream?: string; started?: true }
 +
 +let live: Live | undefined
 +let seq = 0
-+const dials = new Set<string>()
++const dials = new Map<string, string>()
 +
 +const mcp = new Server(
 +  { name: 'voice', version: '0.1.0' },
@@ -898,7 +903,7 @@ index 0000000000000000000000000000000000000000..d404371272a62a8b863ad46cbc765d07
 +    throw new Error(`phone calls need TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_NUMBER and VOICE_PUBLIC_URL in ${join(STATE_DIR, '.env')}`)
 +  if (!to) throw new Error('no number to call: pass to, or set CALLER_NUMBER')
 +  const token = crypto.randomUUID()
-+  dials.add(token)
++  dials.set(token, 'You placed this phone call. Greet them briefly first, then listen.')
 +  const response = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Calls.json`, {
 +    method: 'POST',
 +    headers: { Authorization: `Basic ${btoa(`${TWILIO_SID}:${TWILIO_TOKEN}`)}` },
@@ -928,9 +933,27 @@ index 0000000000000000000000000000000000000000..d404371272a62a8b863ad46cbc765d07
 +    if (event.type !== 'session.started') return
 +    twilio.data.started = true
 +    follow(event.session.id, openai, audio => twilio.send(JSON.stringify({ event: 'media', streamSid: twilio.data.stream, media: { payload: audio } })))
-+    openai.send(JSON.stringify({ type: 'session.instructions.append', delegation_id: null, content: 'You placed this phone call. Greet them briefly first, then listen.' }))
++    openai.send(JSON.stringify({ type: 'session.instructions.append', delegation_id: null, content: twilio.data.greeting }))
 +  })
 +  openai.addEventListener('close', () => twilio.close())
++}
++
++function twiml(body: string) {
++  return new Response(`<Response>${body}</Response>`, { headers: { 'content-type': 'text/xml' } })
++}
++
++function stream(token: string) {
++  return twiml(`<Connect><Stream url="wss://${PUBLIC_HOST}/twilio/${token}" /></Connect>`)
++}
++
++async function pickUp(request: Request) {
++  const form = await request.formData()
++  const params = [...form.keys()].sort().map(key => key + form.get(key)).join('')
++  const signature = createHmac('sha1', TWILIO_TOKEN ?? '').update(`https://${PUBLIC_HOST}/twilio/incoming${params}`).digest('base64')
++  if (!TWILIO_TOKEN || request.headers.get('x-twilio-signature') !== signature || form.get('From') !== CALLER_NUMBER) return twiml('<Reject />')
++  const token = crypto.randomUUID()
++  dials.set(token, 'They called you. Answer briefly, then listen.')
++  return stream(token)
 +}
 +
 +function hearPhone(twilio: Bun.ServerWebSocket<Phone>, raw: string | Buffer) {
@@ -996,10 +1019,11 @@ index 0000000000000000000000000000000000000000..d404371272a62a8b863ad46cbc765d07
 +  hostname: '127.0.0.1',
 +  fetch(request, server) {
 +    const { pathname } = new URL(request.url)
-+    const [, token, twiml] = pathname.match(/^\/twilio\/([\w-]+)(\/twiml)?$/) ?? []
-+    if (twiml && dials.has(token))
-+      return new Response(`<Response><Connect><Stream url="wss://${PUBLIC_HOST}/twilio/${token}" /></Connect></Response>`, { headers: { 'content-type': 'text/xml' } })
-+    if (token && !twiml && dials.delete(token)) return server.upgrade(request, { data: {} }) ? undefined : new Response('upgrade failed', { status: 400 })
++    if (pathname === '/twilio/incoming' && request.method === 'POST') return pickUp(request)
++    const [, token, twimlPath] = pathname.match(/^\/twilio\/([\w-]+)(\/twiml)?$/) ?? []
++    const greeting = dials.get(token)
++    if (greeting && twimlPath) return stream(token)
++    if (greeting && dials.delete(token)) return server.upgrade(request, { data: { greeting } }) ? undefined : new Response('upgrade failed', { status: 400 })
 +    if (pathname === '/') return new Response(page, { headers: { 'content-type': 'text/html; charset=utf-8' } })
 +    if (pathname === '/session' && request.method === 'POST') return start(request)
 +    if (pathname === '/phone' && request.method === 'POST')

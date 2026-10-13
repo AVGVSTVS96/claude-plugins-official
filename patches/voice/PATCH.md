@@ -4,7 +4,7 @@ id: voice
 summary: Add a voice channel where OpenAI's gpt-live-1 holds a live call and hands every real request to the Claude Code session.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: voice.patch
-patch_sha256: 28fe2634044a2c3e941e28715678555f8916cfb65d7f3a20a5eb923fb0cb20f8
+patch_sha256: 71eb31b043757ab081dd1bdb5172c9223e13b808e813a0aa539248b3a6d4b49d
 ---
 
 ## Intent
@@ -37,6 +37,9 @@ plugin with no hub code.
   TwiML inline) and streams the call to `wss://VOICE_PUBLIC_URL/twilio/<token>`. The plugin accepts only a token it issued, opens a `gpt-live-1`
   WebSocket session in `audio/pcmu` at 8 kHz, and passes Twilio's μ-law
   frames through both ways; the call is followed exactly like a page call.
+- `POST /twilio/incoming` is the Twilio number's voice webhook: a call Twilio
+  signed (`X-Twilio-Signature`) from `CALLER_NUMBER` gets a one-time token
+  and streams the same way; any other call is rejected.
 - When the call closes, pending handoffs and the last words reach Claude
   with a "call ended" message.
 

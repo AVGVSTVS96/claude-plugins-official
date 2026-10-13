@@ -119,6 +119,10 @@ Twilio has to reach `/twilio` from the internet, for example with
 (`VOICE_PUBLIC_URL=<host>.<tailnet>.ts.net:8443`). Each call's stream URL
 carries a one-time token, so nothing else gets through.
 
+To call in, set your Twilio number's voice webhook (HTTP POST) to
+`https://<VOICE_PUBLIC_URL>/twilio/incoming`. The plugin picks up only calls
+Twilio signed whose caller is `CALLER_NUMBER`, and rejects the rest.
+
 ## Limits
 
 - Each update to the voice is capped at 500 tokens by OpenAI. Long results
