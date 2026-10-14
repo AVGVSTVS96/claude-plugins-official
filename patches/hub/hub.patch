@@ -1592,11 +1592,14 @@ index 0000000000000000000000000000000000000000..b1f1cf88baf4c824acee4bddb1f1539c
 +}
 diff --git a/hub/serve.ts b/hub/serve.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..94b202c07b0145cf91fde0d3cd43b38ad0ad9919
+index 0000000000000000000000000000000000000000..146515accd62fe95e6cb7bdc9d80115cbc95811f
 --- /dev/null
 +++ b/hub/serve.ts
-@@ -0,0 +1,11 @@
+@@ -0,0 +1,12 @@
 +import { free } from './hub.ts'
++
++// Before the clients load: Telegram's bot module awaits its polling loop, which never ends.
++process.on('SIGHUP', () => void free().then(() => process.exit(0)))
 +
 +await Promise.all([
 +  import('../external_plugins/telegram/bot.ts'),
@@ -1605,8 +1608,6 @@ index 0000000000000000000000000000000000000000..94b202c07b0145cf91fde0d3cd43b38a
 +  import('../external_plugins/t3/bot.ts'),
 +  import('../external_plugins/voice/bot.ts'),
 +])
-+
-+process.on('SIGHUP', () => void free().then(() => process.exit(0)))
 diff --git a/hub/state.ts b/hub/state.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..13680cbcb640b549f0cc7a61c90825746e4d2c8a
