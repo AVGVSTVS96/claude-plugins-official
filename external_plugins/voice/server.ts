@@ -239,7 +239,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async request => {
     if (request.params.name === 'title') return done(name(args.call, args))
     if (request.params.name === 'task') return done(await task(args.id, args.state as Task['state'], args.text, args.call, args.agent))
     if (request.params.name === 'send') return done(await pass(args.thread, args.about, args.text))
-    if (request.params.name === 'answer') return done(await settleAsk(args.id, args.label, 'call'))
+    if (request.params.name === 'answer') return done(await answerAsk(args.id, args.label, 'call'))
     if (request.params.name === 'note' && !live && ringing()) {
       briefing.push(args.text)
       return done('the call is still ringing; the voice gets this when it connects')
@@ -546,7 +546,7 @@ function show(call: Live, id: string) {
 }
 
 // An ask answered on a call, said aloud (via call) or tapped on its card (via app).
-async function settleAsk(id: string, label: string, via: string) {
+async function answerAsk(id: string, label: string, via: string) {
   const asks = hexAsks()
   if (!asks) throw new Error('asks are hex threads, and this voice plugin runs outside hex')
   const ask = asks.find(id) ?? live?.shown.get(id)
@@ -986,7 +986,7 @@ async function askRoutes(request: Request, url: URL) {
       const { label } = (await request.json()) as { label?: string }
       if (!label) return new Response('An answer needs its label', { status: 400 })
       const shown = live?.shown.has(key)
-      await settleAsk(key, label, 'app')
+      await answerAsk(key, label, 'app')
       if (shown) deliver(`The caller tapped "${label}" on the card for ${key}; it's sent to its thread.`, { call: live!.id })
     } else if (kind === 'asks' && verb === 'undo') await asks.undo(key, 'app')
     else if (kind === 'stuck' && verb === 'act') await asks.act(key)
