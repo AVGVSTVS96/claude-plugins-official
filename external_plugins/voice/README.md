@@ -189,6 +189,40 @@ An app starting a call with `"about": "<task id>"` in its `/session` body gets
 the same: the voice opens with the task, and Claude's "call started" message
 names it, so `send` can reach that thread.
 
+## Asks
+
+Everything waiting on you, in one list the app answers in place. The Telegram
+hub keeps a ledger (`state/telegram/ledger.json`, `hub/ledger.ts`): every
+question a thread asks with buttons or a poll, what became of it (tapped,
+answered in the app or on a call, settled, edited away), and each thread's
+pinned status post as last written. `asks.ts` reads it, with T3 Code's own
+records (`t3.ts`, read only) for what's stuck and what finished since you
+looked.
+
+```
+ reply(buttons) / poll ──► telegram hub ──► ledger.json ─┐
+ tap in Telegram ─────────►      │                       ├─► asks.ts ── GET /asks?after=<version>
+ pin / edit_message ──────►      │                       │                      │
+ ~/.t3/userdata/statev2.sqlite ──────────── t3.ts ───────┘                      ▼
+                                 ▲                                         the app's Tasks
+            {type:"answer"} on hub.sock ◄── POST /asks/<id>/answer ◄───────────┘
+```
+
+An answer from the app reaches the thread as your own tap would (with
+`answered_in`), and its Telegram buttons change to "Answered in the app". A
+poll can't take a vote from the bot, so it closes instead. Undo puts the
+buttons back and tells the thread the answer no longer stands.
+
+| Request | Answers |
+| --- | --- |
+| `GET /asks` | `{ version, asks, stuck, fresh, check }`: each open question's `id`, `kind` (`pick`, `yesno`, `do`, `look`), `task` and `topic` (its thread), `question`, `context`, `options` (`label`, `pick`, `url`), `tag`, `places` and a `link` to it; what's `stuck` (`title`, `why`, one `action`); what finished since you looked (`fresh`, with `read`); and the last check's time and counts |
+| `GET /asks?after=<version>` | the same, once anything has changed (or after 25 seconds) |
+| `POST /asks/<id>/answer` | `{ "label": "..." }`: answers it |
+| `POST /asks/<id>/undo` | takes that answer back |
+| `POST /stuck/<id>/act` | does its action: asks hex's General to fix it, or puts it away until it changes |
+| `POST /fresh/<id>/read` | marks a finished result read |
+| `GET /tasks/summary` | also counts what's `yours` |
+
 ## Setup
 
 1. Put an OpenAI API key with access to `gpt-live-1` (a paid tier) in

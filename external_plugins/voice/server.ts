@@ -11,6 +11,8 @@ import { findThread, followAgent, followThread, type Step, type Thread } from '.
 import { Call, transcript, type Mark, type Speaker, type Task } from './call.ts'
 import { CallLog, ending, usage, type CallRecord, type Ending, type Source } from './calls.ts'
 import { Changes } from './changes.ts'
+import { Asks } from './asks.ts'
+import { relay } from './relay.ts'
 import { Tasks, opener, type HexTask } from './tasks.ts'
 import page from './page.html' with { type: 'text' }
 
@@ -40,6 +42,7 @@ const calls = new CallLog(join(STATE_DIR, 'calls'))
 const activity = new Changes()
 const follows = new Map<string, () => void>()
 let board: Tasks | undefined
+let yours: Asks | undefined
 
 const IDENTITY = (() => {
   try {
@@ -289,7 +292,7 @@ async function pass(name: string, about: string, text: string, call = live?.id ?
     watch(call, id, thread, false)
   }
   try {
-    await post(join(HEX_STATE!, thread.app, 'hub.sock'), { type: 'inbound', thread: thread.id, content: text, meta: { user: 'hex voice', ...(id && { voice_task: `${call}:${id}` }) } })
+    await relay(HEX_STATE!, thread.app, { type: 'inbound', thread: thread.id, content: text, meta: { user: 'hex voice', ...(id && { voice_task: `${call}:${id}` }) } })
   } catch (error) {
     if (call && id) see(call, id, { end: 'failed' })
     throw error
@@ -355,14 +358,6 @@ function see(call: string, id: string, { line, end }: Step) {
 function stop(call: string, id: string) {
   follows.get(`${call} ${id}`)?.()
   follows.delete(`${call} ${id}`)
-}
-
-function post(path: string, message: object) {
-  return new Promise<void>((resolve, reject) => {
-    const socket = connect(path)
-    socket.on('connect', () => socket.end(JSON.stringify(message) + '\n', resolve))
-    socket.on('error', error => reject(new Error(`hex's hub isn't answering at ${path} (${error.message})`)))
-  })
 }
 
 function name(call: string, { title, summary, waiting }: { title?: string; summary?: string; waiting?: string[] }) {
@@ -867,23 +862,60 @@ function hexTasks() {
   return HEX_STATE ? (board ??= new Tasks(HEX_STATE, dirname(HEX_STATE))) : undefined
 }
 
+function hexAsks() {
+  return HEX_STATE ? (yours ??= new Asks(HEX_STATE)) : undefined
+}
+
 async function showTasks(url: URL, tasks: Tasks) {
   const after = url.searchParams.get('after')
   if (after) await tasks.changes(Number(after), 25_000)
   return Response.json({ version: tasks.version, tasks: tasks.rows() })
 }
 
-async function showSummary(url: URL, tasks: Tasks) {
+// The Tasks button's counts: threads that need you and are working, and how many things are yours.
+async function showSummary(url: URL, tasks: Tasks, asks: Asks) {
+  const version = () => tasks.counts.version + asks.counts.version
+  const after = Number(url.searchParams.get('after'))
+  if (after === version()) await Promise.race([tasks.counts.changes(tasks.counts.version, 25_000), asks.counts.changes(asks.counts.version, 25_000)])
+  return Response.json({ version: version(), ...tasks.summary, yours: asks.view.asks.length })
+}
+
+async function showAsks(url: URL, asks: Asks) {
   const after = url.searchParams.get('after')
-  if (after) await tasks.counts.changes(Number(after), 25_000)
-  return Response.json({ version: tasks.counts.version, ...tasks.summary })
+  if (after) await asks.changes(Number(after), 25_000)
+  return Response.json({ version: asks.version, ...asks.view })
+}
+
+// What the app's tap on an ask, a stuck item or a new result does. Each answers once the hub has it;
+// the change itself comes back through the list.
+async function askRoutes(request: Request, url: URL) {
+  const asks = hexAsks()
+  if (!asks) return new Response('Asks are hex threads, and this voice plugin runs outside hex', { status: 404 })
+  if (url.pathname === '/asks' && request.method === 'GET') return showAsks(url, asks)
+  if (url.pathname === '/asks/check' && request.method === 'GET') return asks.check ? Response.json(asks.check) : new Response('No check yet', { status: 404 })
+  const [, kind, id, verb] = url.pathname.match(/^\/(asks|stuck|fresh)\/([^/]+)\/(answer|undo|act|read)$/) ?? []
+  if (!kind || request.method !== 'POST') return new Response('404', { status: 404 })
+  const key = decodeURIComponent(id!)
+  try {
+    if (kind === 'asks' && verb === 'answer') {
+      const { label } = (await request.json()) as { label?: string }
+      if (!label) return new Response('An answer needs its label', { status: 400 })
+      await asks.answer(key, label, 'app')
+    } else if (kind === 'asks' && verb === 'undo') await asks.undo(key, 'app')
+    else if (kind === 'stuck' && verb === 'act') await asks.act(key)
+    else if (kind === 'fresh' && verb === 'read') asks.read(key)
+    else return new Response('404', { status: 404 })
+  } catch (error) {
+    return new Response(error instanceof Error ? error.message : String(error), { status: 409 })
+  }
+  return new Response(null, { status: 204 })
 }
 
 function taskRoutes(request: Request, url: URL) {
   const tasks = hexTasks()
   if (!tasks) return new Response('Tasks are hex threads, and this voice plugin runs outside hex', { status: 404 })
   if (url.pathname === '/tasks' && request.method === 'GET') return showTasks(url, tasks)
-  if (url.pathname === '/tasks/summary' && request.method === 'GET') return showSummary(url, tasks)
+  if (url.pathname === '/tasks/summary' && request.method === 'GET') return showSummary(url, tasks, hexAsks()!)
   const [, id, talking] = url.pathname.match(/^\/tasks\/([^/]+)(\/talk)?$/) ?? []
   const task = id && tasks.get(decodeURIComponent(id))
   if (!task) return new Response('404', { status: 404 })
@@ -907,6 +939,7 @@ function routes(request: Request) {
   if (pathname === '/calls' && request.method === 'GET') return listCalls(new URL(request.url))
   if (pathname === '/activity' && request.method === 'GET') return showActivity(new URL(request.url))
   if (pathname === '/tasks' || pathname.startsWith('/tasks/')) return taskRoutes(request, new URL(request.url))
+  if (/^\/(asks|stuck|fresh)(\/|$)/.test(pathname)) return askRoutes(request, new URL(request.url))
   const [, callId, moments] = pathname.match(/^\/calls\/([\w-]+)(\/moments)?$/) ?? []
   if (callId && moments && request.method === 'POST') return interruption(request, callId)
   if (callId && !moments && request.method === 'GET') {
