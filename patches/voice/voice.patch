@@ -33,10 +33,10 @@ index 0000000000000000000000000000000000000000..07fdedd6c4bc9e7072f8d860f7eadd42
 +}
 diff --git a/external_plugins/voice/README.md b/external_plugins/voice/README.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..0681d1a55259ed1c778a1ac22694fe8244d5c92a
+index 0000000000000000000000000000000000000000..c421510e562538b86ffda15f2c777c211f7a48f0
 --- /dev/null
 +++ b/external_plugins/voice/README.md
-@@ -0,0 +1,265 @@
+@@ -0,0 +1,362 @@
 +# voice
 +
 +Live voice calls for Claude Code. OpenAI's `gpt-live-1` talks with you in real
@@ -194,6 +194,103 @@ index 0000000000000000000000000000000000000000..0681d1a55259ed1c778a1ac22694fe82
 +| `GET /activity` | `{ version, call, tasks }`: the live call's tasks, most recently changed first, each with its latest `line` |
 +| `GET /activity?after=<version>` | the same, once anything has changed since that version (or after 25 seconds) |
 +
++## Tasks
++
++In hex, the app can also show every hex thread as a task, call or no call:
++what needs you, what's working and its newest step, and what finished. Nothing
++new reports in: `tasks.ts` reads the records Claude Code already keeps (the
++same ones `claude agents --json` prints) and wakes when one of them changes.
++
++```
++ ~/.claude/jobs/<id>/state.json      working, blocked or done; its status line; what it needs
++ ~/.claude/jobs/<id>/timeline.jsonl  each change, with its time
++ ~/.claude/sessions/<pid>.json       which sessions are running
++ state/<app>/threads.json            each thread's name and current session
++ <session>.jsonl transcripts         a working thread's newest step, its agents' too
++                    │
++                    ▼
++        GET /tasks?after=<version> ── the app's Tasks sheet
++```
++
++A blocked thread needs you; a working one whose session stopped counts as idle;
++anything that finished more than a week ago is left out. Rows come in that
++order (needs you, working, done, failed, idle), newest change first in each.
++
++| Request | Answers |
++| --- | --- |
++| `GET /tasks` | `{ version, tasks }`: each thread's `id`, `name`, `where` (Telegram, General, Discord...), `state` (`needs`, `working`, `done`, `failed`, `idle`), one `line`, `since` its state began, `at` its last change, its running `agents` with their own lines, and a Telegram `link` |
++| `GET /tasks?after=<version>` | the same, once anything has changed (or after 25 seconds) |
++| `GET /tasks/summary?after=<version>` | `{ version, needs, working }`, once a count changes |
++| `GET /tasks/<id>` | one task, with what it `needs` from you in full and what it did `lately` |
++| `POST /tasks/<id>/talk` | during a call: the voice brings the task up, and Claude hears which thread it is |
++
++An app starting a call with `"about": "<task id>"` in its `/session` body gets
++the same: the voice opens with the task, and Claude's "call started" message
++names it, so `send` can reach that thread.
++
++## Asks
++
++Everything waiting on you, in one list the app answers in place. The Telegram
++hub keeps a ledger (`state/telegram/ledger.json`, `hub/ledger.ts`): every
++question a thread asks with buttons or a poll, what became of it (tapped,
++answered in the app or on a call, settled, edited away), and each thread's
++pinned status post as last written. `asks.ts` reads it, with T3 Code's own
++records (`t3.ts`, read only) for what's stuck and what finished since you
++looked.
++
++```
++ reply(buttons) / poll ──► telegram hub ──► ledger.json ─┐
++ tap in Telegram ─────────►      │                       ├─► asks.ts ── GET /asks?after=<version>
++ pin / edit_message ──────►      │                       │                      │
++ ~/.t3/userdata/statev2.sqlite ──────────── t3.ts ───────┘                      ▼
++                                 ▲                                         the app's Tasks
++            {type:"answer"} on hub.sock ◄── POST /asks/<id>/answer ◄───────────┘
++```
++
++An answer from the app reaches the thread as your own tap would (with
++`answered_in`), and its Telegram buttons change to "Answered in the app". A
++poll can't take a vote from the bot, so it closes instead. Undo puts the
++buttons back and tells the thread the answer no longer stands.
++
++| Request | Answers |
++| --- | --- |
++| `GET /asks` | `{ version, asks, stuck, fresh, check }`: each open question's `id`, `kind` (`pick`, `yesno`, `do`, `look`), `task` and `topic` (its thread), `question`, `context`, `options` (`label`, `pick`, `url`), `tag`, `places` and a `link` to it; what's `stuck` (`title`, `why`, one `action`); what finished since you looked (`fresh`, with `read`); and the last check's time and counts |
++| `GET /asks?after=<version>` | the same, once anything has changed (or after 25 seconds) |
++| `POST /asks/<id>/answer` | `{ "label": "..." }`: answers it |
++| `POST /asks/<id>/undo` | takes that answer back |
++| `POST /stuck/<id>/act` | does its action: asks hex's General to fix it, or puts it away until it changes |
++| `POST /fresh/<id>/read` | marks a finished result read |
++| `POST /asks/talk` | during a call: Claude walks you through them, one card at a time |
++| `GET /asks/check` | the last check in full: what it `read`, what it `fixed` on its own, what it `flagged` |
++| `GET /tasks/summary` | also counts what's `yours` |
++| `GET /tasks/<id>` | also the thread's own `asks` and its pinned post (`pin`) |
++
++### The check
++
++`check.ts` is hex auditing its own asks against what actually happened: an
++Opus pass (`claude -p`, read-only tools, structured output) over the ledger's
++open and lately closed questions, every pinned post, the last three days of
++call wrap-ups and what T3 Code shows. It rewrites the raw questions into one
++list (repeats merged into one ask with every place that asked it, hex's pick,
++what each unblocks or costs, most unblocking first), settles the questions the
++records show are already decided or done (their buttons say why), and flags
++what it can't settle. It never answers for you.
++
++It runs on real events, one pass at a time in a process of its own (so it
++outlives the voice session that started it), and anything that happens during
++a pass starts one more when it ends: a pinned post changes, a T3 run ends, a
++call's wrap-up lands, or Tasks opens with questions newer than the last pass.
++It writes `state/voice/check.json`; `check/error` keeps the last failure.
++
++### On a call
++
++In hex the voice session also has `ask` (put an open ask on the caller's
++screen as a card in the transcript, by id) and `answer` (send the choice they
++said aloud). `GET /activity` carries the call's cards as `asks`, each with its
++answer once it has one; a tap on a card answers it like the Tasks sheet does,
++and Claude hears it. An app starting a call with `"about": "asks"` (Go through
++them with hex) gets Claude walking the list in order.
++
 +## Setup
 +
 +1. Put an OpenAI API key with access to `gpt-live-1` (a paid tier) in
@@ -304,7 +401,7 @@ index 0000000000000000000000000000000000000000..0681d1a55259ed1c778a1ac22694fe82
 +- One call at a time. A new call ends the previous one.
 diff --git a/external_plugins/voice/activity.test.ts b/external_plugins/voice/activity.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..c4ee7dd3bbf8d1fb9768c04564b9d21c0996f227
+index 0000000000000000000000000000000000000000..3eeb33129185c9d11d32909d0ea575c49b7c95f6
 --- /dev/null
 +++ b/external_plugins/voice/activity.test.ts
 @@ -0,0 +1,153 @@
@@ -360,7 +457,7 @@ index 0000000000000000000000000000000000000000..c4ee7dd3bbf8d1fb9768c04564b9d21c
 +  const path = join(home, 'steps.jsonl')
 +  write(path, ...steps)
 +  const lines: (string | undefined)[] = []
-+  followTranscript(path, true, (_: unknown, updates: () => any[]) => lines.push(...updates().map(headline)))()
++  followTranscript(path, 0, (_: unknown, updates: () => any[]) => lines.push(...updates().map(headline)))()
 +  expect(lines).toEqual([
 +    'Show recent commits',
 +    'Running uptime',
@@ -463,10 +560,10 @@ index 0000000000000000000000000000000000000000..c4ee7dd3bbf8d1fb9768c04564b9d21c
 +})
 diff --git a/external_plugins/voice/activity.ts b/external_plugins/voice/activity.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..5dcd8644eaa2c824e6f575acc741297d61c4dff4
+index 0000000000000000000000000000000000000000..2895d5c588951ad5b27ad7b6c6f42f42b7751dae
 --- /dev/null
 +++ b/external_plugins/voice/activity.ts
-@@ -0,0 +1,232 @@
+@@ -0,0 +1,233 @@
 +import { closeSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, statSync, watch } from 'fs'
 +import { homedir } from 'os'
 +import { basename, dirname, join } from 'path'
@@ -477,7 +574,7 @@ index 0000000000000000000000000000000000000000..5dcd8644eaa2c824e6f575acc741297d
 +export type Step = { line?: string; end?: 'done' | 'failed' }
 +export type Thread = { app: string; id: string; name: string; cwd?: string; threads: string }
 +
-+const PROJECTS = join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'projects')
++const projects = () => join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude'), 'projects')
 +const client = { sessionUpdate: async () => {} } as unknown as Parameters<typeof toAcpNotifications>[4]
 +const logger = { log: () => {}, error: (...args: unknown[]) => process.stderr.write(`voice: activity: ${args.join(' ')}\n`) }
 +const ID = /^[\w-]+$/
@@ -530,12 +627,13 @@ index 0000000000000000000000000000000000000000..5dcd8644eaa2c824e6f575acc741297d
 +  return line ? line.slice(0, 160) : undefined
 +}
 +
-+// Follows one Claude Code transcript as Claude Code writes it (a file change, not a timer):
-+// every new line, and the ACP updates its assistant content makes, converted when asked for.
-+export function followTranscript(path: string, fromStart: boolean, onEntry: (entry: any, updates: () => Update[]) => void) {
++// Follows one Claude Code transcript as Claude Code writes it (a file change, not a timer), from
++// a byte offset or its end: every new line, and the ACP updates its assistant content makes,
++// converted when asked for. A line cut in half by the offset is skipped.
++export function followTranscript(path: string, from: number | 'end', onEntry: (entry: any, updates: () => Update[]) => void) {
 +  const tools = {}
 +  const tasks = new Map()
-+  let offset = fromStart ? 0 : sizeOf(path)
++  let offset = from === 'end' ? sizeOf(path) : from
 +  let rest = Buffer.alloc(0)
 +  let closed = false
 +  mkdirSync(dirname(path), { recursive: true })
@@ -598,8 +696,8 @@ index 0000000000000000000000000000000000000000..5dcd8644eaa2c824e6f575acc741297d
 +  if (!ID.test(agent)) return
 +  const patterns = [...(session && ID.test(session) ? [`*/${session}/subagents/agent-${agent}.jsonl`] : []), `*/*/subagents/agent-${agent}.jsonl`]
 +  for (const pattern of patterns)
-+    for (const path of new Bun.Glob(pattern).scanSync({ cwd: PROJECTS, absolute: true }))
-+      return followTranscript(path, true, (_, updates) => lines(updates(), onStep))
++    for (const path of new Bun.Glob(pattern).scanSync({ cwd: projects(), absolute: true }))
++      return followTranscript(path, 0, (_, updates) => lines(updates(), onStep))
 +}
 +
 +// hex threads (Telegram topics, Discord, Buzz and T3 Code threads), from each app's threads.json.
@@ -637,8 +735,8 @@ index 0000000000000000000000000000000000000000..5dcd8644eaa2c824e6f575acc741297d
 +    const fresh = resumed || session !== undefined
 +    stopSession()
 +    session = next
-+    project = join(PROJECTS, (thread.cwd ?? hexDir).replace(/[^a-zA-Z0-9]/g, '-'))
-+    stopSession = followTranscript(join(project, `${session}.jsonl`), fresh, take)
++    project = join(projects(), (thread.cwd ?? hexDir).replace(/[^a-zA-Z0-9]/g, '-'))
++    stopSession = followTranscript(join(project, `${session}.jsonl`), fresh ? 0 : 'end', take)
 +  }
 +
 +  function take(entry: any, updates: () => Update[]) {
@@ -649,7 +747,7 @@ index 0000000000000000000000000000000000000000..5dcd8644eaa2c824e6f575acc741297d
 +    }
 +    const launched = entry.toolUseResult?.isAsync && entry.toolUseResult.agentId
 +    if (launched && ID.test(launched) && !agents.has(launched))
-+      agents.set(launched, followTranscript(join(project, session!, 'subagents', `agent-${launched}.jsonl`), true, (_, updates) => lines(updates(), onStep)))
++      agents.set(launched, followTranscript(join(project, session!, 'subagents', `agent-${launched}.jsonl`), 0, (_, updates) => lines(updates(), onStep)))
 +    const back = entry.origin?.kind === 'task-notification' && JSON.stringify(entry.message?.content).match(/<task-id>([\w-]+)<\/task-id>/)?.[1]
 +    if (back) {
 +      agents.get(back)?.()
@@ -692,7 +790,7 @@ index 0000000000000000000000000000000000000000..5dcd8644eaa2c824e6f575acc741297d
 +  } catch {}
 +}
 +
-+function sizeOf(path: string) {
++export function sizeOf(path: string) {
 +  try {
 +    return statSync(path).size
 +  } catch {
@@ -1092,10 +1190,10 @@ index 0000000000000000000000000000000000000000..a3c3cdc6e9e2a31edeefb69378db4068
 +})
 diff --git a/external_plugins/voice/call.ts b/external_plugins/voice/call.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..3b00032314d88b01f198a33c5be8389ecd74d426
+index 0000000000000000000000000000000000000000..34c8b507b78c7bf559522ef4a99ca830edeffdd9
 --- /dev/null
 +++ b/external_plugins/voice/call.ts
-@@ -0,0 +1,113 @@
+@@ -0,0 +1,114 @@
 +export type Speaker = 'you' | 'voice'
 +
 +export type Fragment = { who: Speaker; text: string; start: number; end: number }
@@ -1106,7 +1204,8 @@ index 0000000000000000000000000000000000000000..3b00032314d88b01f198a33c5be8389e
 +
 +export type Moment = Task & { at: number }
 +
-+export type Mark = { at: number; kind: 'say' | 'note' | 'paused' | 'resumed' | 'warned'; text: string }
++// ask: a question put on the caller's screen (its text) by its id; answered: its answer.
++export type Mark = { at: number; kind: 'say' | 'note' | 'paused' | 'resumed' | 'warned' | 'ask' | 'answered'; text: string; ask?: string }
 +
 +export type Saved = { turns: { who: Speaker; at: number; text: string }[]; tasks: Moment[]; moments?: Mark[] }
 +
@@ -1788,10 +1887,10 @@ index 0000000000000000000000000000000000000000..0ada79ea59ad789671d2c7bda2164d2e
 +</html>
 diff --git a/external_plugins/voice/server.ts b/external_plugins/voice/server.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..b549f752a7aa343bceb78ecf35c2be9a48e0eb1e
+index 0000000000000000000000000000000000000000..c8fedbdf96ddedb6149305396097577ed9f78ac2
 --- /dev/null
 +++ b/external_plugins/voice/server.ts
-@@ -0,0 +1,893 @@
+@@ -0,0 +1,1067 @@
 +#!/usr/bin/env bun
 +import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 +import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
@@ -1805,6 +1904,9 @@ index 0000000000000000000000000000000000000000..b549f752a7aa343bceb78ecf35c2be9a
 +import { Call, transcript, type Mark, type Speaker, type Task } from './call.ts'
 +import { CallLog, ending, usage, type CallRecord, type Ending, type Source } from './calls.ts'
 +import { Changes } from './changes.ts'
++import { Asks, type Ask } from './asks.ts'
++import { relay } from './relay.ts'
++import { Tasks, opener, type HexTask } from './tasks.ts'
 +import page from './page.html' with { type: 'text' }
 +
 +const STATE_DIR = join(homedir(), '.claude', 'channels', 'voice')
@@ -1832,6 +1934,8 @@ index 0000000000000000000000000000000000000000..b549f752a7aa343bceb78ecf35c2be9a
 +const calls = new CallLog(join(STATE_DIR, 'calls'))
 +const activity = new Changes()
 +const follows = new Map<string, () => void>()
++let board: Tasks | undefined
++let yours: Asks | undefined
 +
 +const IDENTITY = (() => {
 +  try {
@@ -1867,6 +1971,7 @@ index 0000000000000000000000000000000000000000..b549f752a7aa343bceb78ecf35c2be9a
 +type Ring = { delegation: string; offset: number }
 +type Live = {
 +  id: string
++  shown: Map<string, Ask>
 +  socket: WebSocket
 +  call: Call
 +  record: Omit<CallRecord, 'turns' | 'tasks' | 'moments'>
@@ -1956,6 +2061,21 @@ index 0000000000000000000000000000000000000000..b549f752a7aa343bceb78ecf35c2be9a
 +    ...(HEX_STATE
 +      ? [
 +          {
++            name: 'ask',
++            description:
++              "Put one of the caller's open asks on their screen as a card in the call's transcript, by its id from the list you were given: they can tap a choice there or say it.",
++            inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
++          },
++          {
++            name: 'answer',
++            description: "Answer one of the caller's asks with the choice they said aloud: it reaches the thread that asked as their own tap would, and its Telegram buttons say it was answered on a call.",
++            inputSchema: {
++              type: 'object',
++              properties: { id: { type: 'string' }, label: { type: 'string', description: "The option's label, or their own words when none fits" } },
++              required: ['id', 'label'],
++            },
++          },
++          {
 +            name: 'send',
 +            description:
 +              "Hand work to a hex thread, by its name or id: your message reaches that thread's session from hex voice, the work goes on the board as running, the caller sees each step the thread takes on it, and the board shows it done or failed when the thread's turn ends with none of its agents still out.",
@@ -2012,6 +2132,7 @@ index 0000000000000000000000000000000000000000..b549f752a7aa343bceb78ecf35c2be9a
 +    if (request.params.name === 'title') return done(name(args.call, args))
 +    if (request.params.name === 'task') return done(await task(args.id, args.state as Task['state'], args.text, args.call, args.agent))
 +    if (request.params.name === 'send') return done(await pass(args.thread, args.about, args.text))
++    if (request.params.name === 'answer') return done(await answerAsk(args.id, args.label, 'call'))
 +    if (request.params.name === 'note' && !live && ringing()) {
 +      briefing.push(args.text)
 +      return done('the call is still ringing; the voice gets this when it connects')
@@ -2026,6 +2147,8 @@ index 0000000000000000000000000000000000000000..b549f752a7aa343bceb78ecf35c2be9a
 +        return done('noted')
 +      case 'hang_up':
 +        return done(await hangUpCall(live))
++      case 'ask':
++        return done(show(live, args.id))
 +      default:
 +        throw new Error(`unknown tool ${request.params.name}`)
 +    }
@@ -2054,8 +2177,8 @@ index 0000000000000000000000000000000000000000..b549f752a7aa343bceb78ecf35c2be9a
 +  return Date.now() - Date.parse(call.record.started)
 +}
 +
-+function remember(call: Live, kind: Mark['kind'], text: string) {
-+  call.call.mark({ at: since(call), kind, text })
++function remember(call: Live, kind: Mark['kind'], text: string, ask?: string) {
++  call.call.mark({ at: since(call), kind, text, ...(ask && { ask }) })
 +  save(call)
 +}
 +
@@ -2081,7 +2204,7 @@ index 0000000000000000000000000000000000000000..b549f752a7aa343bceb78ecf35c2be9a
 +    watch(call, id, thread, false)
 +  }
 +  try {
-+    await post(join(HEX_STATE!, thread.app, 'hub.sock'), { type: 'inbound', thread: thread.id, content: text, meta: { user: 'hex voice', ...(id && { voice_task: `${call}:${id}` }) } })
++    await relay(HEX_STATE!, thread.app, { type: 'inbound', thread: thread.id, content: text, meta: { user: 'hex voice', ...(id && { voice_task: `${call}:${id}` }) } })
 +  } catch (error) {
 +    if (call && id) see(call, id, { end: 'failed' })
 +    throw error
@@ -2149,20 +2272,13 @@ index 0000000000000000000000000000000000000000..b549f752a7aa343bceb78ecf35c2be9a
 +  follows.delete(`${call} ${id}`)
 +}
 +
-+function post(path: string, message: object) {
-+  return new Promise<void>((resolve, reject) => {
-+    const socket = connect(path)
-+    socket.on('connect', () => socket.end(JSON.stringify(message) + '\n', resolve))
-+    socket.on('error', error => reject(new Error(`hex's hub isn't answering at ${path} (${error.message})`)))
-+  })
-+}
-+
 +function name(call: string, { title, summary, waiting }: { title?: string; summary?: string; waiting?: string[] }) {
 +  const change = { ...(title ? { title } : {}), ...(summary ? { summary } : {}), ...(Array.isArray(waiting) ? { waiting } : {}) }
 +  if (live?.id === call) {
 +    Object.assign(live.record, change)
 +    save(live)
 +  } else calls.save({ ...past(call), ...change })
++  if (Array.isArray(waiting)) hexAsks()?.called()
 +  return 'saved'
 +}
 +
@@ -2246,12 +2362,12 @@ index 0000000000000000000000000000000000000000..b549f752a7aa343bceb78ecf35c2be9a
 +  return [...placed.values()].some(call => !call.session)
 +}
 +
-+function follow(socket: WebSocket, record: Live['record'], { call = new Call(), speak, hello }: { call?: Call; speak?: Live['speak']; hello?: string } = {}) {
++function follow(socket: WebSocket, record: Live['record'], { call = new Call(), speak, hello, about }: { call?: Call; speak?: Live['speak']; hello?: string; about?: Topic } = {}) {
 +  if (live) {
 +    live.socket.send(JSON.stringify({ type: 'session.close', event_id: 'close-you-moved' }))
 +    finish(live, 'moved to a new call', 'close-you-moved')
 +  }
-+  const current: Live = { id: record.id, socket, call, record, pending: new Map(), rings: [], spoke: 0, speak }
++  const current: Live = { id: record.id, shown: new Map(), socket, call, record, pending: new Map(), rings: [], spoke: 0, speak }
 +  live = current
 +  save(current)
 +  activity.changed()
@@ -2259,11 +2375,81 @@ index 0000000000000000000000000000000000000000..b549f752a7aa343bceb78ecf35c2be9a
 +  listen(current, socket)
 +  warn(current)
 +  deliver(
-+    hello ?? [`A call started.${record.why ? ` You placed it because: ${record.why}` : ''}`, 'Send the voice what it should know right away, with note.'].join('\n'),
-+    { call: record.id, started: 'true' },
++    hello ??
++      [
++        `A call started.${record.why ? ` You placed it because: ${record.why}` : ''}`,
++        ...(about ? [about.claude] : []),
++        'Send the voice what it should know right away, with note.',
++      ].join('\n'),
++    { call: record.id, started: 'true', ...(about && { task: about.id }) },
 +  )
 +  for (const text of briefing.splice(0)) void tell(current, 'note', text).catch(() => {})
++  if (about) whenOpen(socket, () => void send(current, 'session.instructions.append', about.voice).catch(() => {}))
 +  return current
++}
++
++function whenOpen(socket: WebSocket, then: () => void) {
++  if (socket.readyState === WebSocket.OPEN) then()
++  else socket.addEventListener('open', then, { once: true })
++}
++
++// What a call is about when the app starts it on something: what Claude hears, and what the voice
++// is told to do first.
++type Topic = { id: string; claude: string; voice: string }
++
++function taskTopic(task: HexTask): Topic {
++  return {
++    id: task.id,
++    claude: `The caller started it with Talk it through on a task. ${opener(task)}`,
++    voice: `The caller tapped Talk it through on a task, so bring it up now in a sentence or two, then listen. ${opener(task)}`,
++  }
++}
++
++// Go through them with hex: Claude walks the caller's asks in the app's order, one card at a time.
++function walkTopic(asks: Ask[]): Topic {
++  const list = asks.map(
++    (ask, i) =>
++      `${i + 1}. ${ask.id} · ${ask.topic} · ${ask.question}${ask.context ? ` (${ask.context})` : ''} Options: ${ask.options.map(option => `${option.label}${option.pick ? ' (hex’s pick)' : ''}`).join(' / ')}${ask.tag ? ` [${ask.tag}]` : ''}`,
++  )
++  return {
++    id: 'asks',
++    claude: [
++      `The caller tapped Go through them with hex: walk them through the ${asks.length} things waiting on them, one at a time, in this order. For each, put it on screen with ask, say it in a sentence or two with hex's pick if it has one, and listen. When they say a choice, answer sends it to the thread that asked; when they tap the card instead, a message tells you. Move on when they skip one. Say so when a choice costs money or goes out in their name.`,
++      ...list,
++    ].join('\n'),
++    voice: `The caller wants to go through what's waiting on them, one at a time. Say you'll start with the first one, and hand off to the backend now: it brings each one up.`,
++  }
++}
++
++function talkAbout(topic: Topic) {
++  if (!live) return new Response('No call is live', { status: 409 })
++  deliver(`The caller asked for this from the app during the call. ${topic.claude}`, { call: live.id, task: topic.id })
++  void send(live, 'session.instructions.append', topic.voice).catch(() => {})
++  return new Response(null, { status: 204 })
++}
++
++// Puts an ask on the caller's screen as a card in the transcript.
++function show(call: Live, id: string) {
++  const ask = hexAsks()?.find(id)
++  if (!ask) throw new Error(`no open ask ${id}`)
++  call.shown.set(id, ask)
++  remember(call, 'ask', ask.question, id)
++  activity.changed()
++  return `showing "${ask.question}" to the caller`
++}
++
++// An ask answered on a call, said aloud (via call) or tapped on its card (via app).
++async function answerAsk(id: string, label: string, via: string) {
++  const asks = hexAsks()
++  if (!asks) throw new Error('asks are hex threads, and this voice plugin runs outside hex')
++  const ask = asks.find(id) ?? live?.shown.get(id)
++  await asks.answer(id, label, via)
++  if (live && ask) {
++    live.shown.set(id, ask)
++    remember(live, 'answered', label, id)
++    activity.changed()
++  }
++  return `sent "${label}" to ${ask?.topic ?? 'its thread'}`
 +}
 +
 +function listen(call: Live, socket: WebSocket, attempt = 0) {
@@ -2539,7 +2725,7 @@ index 0000000000000000000000000000000000000000..b549f752a7aa343bceb78ecf35c2be9a
 +
 +async function start(request: Request) {
 +  if (!KEY) return new Response(`Set OPENAI_API_KEY in ${join(STATE_DIR, '.env')}`, { status: 503 })
-+  const { sdp, voice = VOICE, from: origin } = (await request.json()) as { sdp?: string; voice?: string; from?: string }
++  const { sdp, voice = VOICE, from: origin, about } = (await request.json()) as { sdp?: string; voice?: string; from?: string; about?: string }
 +  if (!sdp) return new Response('An SDP offer is required', { status: 400 })
 +  const from = origin === 'app' ? 'app' : 'web'
 +  let response: Response
@@ -2566,7 +2752,7 @@ index 0000000000000000000000000000000000000000..b549f752a7aa343bceb78ecf35c2be9a
 +    return new Response(text, { status: response.status })
 +  }
 +  const result = (await response.json()) as { session: { id: string; expires_at?: number } }
-+  follow(sideband(result.session.id), base(result.session.id, from, { voice, expires: expiry(result.session.expires_at) }))
++  follow(sideband(result.session.id), base(result.session.id, from, { voice, expires: expiry(result.session.expires_at) }), { about: topicOf(about) })
 +  return Response.json(result, { status: 201 })
 +}
 +
@@ -2629,7 +2815,92 @@ index 0000000000000000000000000000000000000000..b549f752a7aa343bceb78ecf35c2be9a
 +async function showActivity(url: URL) {
 +  const after = url.searchParams.get('after')
 +  if (after) await activity.changes(Number(after), 25_000)
-+  return Response.json({ version: activity.version, call: live?.id ?? null, tasks: live?.call.activity() ?? [] })
++  return Response.json({ version: activity.version, call: live?.id ?? null, tasks: live?.call.activity() ?? [], asks: live ? cards(live) : [] })
++}
++
++// The asks put on screen in this call, in order, each with its answer once it has one.
++function cards(call: Live) {
++  const marks = call.call.record().moments
++  return marks
++    .filter(mark => mark.kind === 'ask' && call.shown.has(mark.ask!))
++    .map(mark => ({ at: mark.at, ask: call.shown.get(mark.ask!)!, answer: marks.findLast(answer => answer.kind === 'answered' && answer.ask === mark.ask)?.text }))
++}
++
++function topicOf(about?: string): Topic | undefined {
++  if (about === 'asks') return hexAsks() && walkTopic(hexAsks()!.view.asks)
++  const task = about ? hexTasks()?.get(about) : undefined
++  return task && taskTopic(task)
++}
++
++function hexTasks() {
++  return HEX_STATE ? (board ??= new Tasks(HEX_STATE, dirname(HEX_STATE))) : undefined
++}
++
++function hexAsks() {
++  return HEX_STATE ? (yours ??= new Asks(HEX_STATE)) : undefined
++}
++
++async function showTasks(url: URL, tasks: Tasks) {
++  const after = url.searchParams.get('after')
++  if (after) await tasks.changes(Number(after), 25_000)
++  return Response.json({ version: tasks.version, tasks: tasks.rows() })
++}
++
++// The Tasks button's counts: threads that need you and are working, and how many things are yours.
++async function showSummary(url: URL, tasks: Tasks, asks: Asks) {
++  const version = () => tasks.counts.version + asks.counts.version
++  const after = Number(url.searchParams.get('after'))
++  if (after === version()) await Promise.race([tasks.counts.changes(tasks.counts.version, 25_000), asks.counts.changes(asks.counts.version, 25_000)])
++  return Response.json({ version: version(), ...tasks.summary, yours: asks.view.asks.length })
++}
++
++async function showAsks(url: URL, asks: Asks) {
++  const after = url.searchParams.get('after')
++  if (after) await asks.changes(Number(after), 25_000)
++  return Response.json({ version: asks.version, ...asks.view })
++}
++
++// What the app's tap on an ask, a stuck item or a new result does. Each answers once the hub has it;
++// the change itself comes back through the list.
++async function askRoutes(request: Request, url: URL) {
++  const asks = hexAsks()
++  if (!asks) return new Response('Asks are hex threads, and this voice plugin runs outside hex', { status: 404 })
++  if (url.pathname === '/asks' && request.method === 'GET') {
++    if (!url.searchParams.get('after')) asks.opened()
++    return showAsks(url, asks)
++  }
++  if (url.pathname === '/asks/check' && request.method === 'GET') return asks.lastCheck ? Response.json(asks.lastCheck) : new Response('No check yet', { status: 404 })
++  if (url.pathname === '/asks/talk' && request.method === 'POST') return talkAbout(walkTopic(asks.view.asks))
++  const [, kind, id, verb] = url.pathname.match(/^\/(asks|stuck|fresh)\/([^/]+)\/(answer|undo|act|read)$/) ?? []
++  if (!kind || request.method !== 'POST') return new Response('404', { status: 404 })
++  const key = decodeURIComponent(id!)
++  try {
++    if (kind === 'asks' && verb === 'answer') {
++      const { label } = (await request.json()) as { label?: string }
++      if (!label) return new Response('An answer needs its label', { status: 400 })
++      const shown = live?.shown.has(key)
++      await answerAsk(key, label, 'app')
++      if (shown) deliver(`The caller tapped "${label}" on the card for ${key}; it's sent to its thread.`, { call: live!.id })
++    } else if (kind === 'asks' && verb === 'undo') await asks.undo(key, 'app')
++    else if (kind === 'stuck' && verb === 'act') await asks.act(key)
++    else if (kind === 'fresh' && verb === 'read') asks.read(key)
++    else return new Response('404', { status: 404 })
++  } catch (error) {
++    return new Response(error instanceof Error ? error.message : String(error), { status: 409 })
++  }
++  return new Response(null, { status: 204 })
++}
++
++function taskRoutes(request: Request, url: URL) {
++  const tasks = hexTasks()
++  if (!tasks) return new Response('Tasks are hex threads, and this voice plugin runs outside hex', { status: 404 })
++  if (url.pathname === '/tasks' && request.method === 'GET') return showTasks(url, tasks)
++  if (url.pathname === '/tasks/summary' && request.method === 'GET') return showSummary(url, tasks, hexAsks()!)
++  const [, id, talking] = url.pathname.match(/^\/tasks\/([^/]+)(\/talk)?$/) ?? []
++  const task = id && tasks.get(decodeURIComponent(id))
++  if (!task) return new Response('404', { status: 404 })
++  if (talking && request.method === 'POST') return talkAbout(taskTopic(task))
++  if (!talking && request.method === 'GET') return Response.json({ ...task, ...hexAsks()!.of(task.id) })
 +}
 +
 +async function listCalls(url: URL) {
@@ -2647,6 +2918,8 @@ index 0000000000000000000000000000000000000000..b549f752a7aa343bceb78ecf35c2be9a
 +  }
 +  if (pathname === '/calls' && request.method === 'GET') return listCalls(new URL(request.url))
 +  if (pathname === '/activity' && request.method === 'GET') return showActivity(new URL(request.url))
++  if (pathname === '/tasks' || pathname.startsWith('/tasks/')) return taskRoutes(request, new URL(request.url))
++  if (/^\/(asks|stuck|fresh)(\/|$)/.test(pathname)) return askRoutes(request, new URL(request.url))
 +  const [, callId, moments] = pathname.match(/^\/calls\/([\w-]+)(\/moments)?$/) ?? []
 +  if (callId && moments && request.method === 'POST') return interruption(request, callId)
 +  if (callId && !moments && request.method === 'GET') {

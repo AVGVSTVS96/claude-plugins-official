@@ -1,3 +1,1727 @@
+diff --git a/external_plugins/voice/asks.test.ts b/external_plugins/voice/asks.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..ce336b4b683da52eacac948cd90c429c0cda21c9
+--- /dev/null
++++ b/external_plugins/voice/asks.test.ts
+@@ -0,0 +1,203 @@
++import { afterEach, beforeEach, expect, test } from 'bun:test'
++import { Database } from 'bun:sqlite'
++import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'fs'
++import { createServer, type Server } from 'net'
++import { tmpdir } from 'os'
++import { join } from 'path'
++import { Asks, fromLedger } from './asks.ts'
++import { vet } from './check.ts'
++import { T3 } from './t3.ts'
++
++const GROUP = '-1001234'
++const DESK = `${GROUP}:5`
++let state: string
++let asks: Asks
++let hub: Server
++let lines: any[]
++let checks: string[]
++
++function ledger(asks: object[], pins = {}) {
++  writeFileSync(join(state, 'telegram', 'ledger.json'), JSON.stringify({ asks, pins }))
++}
++
++function asked(message: number, text: string, options: string[], fields = {}) {
++  return { thread: DESK, message, text, options, at: `2026-10-13T1${message % 10}:00:00.000Z`, ...fields }
++}
++
++async function until<T>(check: () => T | undefined, timeout = 3000): Promise<T> {
++  for (const end = Date.now() + timeout; Date.now() < end; await Bun.sleep(20)) {
++    const value = check()
++    if (value) return value
++  }
++  throw new Error('timed out')
++}
++
++beforeEach(async () => {
++  state = mkdtempSync(join(tmpdir(), 'asks-'))
++  mkdirSync(join(state, 'telegram'))
++  mkdirSync(join(state, 'voice'))
++  writeFileSync(join(state, 'telegram', 'threads.json'), JSON.stringify({ [GROUP]: { name: 'hex' }, [DESK]: { name: 'desk' } }))
++  lines = []
++  checks = []
++  hub = createServer(socket => {
++    socket.setEncoding('utf8')
++    socket.on('data', (chunk: string) => lines.push(...chunk.trim().split('\n').map(line => JSON.parse(line))))
++  })
++  await new Promise<void>(resolve => hub.listen(join(state, 'telegram', 'hub.sock'), resolve))
++})
++
++afterEach(() => {
++  asks?.close()
++  hub.close()
++})
++
++test('a question asked with buttons reads as its first line, its context and the pick its thread marked', () => {
++  const ask = fromLedger('telegram', asked(1, '**Music for the Saves video?**\n\nThree new takes, no cost.\n```\nA  Deep\n```', ['Deep (my pick)', 'French touch', 'Minimal']))
++  expect(ask).toMatchObject({
++    id: `telegram:${DESK}:1`,
++    kind: 'pick',
++    task: `telegram:${DESK}`,
++    question: 'Music for the Saves video?',
++    context: 'Three new takes, no cost.',
++    options: [{ label: 'Deep', value: 'Deep (my pick)', pick: true }, { label: 'French touch', value: 'French touch' }, { label: 'Minimal', value: 'Minimal' }],
++  })
++})
++
++test('open questions come newest first with a link to each, answered and settled ones drop out', () => {
++  ledger([asked(1, 'Ship it?', ['Yes', 'No']), asked(2, 'Rename it?', ['Yes', 'No'], { answer: { label: 'No', at: '', via: 'telegram' } }), asked(3, 'Which color?', ['Mint', 'Coral'])])
++  asks = new Asks(state, { t3Database: '/nonexistent', check: why => checks.push(why) })
++  expect(asks.view.asks.map(ask => [ask.question, ask.topic, ask.link])).toEqual([
++    ['Which color?', 'desk', 'https://t.me/c/1234/5/3'],
++    ['Ship it?', 'desk', 'https://t.me/c/1234/5/1'],
++  ])
++})
++
++test('the check’s version of a question stands in for every place that asked it, and newer questions lead', async () => {
++  ledger([asked(1, 'Twilio?', ['Upgrade', 'Not yet']), asked(2, 'Upgrade Twilio now?', ['Go', 'Wait']), asked(9, 'Brand new?', ['Yes', 'No'])])
++  writeFileSync(
++    join(state, 'voice', 'check.json'),
++    JSON.stringify({
++      at: '2026-10-13T15:00:00.000Z',
++      why: 'a pinned post changed',
++      read: {},
++      fixed: [],
++      flagged: [],
++      stuck: [],
++      asks: [
++        {
++          id: 'check:twilio',
++          kind: 'do',
++          task: `telegram:${DESK}`,
++          at: '2026-10-11T00:00:00.000Z',
++          question: 'Upgrade Twilio from trial',
++          options: [{ label: 'Upgrade', value: 'Upgrade', pick: true }, { label: 'Use the app', value: 'Not yet' }],
++          tag: 'unblocks 3',
++          refs: [{ app: 'telegram', thread: DESK, message: 1 }, { app: 'telegram', thread: DESK, message: 2 }],
++        },
++        { id: 'check:read', kind: 'look', task: `telegram:${DESK}`, at: '2026-10-13T00:00:00.000Z', question: 'Read the launch review', options: [{ label: 'Open' }] },
++      ],
++    }),
++  )
++  asks = new Asks(state, { t3Database: '/nonexistent', check: why => checks.push(why) })
++  expect(asks.view.asks.map(ask => ask.id)).toEqual([`telegram:${DESK}:9`, 'check:twilio', 'check:read'])
++  expect(asks.view.check).toEqual({ at: '2026-10-13T15:00:00.000Z', why: 'a pinned post changed', fixed: 0, flagged: 0 })
++
++  await asks.answer('check:twilio', 'Use the app', 'app')
++  await until(() => lines.length === 2)
++  expect(lines).toEqual([
++    { type: 'answer', thread: DESK, message: 1, label: 'Not yet', via: 'app' },
++    { type: 'settle', thread: DESK, message: 2, note: '✓ Answered in the app: Use the app' },
++  ])
++
++  await asks.answer('check:read', 'Open', 'app')
++  expect(await until(() => lines.find(line => line.type === 'inbound'))).toEqual({ type: 'inbound', thread: DESK, content: '(answered in the app) Read the launch review: Open', meta: { user: 'hex app' } })
++  await until(() => !asks.find('check:read'))
++  await asks.undo('check:read', 'app')
++  await until(() => asks.find('check:read'))
++})
++
++test('an answer that lands in the ledger takes the question off the list, and undo asks for its buttons back', async () => {
++  ledger([asked(1, 'Ship it?', ['Yes', 'No'])])
++  asks = new Asks(state, { t3Database: '/nonexistent', check: why => checks.push(why) })
++  const version = asks.version
++  await asks.answer(`telegram:${DESK}:1`, 'Yes', 'app')
++  expect(await until(() => lines[0])).toEqual({ type: 'answer', thread: DESK, message: 1, label: 'Yes', via: 'app' })
++  ledger([asked(1, 'Ship it?', ['Yes', 'No'], { answer: { label: 'Yes', at: '', via: 'app' } })])
++  await asks.changes(version, 2000)
++  expect(asks.view.asks).toEqual([])
++  await asks.undo(`telegram:${DESK}:1`, 'app')
++  expect(await until(() => lines[1])).toEqual({ type: 'reopen', thread: DESK, message: 1, via: 'app' })
++})
++
++test('a stuck item with a request goes to General, one without is put away', async () => {
++  writeFileSync(
++    join(state, 'voice', 'check.json'),
++    JSON.stringify({
++      at: '2026-10-13T15:00:00.000Z', why: 'a call ended', read: {}, asks: [], fixed: [], flagged: [],
++      stuck: [
++        { id: 'disk', title: 'cloud’s disk fails every read', why: 'Since 1:10am.', action: 'Restore', mark: 'failed', at: '', request: 'Restore cloud from checkpoint v7.' },
++        { id: 'runs', title: '5 T3 runs ended in an error', why: 'Their work landed.', action: 'Settle', mark: 'failed', at: '' },
++      ],
++    }),
++  )
++  asks = new Asks(state, { t3Database: '/nonexistent', check: why => checks.push(why) })
++  await asks.act('disk')
++  expect(await until(() => lines[0])).toEqual({ type: 'inbound', thread: GROUP, content: 'Restore cloud from checkpoint v7.', meta: { user: 'hex app' } })
++  await asks.act('runs')
++  await until(() => asks.view.stuck.length === 1)
++  expect(asks.view.stuck[0]).toMatchObject({ id: 'disk', sent: expect.any(String) })
++  expect(JSON.parse(readFileSync(join(state, 'voice', 'marks.json'), 'utf8')).dismissed.runs).toBeString()
++})
++
++test('T3 Code’s records give what waits on a limit, what never started, what failed unseen, and what finished since you looked', () => {
++  const path = join(state, 't3.sqlite')
++  const db = new Database(path)
++  db.run(`create table orchestration_v2_projection_threads (thread_id text, project_id text, title text, archived_at text, deleted_at text, payload_json text)`)
++  db.run(`create table projection_projects (project_id text, title text)`)
++  db.run(`create table orchestration_v2_projection_runs (thread_id text, ordinal int, status text, requested_at text, completed_at text)`)
++  db.run(`create table orchestration_v2_projection_messages (thread_id text, role text, created_at text, payload_json text)`)
++  db.run(`insert into projection_projects values ('p', 'hex')`)
++  const thread = (id: string, payload: object) => db.run(`insert into orchestration_v2_projection_threads values (?, 'p', ?, null, null, ?)`, [id, `${id} thread`, JSON.stringify(payload)])
++  thread('parked', { limitRecovery: { resetAt: '2026-10-18T19:00:00.000Z' } })
++  thread('queued', {})
++  thread('broken', { lastVisitedAt: '2026-10-13T08:00:00.000Z' })
++  thread('finished', { createdBy: 'user', lastVisitedAt: '2026-10-13T08:00:00.000Z' })
++  thread('seen', { createdBy: 'user', lastVisitedAt: '2026-10-13T12:00:00.000Z' })
++  const run = (id: string, ordinal: number, status: string, completed: string | null) => db.run(`insert into orchestration_v2_projection_runs values (?, ?, ?, '2026-10-09T23:00:00.000Z', ?)`, [id, ordinal, status, completed])
++  run('parked', 1, 'failed', '2026-10-13T10:00:00.000Z')
++  run('queued', 1, 'queued', null)
++  run('broken', 1, 'failed', '2026-10-13T10:00:00.000Z')
++  run('finished', 1, 'completed', '2026-10-13T10:00:00.000Z')
++  run('seen', 1, 'completed', '2026-10-13T10:00:00.000Z')
++  db.run(`insert into orchestration_v2_projection_messages values ('finished', 'assistant', '2026-10-13T10:00:00.000Z', ?)`, [JSON.stringify({ text: '## Done\n\n**Shipped** the memory fix.' })])
++  db.close()
++
++  const t3 = new T3(() => {}, path)
++  const { stuck, fresh } = t3.query(Date.parse('2026-10-13T20:00:00.000Z'))
++  t3.close()
++  expect(stuck.map(item => [item.title, item.action, item.mark])).toEqual([
++    ['1 T3 thread waits for Oct 18', 'Switch plan', 'paused'],
++    ['queued thread: queued since Oct 9', 'Resume', 'paused'],
++    ['broken thread ended in an error', 'Look', 'failed'],
++  ])
++  expect(stuck.every(item => item.request)).toBe(true)
++  expect(fresh).toEqual([{ id: expect.stringMatching(/^t3-done-/), title: 'finished thread', where: 'T3 · hex', line: 'Done', at: '2026-10-13T10:00:00.000Z' }])
++})
++
++test('a check’s verdict is held to the ledger: real open refs and buttons only, and nothing both settled and listed', () => {
++  const asks = { telegram: [asked(1, 'Twilio?', ['Upgrade', 'Not yet']), asked(2, 'Old?', ['Yes', 'No'], { settled: { note: 'x', at: '' } }), asked(3, 'Music?', ['A', 'B'])] }
++  const ref = (message: number) => ({ app: 'telegram', thread: DESK, message })
++  const verdict = vet(
++    {
++      asks: [{ id: 'twilio', kind: 'do', task: `telegram:${DESK}`, at: '', question: 'Upgrade Twilio', options: [{ label: 'Upgrade', value: 'Upgrade' }, { label: 'Later', value: 'Wait' }], refs: [ref(1), ref(2), ref(9)] }],
++      settle: [{ ...ref(1), note: 'Settled' }, { ...ref(2), note: 'Settled' }, { ...ref(3), note: 'Settled: Tech Live, picked on a call with a very long note' }],
++      fixed: [],
++      flagged: [],
++      stuck: [{ id: 'disk', title: 'disk', why: '', action: 'Look', mark: 'failed', at: '' }],
++    },
++    asks,
++  )
++  expect(verdict.asks[0]).toMatchObject({ id: 'check:twilio', refs: [ref(1)], options: [{ label: 'Upgrade', value: 'Upgrade' }, { label: 'Later' }] })
++  expect(verdict.settle).toEqual([{ ...ref(3), note: 'Settled: Tech Live, picked on a call with a very long note'.slice(0, 60) }])
++  expect(verdict.stuck[0]!.id).toBe('check-disk')
++})
+diff --git a/external_plugins/voice/asks.ts b/external_plugins/voice/asks.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..6719ac113231c7b3ef3ab5bf81e5d61b0359ad7e
+--- /dev/null
++++ b/external_plugins/voice/asks.ts
+@@ -0,0 +1,348 @@
++import { readdirSync, readFileSync, renameSync, watch, writeFileSync } from 'fs'
++import { join } from 'path'
++import type { Ask as Asked } from '../../hub/ledger.ts'
++import { Changes } from './changes.ts'
++import { Check } from './check.ts'
++import { relay } from './relay.ts'
++import { T3, type Fresh, type Stuck } from './t3.ts'
++
++export type Kind = 'pick' | 'yesno' | 'do' | 'look'
++// value: the button's own label, when the option stands for one; url: an option that opens a page.
++export type Option = { label: string; value?: string; pick?: boolean; url?: string }
++export type Answer = { label: string; at: string; via: string }
++export type Ref = { app: string; thread: string; message: number }
++export type Ask = {
++  id: string
++  kind: Kind
++  task: string
++  topic: string
++  at: string
++  question: string
++  context?: string
++  options: Option[]
++  tag?: string
++  places?: string[]
++  link?: string
++}
++// hex's check rewrites the raw questions into these: one per decision, however many places asked
++// it (refs), in the order that unblocks the most, with its pick and what it costs.
++export type Curated = Omit<Ask, 'topic' | 'link'> & { refs?: Ref[] }
++export type Note = { title: string; text: string; did?: string }
++export type CheckResult = {
++  at: string
++  why: string
++  read: Record<string, number>
++  asks: Curated[]
++  fixed: Note[]
++  flagged: Note[]
++  stuck: Stuck[]
++  inputs?: string
++}
++export type View = {
++  version: number
++  asks: Ask[]
++  stuck: (Stuck & { sent?: string })[]
++  fresh: (Fresh & { read: boolean })[]
++  check: { at: string; why: string; fixed: number; flagged: number } | null
++}
++type Marks = { answers: Record<string, Answer>; sent: Record<string, string>; dismissed: Record<string, string>; read: Record<string, string> }
++
++const KEEP = 14 * 24 * 60 * 60_000
++const WHERE: Record<string, string> = { app: 'in the app', call: 'on a call' }
++const PICK = /\s*[(\[]?\s*(?:←\s*)?(?:(?:my|hex[’']s) pick)\s*[)\]]?/i
++
++// Everything waiting on the owner, in one list: each question a hex thread asked with buttons or a
++// poll and nobody has answered (from each app's ledger), as hex's check last rewrote them; what's
++// stuck and what finished since he looked (T3 Code's own records, and what the check found). An
++// answer goes back the way a tap in the chat app would, through that app's hub.
++export class Asks extends Changes {
++  view: Omit<View, 'version'> = { asks: [], stuck: [], fresh: [], check: null }
++  counts = new Changes()
++  private ledgers = new Map<string, Asked[]>()
++  private names = new Map<string, string>()
++  private pins = new Map<string, string>()
++  private result?: CheckResult
++  private marks: Marks
++  private pending?: ReturnType<typeof setTimeout>
++  private stops: (() => void)[] = []
++  private t3: T3
++  private check: (why: string) => void
++  private seen?: { pins: string; t3: string }
++
++  constructor(
++    private state: string,
++    { t3Database, check = why => new Check(state).start(why) }: { t3Database?: string; check?: (why: string) => void } = {},
++  ) {
++    super()
++    this.check = check
++    this.marks = readMarks(join(state, 'voice', 'marks.json'))
++    this.t3 = new T3(() => this.schedule(), t3Database)
++    for (const app of apps(state)) this.stops.push(watchDir(join(state, app), file => (file === 'ledger.json' || file === 'threads.json') && this.schedule()))
++    this.stops.push(watchDir(join(state, 'voice'), file => file === 'check.json' && this.schedule()))
++    this.build()
++  }
++
++  get lastCheck() {
++    return this.result
++  }
++
++  // Tasks opened with questions newer than the last check, or a call ended: hex checks again.
++  opened() {
++    const checked = this.result?.at ?? ''
++    if ([...this.ledgers.values()].some(asks => asks.some(ask => !ask.answer && !ask.settled && ask.at > checked))) this.check('you opened Tasks')
++  }
++
++  called() {
++    this.check('a call ended')
++  }
++
++  close() {
++    clearTimeout(this.pending)
++    this.t3.close()
++    for (const stop of this.stops) stop()
++  }
++
++  find(id: string) {
++    return this.view.asks.find(ask => ask.id === id)
++  }
++
++  // The thread's own questions and its pinned status post, for its page.
++  of(task: string) {
++    return { asks: this.view.asks.filter(ask => ask.task === task), ...(this.pins.has(task) && { pin: this.pins.get(task) }) }
++  }
++
++  async answer(id: string, label: string, via: string) {
++    const ask = this.find(id)
++    if (!ask) throw new Error('that question is already answered or settled')
++    const option = ask.options.find(option => option.label === label)
++    const refs = this.refs(id).filter(ref => this.open(ref))
++    const where = WHERE[via] ?? via
++    if (!refs.length) {
++      this.marks.answers[id] = { label, at: now(), via }
++      this.saveMarks()
++      return this.tell(ask.task, `(answered ${where}) ${ask.question}: ${label}`, via)
++    }
++    const [first, ...rest] = refs
++    const value = option?.value ?? label
++    if (this.asked(first!)!.options.includes(value)) await relay(this.state, first!.app, { type: 'answer', thread: first!.thread, message: first!.message, label: value, via })
++    else {
++      await this.tell(`${first!.app}:${first!.thread}`, `(answered ${where}) ${ask.question}: ${label}`, via)
++      rest.unshift(first!)
++    }
++    for (const ref of rest) await relay(this.state, ref.app, { type: 'settle', thread: ref.thread, message: ref.message, note: `✓ Answered ${where}: ${label}` })
++  }
++
++  // Takes back an answer given in the app or on a call: its buttons come back and its thread hears.
++  async undo(id: string, via: string) {
++    const answered = this.marks.answers[id]
++    if (answered) {
++      delete this.marks.answers[id]
++      this.saveMarks()
++      const curated = this.result?.asks.find(ask => ask.id === id)
++      return curated && this.tell(curated.task, `(took back) ${curated.question}: ${answered.label}`, via)
++    }
++    for (const ref of this.refs(id)) {
++      const asked = this.asked(ref)
++      if (asked && (WHERE[asked.answer?.via ?? ''] || asked.settled?.note.startsWith('✓ Answered'))) await relay(this.state, ref.app, { type: 'reopen', thread: ref.thread, message: ref.message, via })
++    }
++  }
++
++  // A stuck item's one action: hex's General is asked to do it, or it's put away until it changes.
++  async act(id: string) {
++    const item = this.view.stuck.find(item => item.id === id)
++    if (!item) throw new Error('that is no longer stuck')
++    if (item.request) {
++      await this.tell(this.general(), item.request, 'app')
++      this.marks.sent[id] = now()
++    } else this.marks.dismissed[id] = now()
++    this.saveMarks()
++  }
++
++  read(id: string) {
++    this.marks.read[id] = now()
++    this.saveMarks()
++  }
++
++  private refs(id: string): Ref[] {
++    const curated = this.result?.asks.find(ask => ask.id === id)
++    if (curated) return curated.refs ?? []
++    const ref = parseRef(id)
++    return ref ? [ref] : []
++  }
++
++  private asked(ref: Ref) {
++    return this.ledgers.get(ref.app)?.find(ask => ask.thread === ref.thread && ask.message === ref.message)
++  }
++
++  private open(ref: Ref) {
++    const asked = this.asked(ref)
++    return !!asked && !asked.answer && !asked.settled
++  }
++
++  private tell(task: string, content: string, via: string) {
++    const [app, ...thread] = task.split(':')
++    return relay(this.state, app!, { type: 'inbound', thread: thread.join(':'), content, meta: { user: `hex ${via}` } })
++  }
++
++  private general() {
++    const general = [...this.names.keys()].find(task => /^telegram:-\d+$/.test(task))
++    if (!general) throw new Error('hex has no Telegram General to send this to')
++    return general
++  }
++
++  private schedule() {
++    clearTimeout(this.pending)
++    this.pending = setTimeout(() => this.build(), 30)
++  }
++
++  private build() {
++    this.names.clear()
++    this.pins.clear()
++    for (const app of apps(this.state)) {
++      const book = readJson(join(this.state, app, 'ledger.json'))
++      this.ledgers.set(app, book?.asks ?? [])
++      for (const [thread, pin] of Object.entries<any>(book?.pins ?? {})) if (pin.text) this.pins.set(`${app}:${thread}`, pin.text)
++      for (const [thread, known] of Object.entries<any>(readJson(join(this.state, app, 'threads.json')) ?? {})) this.names.set(`${app}:${thread}`, known.name ?? thread)
++    }
++    this.result = readJson(join(this.state, 'voice', 'check.json'))
++    this.notice()
++    const used = new Set<string>()
++    const curated = (this.result?.asks ?? []).flatMap(ask => {
++      for (const ref of ask.refs ?? []) used.add(refId(ref))
++      const live = ask.refs?.length ? ask.refs.some(ref => this.open(ref)) : !this.marks.answers[ask.id]
++      return live ? [this.dress(ask)] : []
++    })
++    const raw = [...this.ledgers].flatMap(([app, asks]) =>
++      asks.filter(ask => !ask.answer && !ask.settled && !used.has(refId({ app, ...ask }))).map(ask => this.dress(fromLedger(app, ask))),
++    )
++    raw.sort((a, b) => b.at.localeCompare(a.at))
++    const checked = this.result?.at ?? ''
++    const stuck = [...this.t3.stuck, ...(this.result?.stuck ?? [])]
++      .filter(item => !this.marks.dismissed[item.id])
++      .map(item => ({ ...item, ...(this.marks.sent[item.id] && { sent: this.marks.sent[item.id] }) }))
++    const view: Omit<View, 'version'> = {
++      asks: [...raw.filter(ask => ask.at > checked), ...curated, ...raw.filter(ask => ask.at <= checked)],
++      stuck,
++      fresh: this.t3.fresh.map(item => ({ ...item, read: !!this.marks.read[item.id] })),
++      check: this.result ? { at: this.result.at, why: this.result.why, fixed: this.result.fixed.length, flagged: this.result.flagged.length } : null,
++    }
++    if (JSON.stringify(view) === JSON.stringify(this.view)) return
++    const moved = view.asks.length !== this.view.asks.length || view.stuck.length !== this.view.stuck.length
++    this.view = view
++    this.changed()
++    if (moved) this.counts.changed()
++  }
++
++  // A pinned post that changed or a T3 run that ended starts a check; the first read only takes note.
++  private notice() {
++    const now = {
++      pins: JSON.stringify([...this.pins]),
++      t3: JSON.stringify([this.t3.stuck, this.t3.fresh].map(items => items.map(item => item.id))),
++    }
++    const why = !this.seen ? undefined : now.pins !== this.seen.pins ? 'a pinned post changed' : now.t3 !== this.seen.t3 ? 'a T3 run ended' : undefined
++    this.seen = now
++    if (why) this.check(why)
++  }
++
++  private dress(ask: Curated): Ask {
++    const { refs, ...rest } = ask
++    const ref = refs?.[0]
++    return {
++      ...rest,
++      topic: this.names.get(ask.task) ?? ask.task.split(':').at(-1)!,
++      ...(ref && link(ref) && { link: link(ref) }),
++    }
++  }
++
++  private saveMarks() {
++    const since = new Date(Date.now() - KEEP).toISOString()
++    for (const book of Object.values(this.marks) as Record<string, string | Answer>[])
++      for (const [id, at] of Object.entries(book)) if ((typeof at === 'string' ? at : at.at) < since) delete book[id]
++    const file = join(this.state, 'voice', 'marks.json')
++    writeFileSync(`${file}.tmp`, JSON.stringify(this.marks, null, 1) + '\n')
++    renameSync(`${file}.tmp`, file)
++    this.schedule()
++  }
++}
++
++// A question as its thread asked it: its first line is the question and the rest its context; the
++// option the thread marked as its pick wears it.
++export function fromLedger(app: string, asked: Asked): Curated {
++  const lines = plain(asked.text)
++    .split('\n')
++    .map(line => line.trim())
++    .filter(Boolean)
++  const options = asked.options.map(value => {
++    const label = value.replace(PICK, '').trim() || value
++    return { label, value, ...(label !== value && { pick: true }) }
++  })
++  const context = lines.slice(1).join(' ')
++  return {
++    id: refId({ app, ...asked }),
++    kind: asked.options.length <= 2 ? 'yesno' : 'pick',
++    task: `${app}:${asked.thread}`,
++    at: asked.at,
++    question: clip(lines[0] ?? '', 160).replace(/:$/, ''),
++    ...(context && { context: clip(context, 280) }),
++    options,
++    refs: [{ app, thread: asked.thread, message: asked.message }],
++  }
++}
++
++export function refId({ app, thread, message }: Ref) {
++  return `${app}:${thread}:${message}`
++}
++
++function parseRef(id: string): Ref | undefined {
++  const [, app, thread, message] = id.match(/^(\w+):(.+):(\d+)$/) ?? []
++  return app && thread ? { app, thread, message: Number(message) } : undefined
++}
++
++function link({ app, thread, message }: Ref) {
++  if (app !== 'telegram' || !thread.startsWith('-100')) return
++  const [chat, topic] = thread.slice(4).split(':')
++  return topic ? `https://t.me/c/${chat}/${topic}/${message}` : `https://t.me/c/${chat}/${message}`
++}
++
++function plain(text: string) {
++  return text
++    .replace(/```[\s\S]*?(```|$)/g, '')
++    .replace(/\*\*|__|`/g, '')
++    .replace(/^#+\s+/gm, '')
++}
++
++function clip(text: string, max: number) {
++  return text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text
++}
++
++function apps(state: string) {
++  try {
++    return readdirSync(state).filter(app => app !== 'voice')
++  } catch {
++    return []
++  }
++}
++
++function readMarks(file: string): Marks {
++  const marks = readJson(file) ?? {}
++  return { answers: marks.answers ?? {}, sent: marks.sent ?? {}, dismissed: marks.dismissed ?? {}, read: marks.read ?? {} }
++}
++
++function readJson(path: string) {
++  try {
++    return JSON.parse(readFileSync(path, 'utf8'))
++  } catch {}
++}
++
++function watchDir(dir: string, changed: (file: string | null) => void) {
++  try {
++    const watcher = watch(dir, (_, file) => changed(file))
++    return () => watcher.close()
++  } catch {
++    return () => {}
++  }
++}
++
++function now() {
++  return new Date().toISOString()
++}
+diff --git a/external_plugins/voice/check.ts b/external_plugins/voice/check.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..9bca8dd83068258c6d31a46b33e256a39eecc5c3
+--- /dev/null
++++ b/external_plugins/voice/check.ts
+@@ -0,0 +1,290 @@
++import { spawn } from 'child_process'
++import { createHash } from 'crypto'
++import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'fs'
++import { homedir, tmpdir } from 'os'
++import { dirname, join } from 'path'
++import type { Ask as Asked } from '../../hub/ledger.ts'
++import type { CheckResult, Curated, Ref } from './asks.ts'
++import { relay } from './relay.ts'
++import { T3, type Stuck } from './t3.ts'
++
++type Verdict = Pick<CheckResult, 'asks' | 'fixed' | 'flagged' | 'stuck'> & { settle: (Ref & { note: string })[] }
++
++const MODEL = process.env.HEX_CHECK_MODEL ?? 'claude-opus-5-5'
++const CALLS = join(homedir(), '.claude', 'channels', 'voice', 'calls')
++const RECENT = 3 * 24 * 60 * 60_000
++const LONG = 2400
++
++// hex's check: an Opus pass over everything waiting on the owner, started by real events (a pinned
++// post changed, a T3 run ended, a call ended, Tasks opened after a change). It rewrites the raw
++// questions into one list (repeats merged, its pick, what each unblocks), settles the questions the
++// records show are already decided or done, and flags what it can't settle. It answers nothing for
++// him. One runs at a time in a process of its own, so it outlives the voice session that started
++// it. Events that land while it runs leave one mark, so a burst of them costs one more pass at
++// most, and a pass whose records haven't changed since the last one skips Opus.
++export class Check {
++  private dir: string
++
++  constructor(private state: string) {
++    this.dir = join(state, 'voice', 'check')
++    mkdirSync(this.dir, { recursive: true })
++  }
++
++  get running() {
++    const pid = Number(read(join(this.dir, 'lock')))
++    return !!pid && alive(pid)
++  }
++
++  start(why: string) {
++    writeFileSync(join(this.dir, 'next'), why)
++    if (!this.running) spawn(process.execPath, [import.meta.path, this.state], { detached: true, stdio: 'ignore' }).unref()
++  }
++}
++
++// Whoever holds the lock runs a pass per mark until none is left; a mark left in the moment the
++// lock is let go is picked up again, by this process or the one that took the lock.
++async function run(state: string) {
++  const dir = join(state, 'voice', 'check')
++  while (existsSync(join(dir, 'next')) && hold(join(dir, 'lock'))) {
++    try {
++      for (let why = take(join(dir, 'next')); why; why = take(join(dir, 'next'))) {
++        await pass(state, why).then(
++          () => rmSync(join(dir, 'error'), { force: true }),
++          error => writeFileSync(join(dir, 'error'), `${new Date().toISOString()} ${why}: ${error instanceof Error ? error.message : error}\n`),
++        )
++      }
++    } finally {
++      rmSync(join(dir, 'lock'), { force: true })
++    }
++  }
++}
++
++function hold(lock: string): boolean {
++  try {
++    writeFileSync(lock, String(process.pid), { flag: 'wx' })
++    return true
++  } catch {
++    if (alive(Number(read(lock)))) return false
++    rmSync(lock, { force: true })
++    return hold(lock)
++  }
++}
++
++async function pass(state: string, why: string) {
++  const started = new Date().toISOString()
++  const records = gather(state)
++  const inputs = digest(records)
++  if (records.previous?.inputs === inputs) return
++  const verdict = vet(await claude(prompt(records), dirname(state)), records.ledgers)
++  for (const ref of verdict.settle) await relay(state, ref.app, { type: 'settle', thread: ref.thread, message: ref.message, note: ref.note }).catch(error => process.stderr.write(`voice: check: ${error}\n`))
++  const result: CheckResult = {
++    at: started,
++    why,
++    read: {
++      'pinned posts': Object.values(records.pins).length,
++      questions: records.open.length,
++      'T3 items': records.t3.stuck.length + records.t3.fresh.length,
++      calls: records.calls.length,
++    },
++    asks: verdict.asks,
++    fixed: verdict.fixed,
++    flagged: verdict.flagged,
++    stuck: verdict.stuck,
++    inputs,
++  }
++  const file = join(state, 'voice', 'check.json')
++  writeFileSync(`${file}.tmp`, JSON.stringify(result, null, 1) + '\n')
++  renameSync(`${file}.tmp`, file)
++}
++
++function gather(state: string) {
++  const now = Date.now()
++  const recent = new Date(now - RECENT).toISOString()
++  const names: Record<string, string> = {}
++  const ledgers: Record<string, Asked[]> = {}
++  const pins: Record<string, string> = {}
++  for (const app of readdirSync(state).filter(app => app !== 'voice')) {
++    for (const [thread, known] of Object.entries<any>(json(join(state, app, 'threads.json')) ?? {})) names[`${app}:${thread}`] = known.name ?? thread
++    const book = json(join(state, app, 'ledger.json'))
++    ledgers[app] = book?.asks ?? []
++    for (const [thread, pin] of Object.entries<any>(book?.pins ?? {})) if (pin.text) pins[`${app}:${thread}`] = clip(pin.text, LONG)
++  }
++  const shown = (app: string, ask: Asked) => ({
++    ref: { app, thread: ask.thread, message: ask.message },
++    topic: names[`${app}:${ask.thread}`] ?? ask.thread,
++    at: ask.at,
++    text: clip(ask.text, 700),
++    options: ask.options,
++    ...(ask.poll && { poll: true }),
++    ...(ask.answer && { answer: ask.answer }),
++    ...(ask.settled && { settled: ask.settled }),
++  })
++  const open = Object.entries(ledgers).flatMap(([app, asks]) => asks.filter(ask => !ask.answer && !ask.settled).map(ask => shown(app, ask)))
++  const closed = Object.entries(ledgers).flatMap(([app, asks]) => asks.filter(ask => (ask.answer || ask.settled) && ask.at > recent).map(ask => shown(app, ask)))
++  const t3 = new T3(() => {})
++  const t3Now = t3.query(now)
++  t3.close()
++  const calls = list(CALLS)
++    .filter(file => file.endsWith('.json') && statSync(join(CALLS, file)).mtimeMs > now - RECENT)
++    .map(file => json(join(CALLS, file)))
++    .filter(call => call?.ended && (call.summary || call.waiting?.length))
++    .map(call => ({ title: call.title, ended: call.ended, summary: call.summary, waiting: call.waiting ?? [] }))
++  return { now: new Date(now).toISOString(), threads: names, open, closed, pins: Object.fromEntries(Object.entries(pins).map(([task, text]) => [`${task} (${names[task] ?? task})`, text])), calls, t3: t3Now, previous: json(join(state, 'voice', 'check.json')), ledgers }
++}
++
++// What a pass reads, as one fingerprint: the same records give the same verdict.
++export function digest({ open, closed, pins, calls, t3 }: ReturnType<typeof gather>) {
++  return createHash('sha256').update(JSON.stringify({ open, closed, pins, calls, t3 })).digest('hex')
++}
++
++function prompt({ ledgers, ...records }: ReturnType<typeof gather>) {
++  return `You're hex's check. hex is Bassim's personal assistant: it works for him in many threads at once (Telegram topics, T3 Code threads, calls with its voice app), and each thread asks him things: questions with buttons, polls, the "waiting on you" part of its pinned status post, and the waiting lines of a call's wrap-up. They pile up in dozens of places and many go stale. Your pass turns them into one honest list in his voice app, where he answers each in place.
++
++What he asked for, in his words: "the ability to better manage my tasks with hex ... we could give an even better idea for things that need to get done. And this could all be done by looking through the transcript, gathering, auditing, analyzing, figuring out, and also checking on any work that was done by other agents ... that might be waiting for other things ... older work from yesterday or two days ago, that might not have been done ... such that I can help ship more and get unblocked".
++
++The records are below as JSON: every open question asked with buttons or a poll (open, each with its ref), the ones answered or settled lately (closed), each thread's pinned post (pins), calls' wrap-ups (calls), what T3 Code shows as stuck or newly finished (t3; the app lists those already), and your previous pass (previous). To confirm something before you settle it, read his records: conversations in ~/hex/log/ (one markdown file per day and session; rg them), threads in ~/hex/state/*/threads.json, session transcripts under ~/.claude/projects/, project notes under ~/hex/projects/.
++
++Return:
++- asks: one entry per decision or action that is still his, however many places asked it. refs lists every open question it stands for (copy their ref objects), places names the threads that asked it. id is "check:" plus a short slug, the same slug as in your previous pass for the same thing. task is the thread it belongs to ("<app>:<thread id>", from threads). question is one short plain line (60 characters at most). context is one or two plain sentences on what it unblocks or costs. options are short labels; mark the thread's own pick with pick (one at most, only where the thread made one); when an option stands for a button, value is that button's exact text from the first ref. kind is pick (one of several), yesno (two ways), do (only his hands can do it, like a sign-in, a purchase, a recording: options like Done and Later, plus one with url when a page opens it) or look (something to watch or read, one option with url when there's a link). tag is "money" when an option spends money, or "unblocks N" when N other things wait on it. Order: what unblocks the most first, even when it costs money, then the quickest; other money and anything sent in his name last. Asks from pinned posts and call wrap-ups have no refs; their task is the thread they came from.
++- settle: open questions the records show are already decided or done: decided in a conversation or a call, replaced by a later question, or the thing already happened. note is what the question's Telegram buttons will say instead, like "Settled: Pro is on" (40 characters at most). Settle only what the records show; anything you're unsure of stays an ask.
++- fixed: what you settled or merged, the way he'd read it: title (the thing), text (the evidence, with message numbers), did (what you did, in a few words).
++- flagged: what he should look at that you can't settle yourself, like the same thing asked with different options, or a question days old whose work has stalled: title and text.
++- stuck: work stopped with nobody moving it that the t3 list doesn't already show, like a failing service a pinned post mentions: id (a short slug), title, why (one sentence), action (one or two words, like Restore or Look), mark (paused or failed), at, and request: what hex should do when he taps the action, as a message to hex.
++
++Every answer is his: an ask stays open until he answers it. Leave health details and phone numbers out of everything you write.
++
++${JSON.stringify(records)}`
++}
++
++const NOTE = { type: 'object', properties: { title: { type: 'string' }, text: { type: 'string' }, did: { type: 'string' } }, required: ['title', 'text'] }
++const REF = { type: 'object', properties: { app: { type: 'string' }, thread: { type: 'string' }, message: { type: 'number' } }, required: ['app', 'thread', 'message'] }
++const SCHEMA = {
++  type: 'object',
++  properties: {
++    asks: {
++      type: 'array',
++      items: {
++        type: 'object',
++        properties: {
++          id: { type: 'string' },
++          kind: { enum: ['pick', 'yesno', 'do', 'look'] },
++          task: { type: 'string' },
++          at: { type: 'string' },
++          question: { type: 'string' },
++          context: { type: 'string' },
++          options: {
++            type: 'array',
++            items: { type: 'object', properties: { label: { type: 'string' }, value: { type: 'string' }, pick: { type: 'boolean' }, url: { type: 'string' } }, required: ['label'] },
++          },
++          tag: { type: 'string' },
++          places: { type: 'array', items: { type: 'string' } },
++          refs: { type: 'array', items: REF },
++        },
++        required: ['id', 'kind', 'task', 'at', 'question', 'options'],
++      },
++    },
++    settle: { type: 'array', items: { ...REF, properties: { ...REF.properties, note: { type: 'string' } }, required: [...REF.required, 'note'] } },
++    fixed: { type: 'array', items: NOTE },
++    flagged: { type: 'array', items: NOTE },
++    stuck: {
++      type: 'array',
++      items: {
++        type: 'object',
++        properties: { id: { type: 'string' }, title: { type: 'string' }, why: { type: 'string' }, action: { type: 'string' }, mark: { enum: ['paused', 'failed'] }, at: { type: 'string' }, request: { type: 'string' } },
++        required: ['id', 'title', 'why', 'action', 'mark', 'at'],
++      },
++    },
++  },
++  required: ['asks', 'settle', 'fixed', 'flagged', 'stuck'],
++}
++
++// A read-only pass: it reads files and searches, and its only effect is the JSON it returns.
++function claude(input: string, hexDir: string) {
++  const args = ['-p', '--model', MODEL, '--effort', 'medium', '--output-format', 'json', '--json-schema', JSON.stringify(SCHEMA), '--tools', 'Read,Grep,Glob', '--strict-mcp-config', '--setting-sources', 'project', '--no-session-persistence', '--add-dir', hexDir, join(homedir(), '.claude', 'projects')]
++  const cwd = mkdtempSync(join(tmpdir(), 'hex-check-'))
++  return new Promise<Verdict>((resolve, reject) => {
++    const child = spawn('claude', args, { cwd, stdio: ['pipe', 'pipe', 'pipe'] })
++    let out = ''
++    let err = ''
++    child.stdout.on('data', chunk => (out += chunk))
++    child.stderr.on('data', chunk => (err += chunk))
++    child.on('error', reject)
++    child.on('close', code => {
++      rmSync(cwd, { recursive: true, force: true })
++      try {
++        const result = JSON.parse(out)
++        if (result.is_error || !result.structured_output) throw new Error(result.result ?? 'no result')
++        resolve(result.structured_output)
++      } catch (error) {
++        reject(new Error(`the check's claude exited ${code}: ${error} ${err.slice(-500)}`))
++      }
++    })
++    child.stdin.end(input)
++  })
++}
++
++// What the pass returned, held to the records: refs and settles name real open questions, a value
++// is a real button, and a question it settles isn't also one it lists.
++export function vet(verdict: Verdict, ledgers: Record<string, Asked[]>): Verdict {
++  const find = (ref: Ref) => ledgers[ref.app]?.find(ask => ask.thread === ref.thread && ask.message === ref.message)
++  const open = (ref: Ref) => {
++    const ask = find(ref)
++    return !!ask && !ask.answer && !ask.settled
++  }
++  const asks: Curated[] = verdict.asks.map(ask => {
++    const refs = (ask.refs ?? []).filter(open)
++    const buttons = refs[0] ? find(refs[0])!.options : []
++    return {
++      ...ask,
++      id: ask.id.startsWith('check:') ? ask.id : `check:${ask.id}`,
++      options: ask.options.map(({ value, ...option }) => ({ ...option, ...(value && buttons.includes(value) && { value }) })),
++      ...(ask.refs && { refs }),
++    }
++  })
++  const listed = new Set(asks.flatMap(ask => ask.refs ?? []).map(ref => `${ref.app} ${ref.thread} ${ref.message}`))
++  return {
++    asks,
++    settle: verdict.settle.filter(ref => open(ref) && !listed.has(`${ref.app} ${ref.thread} ${ref.message}`)).map(ref => ({ ...ref, note: ref.note.slice(0, 60) })),
++    fixed: verdict.fixed,
++    flagged: verdict.flagged,
++    stuck: verdict.stuck.map((item: Stuck) => ({ ...item, id: item.id.startsWith('check-') ? item.id : `check-${item.id}` })),
++  }
++}
++
++function take(file: string) {
++  const why = read(file)
++  rmSync(file, { force: true })
++  return why || undefined
++}
++
++function read(file: string) {
++  try {
++    return readFileSync(file, 'utf8').trim()
++  } catch {
++    return ''
++  }
++}
++
++function json(file: string) {
++  try {
++    return JSON.parse(readFileSync(file, 'utf8'))
++  } catch {}
++}
++
++function list(dir: string) {
++  return existsSync(dir) ? readdirSync(dir) : []
++}
++
++function clip(text: string, max: number) {
++  return text.length > max ? `${text.slice(0, max - 1)}…` : text
++}
++
++function alive(pid: number) {
++  try {
++    return process.kill(pid, 0)
++  } catch (error) {
++    return (error as NodeJS.ErrnoException).code === 'EPERM'
++  }
++}
++
++if (import.meta.main) await run(process.argv[2]!)
+diff --git a/external_plugins/voice/relay.ts b/external_plugins/voice/relay.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..7619ff886830c93cc512bf50df04b01239e22c35
+--- /dev/null
++++ b/external_plugins/voice/relay.ts
+@@ -0,0 +1,12 @@
++import { connect } from 'net'
++import { join } from 'path'
++
++// One line to a hex app's hub, the way hex's own tools and sessions reach it.
++export function relay(state: string, app: string, message: object) {
++  const path = join(state, app, 'hub.sock')
++  return new Promise<void>((resolve, reject) => {
++    const socket = connect(path)
++    socket.on('connect', () => socket.end(JSON.stringify(message) + '\n', resolve))
++    socket.on('error', error => reject(new Error(`hex's hub isn't answering at ${path} (${error.message})`)))
++  })
++}
+diff --git a/external_plugins/voice/t3.ts b/external_plugins/voice/t3.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..e3b27c92e497fc5099b4bb8079fcf957f8e1c387
+--- /dev/null
++++ b/external_plugins/voice/t3.ts
+@@ -0,0 +1,172 @@
++import { Database } from 'bun:sqlite'
++import { createHash } from 'crypto'
++import { existsSync, watch } from 'fs'
++import { homedir } from 'os'
++import { basename, dirname, join } from 'path'
++
++// request: what hex's General is asked to do about it; without one, the action just puts it away.
++export type Stuck = { id: string; title: string; why: string; action: string; mark: 'paused' | 'failed'; at: string; request?: string }
++export type Fresh = { id: string; title: string; where: string; line: string; at: string }
++
++type Thread = { id: string; title: string; project: string | null; visited: string | null; limit: string | null; mine: boolean }
++type Run = { thread: string; ordinal: number; status: string; requested: string; completed: string | null }
++
++const DATABASE = join(homedir(), '.t3', 'userdata', 'statev2.sqlite')
++const RECENT = 2 * 24 * 60 * 60_000
++const QUEUED = 30 * 60_000
++
++// T3 Code's own records, read only: which threads wait on a usage limit, have a run queued that
++// never started, or ended in an error you haven't seen; and which of your threads finished since
++// you last opened them. It reads again whenever T3 Code writes its database.
++export class T3 {
++  stuck: Stuck[] = []
++  fresh: Fresh[] = []
++  private db?: Database
++  private pending?: ReturnType<typeof setTimeout>
++  private watcher?: ReturnType<typeof watch>
++
++  constructor(
++    private changed: () => void,
++    private path = DATABASE,
++  ) {
++    if (!existsSync(path)) return
++    this.db = new Database(path, { readonly: true })
++    this.watcher = watch(dirname(path), (_, file) => file?.startsWith(basename(path)) && this.schedule())
++    this.read()
++  }
++
++  close() {
++    clearTimeout(this.pending)
++    this.watcher?.close()
++    this.db?.close()
++  }
++
++  private schedule() {
++    clearTimeout(this.pending)
++    this.pending = setTimeout(() => this.read(), 500)
++  }
++
++  private read() {
++    try {
++      const { stuck, fresh } = this.query(Date.now())
++      if (JSON.stringify({ stuck, fresh }) === JSON.stringify({ stuck: this.stuck, fresh: this.fresh })) return
++      this.stuck = stuck
++      this.fresh = fresh
++      this.changed()
++    } catch (error) {
++      process.stderr.write(`voice: t3: couldn't read ${this.path}: ${error}\n`)
++    }
++  }
++
++  query(now: number) {
++    const db = this.db!
++    const threads = new Map(
++      db
++        .query<Thread, []>(
++          `select t.thread_id id, t.title, p.title project,
++             json_extract(t.payload_json, '$.lastVisitedAt') visited,
++             json_extract(t.payload_json, '$.limitRecovery.resetAt') "limit",
++             json_extract(t.payload_json, '$.createdBy') = 'user' mine
++           from orchestration_v2_projection_threads t left join projection_projects p using (project_id)
++           where t.archived_at is null and t.deleted_at is null`,
++        )
++        .all()
++        .map(thread => [thread.id, thread]),
++    )
++    const latest = db
++      .query<Run, []>(
++        `select r.thread_id thread, r.ordinal, r.status, r.requested_at requested, r.completed_at completed
++         from orchestration_v2_projection_runs r
++         join (select thread_id, max(ordinal) ordinal from orchestration_v2_projection_runs group by thread_id) m using (thread_id, ordinal)`,
++      )
++      .all()
++    const queued = db
++      .query<Run, []>(`select thread_id thread, min(requested_at) requested from orchestration_v2_projection_runs where status = 'queued' group by thread_id`)
++      .all()
++    const iso = new Date(now).toISOString()
++    const recent = new Date(now - RECENT).toISOString()
++    const stuck: Stuck[] = []
++
++    const parked = [...threads.values()].filter(thread => thread.limit && thread.limit > iso)
++    if (parked.length) {
++      const until = parked.map(thread => thread.limit!).sort()[0]!
++      stuck.push({
++        id: `t3-limit-${until}`,
++        title: `${count(parked.length, 'T3 thread')} ${parked.length === 1 ? 'waits' : 'wait'} for ${day(until)}`,
++        why: `A usage limit: ${parked.map(thread => thread.title).join(', ')}.`,
++        action: 'Switch plan',
++        mark: 'paused',
++        at: until,
++        request: `These T3 Code threads are parked on a usage limit until ${day(until)}: ${parked.map(thread => `"${thread.title}"`).join(', ')}. Switch them to a plan with room so they carry on now.`,
++      })
++    }
++    for (const run of queued) {
++      const thread = threads.get(run.thread)
++      if (!thread || thread.limit && thread.limit > iso || Date.parse(run.requested) > now - QUEUED) continue
++      stuck.push({
++        id: `t3-queued-${digest(`${run.thread}:${run.requested}`)}`,
++        title: `${thread.title}: queued since ${day(run.requested)}`,
++        why: 'Its run never started.',
++        action: 'Resume',
++        mark: 'paused',
++        at: run.requested,
++        request: `The T3 Code thread "${thread.title}" (${run.thread}) has had a run queued since ${run.requested} that never started. Get it going.`,
++      })
++    }
++    const failed = latest.filter(run => {
++      const thread = threads.get(run.thread)
++      return thread && run.status === 'failed' && !(thread.limit && thread.limit > iso) && run.completed! > recent && run.completed! > (thread.visited ?? '')
++    })
++    if (failed.length) {
++      const titles = failed.map(run => threads.get(run.thread)!.title)
++      stuck.push({
++        id: `t3-failed-${digest(failed.map(run => `${run.thread}:${run.ordinal}`).sort().join(','))}`,
++        title: failed.length === 1 ? `${titles[0]} ended in an error` : `${failed.length} T3 runs ended in an error`,
++        why: failed.length === 1 ? 'You haven’t opened it since.' : `${titles.join(', ')}.`,
++        action: 'Look',
++        mark: 'failed',
++        at: failed.map(run => run.completed!).sort().at(-1)!,
++        request: `These T3 Code runs ended in an error and nobody has looked since: ${failed.map(run => `"${threads.get(run.thread)!.title}" (${run.thread})`).join(', ')}. See whether their work landed anyway; settle the ones that did and get the rest going again.`,
++      })
++    }
++
++    const fresh = latest
++      .filter(run => {
++        const thread = threads.get(run.thread)
++        return thread?.mine && run.status === 'completed' && run.completed! > recent && run.completed! > (thread.visited ?? '')
++      })
++      .sort((a, b) => b.completed!.localeCompare(a.completed!))
++      .map((run): Fresh => {
++        const thread = threads.get(run.thread)!
++        return { id: `t3-done-${digest(`${run.thread}:${run.ordinal}`)}`, title: thread.title, where: thread.project ? `T3 · ${thread.project}` : 'T3', line: this.lastWords(run.thread), at: run.completed! }
++      })
++    return { stuck, fresh }
++  }
++
++  // The thread's last answer, its first plain line.
++  private lastWords(thread: string) {
++    const row = this.db!
++      .query<{ text: string | null }, [string]>(
++        `select json_extract(payload_json, '$.text') text from orchestration_v2_projection_messages
++         where thread_id = ? and role = 'assistant' order by created_at desc limit 1`,
++      )
++      .get(thread)
++    const line = (row?.text ?? '')
++      .split('\n')
++      .map(line => line.replace(/^(#+|[-*>]|\d+\.)\s+/, '').replace(/\*\*|__|`/g, '').trim())
++      .find(Boolean)
++    return line ? (line.length > 200 ? `${line.slice(0, 199)}…` : line) : ''
++  }
++}
++
++function digest(text: string) {
++  return createHash('sha256').update(text).digest('hex').slice(0, 12)
++}
++
++function count(n: number, noun: string) {
++  return `${n} ${noun}${n === 1 ? '' : 's'}`
++}
++
++function day(iso: string) {
++  return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
++}
+diff --git a/external_plugins/voice/tasks.test.ts b/external_plugins/voice/tasks.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..8b99cf6233c6dc541ac12f5cb5d922646593ed78
+--- /dev/null
++++ b/external_plugins/voice/tasks.test.ts
+@@ -0,0 +1,145 @@
++import { afterAll, expect, test } from 'bun:test'
++import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
++import { tmpdir } from 'os'
++import { join } from 'path'
++import { Tasks, opener } from './tasks.ts'
++
++const home = mkdtempSync(join(tmpdir(), 'voice-tasks-'))
++const claude = join(home, 'claude')
++const state = join(home, 'hex', 'state')
++const hex = join(home, 'hex')
++const project = join(claude, 'projects', hex.replace(/[^a-zA-Z0-9]/g, '-'))
++afterAll(() => rmSync(home, { recursive: true }))
++
++const ago = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString()
++
++function threads(app: string, all: object) {
++  mkdirSync(join(state, app), { recursive: true })
++  writeFileSync(join(state, app, 'threads.json'), JSON.stringify(all))
++}
++
++function job(session: string, record: object, timeline: object[] = []) {
++  const dir = join(claude, 'jobs', session.slice(0, 8))
++  mkdirSync(dir, { recursive: true })
++  writeFileSync(join(dir, 'timeline.jsonl'), timeline.map(entry => JSON.stringify(entry) + '\n').join(''))
++  writeFileSync(join(dir, 'state.json'), JSON.stringify(record))
++}
++
++function running(session: string, status: 'busy' | 'idle', pid = process.pid) {
++  mkdirSync(join(claude, 'sessions'), { recursive: true })
++  writeFileSync(join(claude, 'sessions', `${session.slice(0, 8)}.json`), JSON.stringify({ pid, sessionId: session, status }))
++}
++
++function step(path: string, name: string, input: object) {
++  mkdirSync(join(path, '..'), { recursive: true })
++  appendFileSync(path, JSON.stringify({ type: 'assistant', message: { id: `msg_${Math.random()}`, content: [{ type: 'tool_use', id: `toolu_${Math.random()}`, name, input }] } }) + '\n')
++}
++
++async function until(check: () => boolean) {
++  for (let i = 0; i < 100 && !check(); i++) await Bun.sleep(20)
++  expect(check()).toBe(true)
++}
++
++mkdirSync(join(claude, 'jobs'), { recursive: true })
++mkdirSync(join(claude, 'sessions'), { recursive: true })
++threads('telegram', {
++  '-1004422245734': { name: 'hex', session: 'aaaaaaaa-general' },
++  '-1004422245734:908': { name: 'autofork', session: 'bbbbbbbb-autofork' },
++  '-1004422245734:2583': { name: 'voiceapp', session: 'cccccccc-voiceapp' },
++  '-1004422245734:65': { name: 'Theo clips', session: 'dddddddd-theo' },
++  '-1004422245734:72': { name: 'Leisure time', session: 'eeeeeeee-leisure' },
++})
++threads('buzz', { b1: { name: 'Old news', session: 'ffffffff-old' } })
++job('aaaaaaaa-general', { state: 'done', detail: 'heartbeat ran', updatedAt: ago(5) })
++const asked = ago(40)
++job('bbbbbbbb-autofork', { state: 'blocked', detail: 'needs music', needs: 'Pick a music style, and run `claude setup-token`', updatedAt: ago(20) }, [
++  { at: ago(90), state: 'working', detail: 'Publishing', text: '' },
++  { at: ago(60), state: 'done', detail: '**Published** autofork 0.1.2', text: 'npm is live' },
++  { at: asked, state: 'blocked', detail: 'needs music', text: 'Your call' },
++  { at: ago(20), state: 'blocked', detail: 'still needs music', text: 'Still yours' },
++])
++job('cccccccc-voiceapp', { state: 'working', detail: 'building', updatedAt: ago(1), fan: [{ id: 'old', kind: 'agent', label: 'Earlier', doneAt: 1 }, { id: 'agent2', kind: 'agent', label: 'Check the server', doneAt: Date.now() - 60_000 }, { id: 'agent1', kind: 'agent', label: 'Build the Tasks view' }, { id: 'sh', kind: 'shell', label: 'sleep' }] }, [
++  { at: ago(14), state: 'working', detail: '', text: '' },
++])
++job('dddddddd-theo', { state: 'stopped', detail: 'stopped', updatedAt: ago(30) }, [{ at: ago(100), state: 'done', detail: 'clips posted', text: 'done' }])
++job('eeeeeeee-leisure', { state: 'working', detail: 'was working', updatedAt: ago(29) })
++job('ffffffff-old', { state: 'done', detail: 'long ago', updatedAt: ago(8 * 24 * 60) })
++running('aaaaaaaa-general', 'idle')
++running('cccccccc-voiceapp', 'busy')
++running('eeeeeeee-leisure', 'busy', 2 ** 22 + 12345)
++
++const tasks = new Tasks(state, hex, claude)
++afterAll(() => tasks.close())
++
++test("each thread is a task from its session's own records, what needs you first, then what's working, then what finished", () => {
++  expect(tasks.tasks.map(task => [task.name, task.state])).toEqual([
++    ['autofork', 'needs'],
++    ['voiceapp', 'working'],
++    ['hex', 'done'],
++    ['Leisure time', 'idle'],
++    ['Theo clips', 'idle'],
++  ])
++  const autofork = tasks.get('telegram:-1004422245734:908')!
++  expect(autofork).toMatchObject({
++    where: 'Telegram',
++    line: 'Pick a music style, and run claude setup-token',
++    needs: 'Pick a music style, and run claude setup-token',
++    since: asked,
++    link: 'https://t.me/c/4422245734/908',
++  })
++  expect(autofork.lately.map(moment => [moment.state, moment.text])).toEqual([
++    ['needs', 'still needs music'],
++    ['needs', 'needs music'],
++    ['done', 'Published autofork 0.1.2'],
++  ])
++  expect(tasks.get('telegram:-1004422245734')).toMatchObject({ where: 'General', link: 'https://t.me/c/4422245734/1' })
++  expect(tasks.get('telegram:-1004422245734:65')).toMatchObject({ line: 'clips posted', lately: [] })
++  expect(tasks.get('buzz:b1')).toBeUndefined()
++  expect(tasks.summary).toEqual({ needs: 1, working: 1 })
++  expect(tasks.rows()[0]).not.toContainKeys(['needs', 'lately', 'steps'])
++})
++
++test("a working thread's line is its newest step, and each of its agents from this stretch of work shows its own, running ones first", async () => {
++  const voiceapp = () => tasks.get('telegram:-1004422245734:2583')!
++  expect(voiceapp().agents).toEqual([
++    { id: 'agent1', label: 'Build the Tasks view', state: 'working', steps: [] },
++    { id: 'agent2', label: 'Check the server', state: 'done', steps: [] },
++  ])
++  step(join(project, 'cccccccc-voiceapp.jsonl'), 'Read', { file_path: '/repo/src/tasks.ts' })
++  step(join(project, 'cccccccc-voiceapp.jsonl'), 'Edit', { file_path: '/repo/src/tasks.ts', old_string: 'a', new_string: 'b' })
++  await until(() => voiceapp().line === 'Editing tasks.ts')
++  expect(voiceapp().steps.map(step => step.text)).toEqual(['Editing tasks.ts', 'Reading tasks.ts'])
++  step(join(project, 'cccccccc-voiceapp', 'subagents', 'agent-agent1.jsonl'), 'Read', { file_path: '/repo/README.md' })
++  await until(() => voiceapp().agents[0].line === 'Reading README.md')
++  const row = tasks.rows().find(row => row.name === 'voiceapp')!
++  expect(row).not.toContainKey('steps')
++  expect(row.agents[0]).toEqual({ id: 'agent1', label: 'Build the Tasks view', state: 'working', line: 'Reading README.md' })
++})
++
++test('a change to a session wakes the list, and the counts move only when a count does', async () => {
++  const { version } = tasks
++  const counted = tasks.counts.version
++  const woke = tasks.changes(version, 2000)
++  job('aaaaaaaa-general', { state: 'done', detail: 'heartbeat ran again', updatedAt: ago(0) })
++  await woke
++  await until(() => tasks.get('telegram:-1004422245734')?.line === 'heartbeat ran again')
++  expect(tasks.counts.version).toBe(counted)
++  job('aaaaaaaa-general', { state: 'blocked', detail: 'Your call: ship it?', updatedAt: ago(0) })
++  await until(() => tasks.summary.needs === 2)
++  expect(tasks.counts.version).toBeGreaterThan(counted)
++  expect(tasks.tasks[0].name).toBe('hex')
++})
++
++test('a new thread shows up when its app writes threads.json, once its session has records', async () => {
++  threads('discord', { d1: { name: 'Latest Claude', session: '99999999-latest' } })
++  job('99999999-latest', { state: 'failed', detail: "You've hit your weekly limit", updatedAt: ago(0) })
++  await until(() => tasks.get('discord:d1')?.state === 'failed')
++  expect(tasks.get('discord:d1')).toMatchObject({ where: 'Discord', line: "You've hit your weekly limit" })
++  expect(tasks.get('discord:d1')!.link).toBeUndefined()
++})
++
++test('talking a task through tells the voice which thread it is and where it stands', () => {
++  expect(opener(tasks.get('telegram:-1004422245734:908')!)).toBe(
++    "The task is the hex thread autofork (Telegram, thread id -1004422245734:908). It's waiting on the caller: Pick a music style, and run claude setup-token",
++  )
++})
+diff --git a/external_plugins/voice/tasks.ts b/external_plugins/voice/tasks.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..c193daebe5620f659c9178e563b4cc66424a0f2b
+--- /dev/null
++++ b/external_plugins/voice/tasks.ts
+@@ -0,0 +1,366 @@
++import { closeSync, fstatSync, openSync, readdirSync, readFileSync, readSync, watch, type FSWatcher } from 'fs'
++import { homedir } from 'os'
++import { join } from 'path'
++import { followTranscript, headline, sizeOf } from './activity.ts'
++import { Changes } from './changes.ts'
++
++export type State = 'working' | 'needs' | 'done' | 'failed' | 'idle'
++export type Step = { at: string; text: string }
++export type Agent = { id: string; label: string; state: 'working' | 'done'; line?: string; steps: Step[] }
++export type Moment = { at: string; state: State; text: string }
++export type Row = Omit<HexTask, 'needs' | 'lately' | 'steps' | 'agents'> & { agents: Omit<Agent, 'steps'>[] }
++export type Summary = { needs: number; working: number }
++export type HexTask = {
++  id: string
++  app: string
++  thread: string
++  name: string
++  where: string
++  state: State
++  line: string
++  needs?: string
++  since: string
++  at: string
++  agents: Agent[]
++  steps: Step[]
++  lately: Moment[]
++  link?: string
++}
++
++type Thread = { app: string; id: string; name: string; session?: string; cwd?: string }
++type Job = {
++  state?: string
++  detail?: string
++  needs?: string
++  cwd?: string
++  updatedAt?: string
++  fan?: { id: string; kind: string; label: string; doneAt?: number }[]
++}
++type Entry = { at: string; state: string; detail?: string; text?: string }
++type Follower = { stop: () => void; steps: Step[] }
++
++const CLAUDE = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude')
++const TAIL = 256 * 1024
++const LATELY = 5
++const STEPS = 12
++const KEEP = 7 * 24 * 60 * 60_000
++const ORDER: State[] = ['needs', 'working', 'done', 'failed', 'idle']
++const STATES: Record<string, State> = { working: 'working', blocked: 'needs', done: 'done', failed: 'failed' }
++const APPS: Record<string, string> = { telegram: 'Telegram', discord: 'Discord', buzz: 'Buzz', t3: 'T3 Code', voice: 'Voice' }
++
++// Every hex thread as a task, from the records Claude Code already keeps (the same ones
++// `claude agents --json` prints): each session's job state and timeline, which sessions are
++// running, and each app's threads.json for its name. It wakes when one of those files changes,
++// follows a working thread's transcript for its newest step, and bumps a version on any change.
++// The counts behind the app's Tasks button keep their own version, so it hears only when one moves.
++export class Tasks extends Changes {
++  tasks: HexTask[] = []
++  summary: Summary = { needs: 0, working: 0 }
++  counts = new Changes()
++  private threads: Thread[] = []
++  private jobs = new Map<string, { job?: Job; timeline: Entry[] }>()
++  private sessions = new Map<string, string>()
++  private watchers = new Map<string, FSWatcher>()
++  private appWatchers = new Map<string, () => void>()
++  private followers = new Map<string, Follower>()
++  private pending?: ReturnType<typeof setTimeout>
++  private stale = { threads: true, sessions: true }
++  private stops: (() => void)[] = []
++
++  constructor(
++    private state: string,
++    private hexDir: string,
++    private claude = CLAUDE,
++  ) {
++    super()
++    this.stops.push(watchDir(state, file => file && APPS[file] && this.mark('threads')))
++    this.stops.push(watchDir(join(claude, 'sessions'), () => this.mark('sessions')))
++    this.stops.push(watchDir(join(claude, 'jobs'), file => this.jobChanged(file)))
++    this.build()
++  }
++
++  get(id: string) {
++    return this.tasks.find(task => task.id === id)
++  }
++
++  rows(): Row[] {
++    return this.tasks.map(({ needs, lately, steps, agents, ...row }) => ({ ...row, agents: agents.map(({ steps, ...agent }) => agent) }))
++  }
++
++  close() {
++    clearTimeout(this.pending)
++    for (const stop of [...this.stops, ...this.appWatchers.values()]) stop()
++    for (const watcher of this.watchers.values()) watcher.close()
++    for (const follower of this.followers.values()) follower.stop()
++  }
++
++  private mark(what: 'threads' | 'sessions') {
++    this.stale[what] = true
++    this.schedule()
++  }
++
++  private jobChanged(short: string | null) {
++    if (!short || !this.threads.some(thread => thread.session?.startsWith(short))) return
++    this.jobs.delete(short)
++    this.watchJob(short)
++    this.schedule()
++  }
++
++  // A burst of writes (a state, its timeline, a session file) lands as one rebuild.
++  private schedule() {
++    clearTimeout(this.pending)
++    this.pending = setTimeout(() => this.build(), 30)
++  }
++
++  private build() {
++    if (this.stale.threads) this.readThreads()
++    if (this.stale.sessions) this.readSessions()
++    this.stale = { threads: false, sessions: false }
++    const since = new Date(Date.now() - KEEP).toISOString()
++    const tasks = this.threads.map(thread => this.task(thread)).filter(task => task.state === 'needs' || task.state === 'working' || task.at > since)
++    this.follow(tasks)
++    tasks.sort((a, b) => ORDER.indexOf(a.state) - ORDER.indexOf(b.state) || b.at.localeCompare(a.at))
++    if (JSON.stringify(tasks) === JSON.stringify(this.tasks)) return
++    this.tasks = tasks
++    this.changed()
++    const summary = { needs: count(tasks, 'needs'), working: count(tasks, 'working') }
++    if (summary.needs === this.summary.needs && summary.working === this.summary.working) return
++    this.summary = summary
++    this.counts.changed()
++  }
++
++  private readThreads() {
++    for (const app of apps(this.state))
++      if (!this.appWatchers.has(app)) this.appWatchers.set(app, watchDir(join(this.state, app), file => file === 'threads.json' && this.mark('threads')))
++    this.threads = apps(this.state).flatMap(app =>
++      Object.entries(readJson(join(this.state, app, 'threads.json')) ?? {}).map(([id, thread]: [string, any]) => ({
++        app,
++        id,
++        name: thread.name ?? id,
++        session: typeof thread.session === 'string' ? thread.session : undefined,
++        cwd: thread.cwd,
++      })),
++    )
++    const wanted = new Set(this.threads.flatMap(thread => (thread.session ? [short(thread.session)] : [])))
++    for (const [id, watcher] of this.watchers) {
++      if (wanted.has(id)) continue
++      watcher.close()
++      this.watchers.delete(id)
++    }
++    for (const id of this.jobs.keys()) if (!wanted.has(id)) this.jobs.delete(id)
++    for (const id of wanted) this.watchJob(id)
++  }
++
++  private watchJob(id: string) {
++    if (this.watchers.has(id)) return
++    try {
++      this.watchers.set(id, watch(join(this.claude, 'jobs', id), () => this.jobChanged(id)))
++    } catch {}
++  }
++
++  // Running sessions by id, with Claude Code's busy or idle; a file whose process is gone doesn't count.
++  private readSessions() {
++    this.sessions.clear()
++    const dir = join(this.claude, 'sessions')
++    for (const name of list(dir)) {
++      if (!name.endsWith('.json')) continue
++      const session = readJson(join(dir, name))
++      if (session?.sessionId && alive(session.pid)) this.sessions.set(session.sessionId, session.status ?? 'idle')
++    }
++  }
++
++  private job(session: string) {
++    const id = short(session)
++    let cached = this.jobs.get(id)
++    if (!cached) {
++      const dir = join(this.claude, 'jobs', id)
++      cached = { job: readJson(join(dir, 'state.json')), timeline: tail(join(dir, 'timeline.jsonl')) }
++      this.jobs.set(id, cached)
++    }
++    return cached
++  }
++
++  private task(thread: Thread): HexTask {
++    const { job, timeline } = thread.session ? this.job(thread.session) : { job: undefined, timeline: [] }
++    const status = thread.session && this.sessions.get(thread.session)
++    const running = !!status
++    let state: State = (job?.state && STATES[job.state]) ?? (status === 'busy' ? 'working' : 'idle')
++    if ((state === 'working' && !running) || job?.detail?.startsWith('(idle')) state = 'idle'
++    const lately = timeline
++      .filter(entry => entry.text && entry.detail)
++      .slice(-LATELY)
++      .reverse()
++      .map(entry => ({ at: entry.at, state: STATES[entry.state] ?? 'idle', text: plain(entry.detail!) }))
++    const at = job?.updatedAt ?? timeline.at(-1)?.at ?? new Date(0).toISOString()
++    const needs = state === 'needs' ? plain(job?.needs ?? job?.detail ?? '') || undefined : undefined
++    const detail = job?.state === 'stopped' ? undefined : job?.detail && plain(job.detail)
++    const since = state === 'working' || state === 'needs' ? (streak(timeline, job?.state) ?? at) : at
++    const steps = state === 'working' ? this.steps(thread.session!) : []
++    const line = steps[0]?.text ?? needs ?? detail ?? lately[0]?.text ?? ''
++    const agents = (state === 'working' ? (job?.fan ?? []) : [])
++      .filter(fan => fan.kind === 'agent' && (!fan.doneAt || fan.doneAt >= Date.parse(since)))
++      .map(({ id, label, doneAt }): Agent => {
++        const steps = this.steps(`${thread.session} ${id}`)
++        return { id, label, state: doneAt ? 'done' : 'working', ...(steps[0] && { line: steps[0].text }), steps }
++      })
++      .sort((a, b) => Number(a.state === 'done') - Number(b.state === 'done'))
++    return {
++      id: `${thread.app}:${thread.id}`,
++      app: thread.app,
++      thread: thread.id,
++      name: thread.name,
++      where: where(thread),
++      state,
++      line: oneLine(line),
++      ...(needs && { needs }),
++      since,
++      at,
++      agents,
++      steps,
++      lately: state === 'idle' ? [] : lately,
++      ...(link(thread) && { link: link(thread) }),
++    }
++  }
++
++  // A followed transcript's newest steps, newest first.
++  private steps(key: string) {
++    return [...(this.followers.get(key)?.steps ?? [])].reverse()
++  }
++
++  // A working thread's transcript, and its subagents' from this stretch of work, give its steps.
++  private follow(tasks: HexTask[]) {
++    const wanted = new Map<string, string>()
++    for (const task of tasks) {
++      if (task.state !== 'working') continue
++      const thread = this.threads.find(thread => `${thread.app}:${thread.id}` === task.id)!
++      const project = join(this.claude, 'projects', (this.job(thread.session!).job?.cwd ?? thread.cwd ?? this.hexDir).replace(/[^a-zA-Z0-9]/g, '-'))
++      wanted.set(thread.session!, join(project, `${thread.session}.jsonl`))
++      for (const agent of task.agents) wanted.set(`${thread.session} ${agent.id}`, join(project, thread.session!, 'subagents', `agent-${agent.id}.jsonl`))
++    }
++    for (const [key, follower] of this.followers) {
++      if (wanted.has(key)) continue
++      follower.stop()
++      this.followers.delete(key)
++    }
++    for (const [key, path] of wanted) {
++      if (this.followers.has(key)) continue
++      const follower: Follower = { stop: () => {}, steps: [] }
++      this.followers.set(key, follower)
++      follower.stop = followTranscript(path, Math.max(0, sizeOf(path) - TAIL), (entry, updates) => {
++        for (const update of updates()) {
++          const text = headline(update)
++          if (!text || text === follower.steps.at(-1)?.text) continue
++          follower.steps.push({ at: entry.timestamp ?? new Date().toISOString(), text: oneLine(text) })
++          if (follower.steps.length > STEPS) follower.steps.shift()
++        }
++        this.schedule()
++      })
++    }
++  }
++}
++
++// What the voice and Claude hear about a task when the caller wants to talk it through.
++export function opener(task: HexTask) {
++  const state = {
++    needs: `It's waiting on the caller: ${task.needs ?? task.line}`,
++    working: `It's working: ${task.line}`,
++    done: `It finished: ${task.line}`,
++    failed: `It failed: ${task.line}`,
++    idle: `It's idle${task.line ? `; last: ${task.line}` : ''}`,
++  }[task.state]
++  return `The task is the hex thread ${task.name} (${task.where}, thread id ${task.thread}). ${state}`
++}
++
++function count(tasks: HexTask[], state: State) {
++  return tasks.filter(task => task.state === state).length
++}
++
++function apps(state: string) {
++  return list(state).filter(app => APPS[app])
++}
++
++function where(thread: Thread) {
++  if (thread.app === 'telegram' && !thread.id.includes(':')) return thread.id.startsWith('-') ? 'General' : 'DM'
++  return APPS[thread.app]
++}
++
++function link(thread: Thread) {
++  if (thread.app !== 'telegram' || !thread.id.startsWith('-100')) return
++  const [chat, topic = '1'] = thread.id.slice(4).split(':')
++  return `https://t.me/c/${chat}/${topic}`
++}
++
++// When the job's current state began: the oldest of the newest run of timeline entries in it.
++function streak(timeline: Entry[], state?: string) {
++  let since: string | undefined
++  for (let i = timeline.length - 1; i >= 0 && timeline[i].state === state; i--) since = timeline[i].at
++  return since
++}
++
++function short(session: string) {
++  return session.slice(0, 8)
++}
++
++function plain(text: string) {
++  return text.replace(/\*\*|__|`/g, '').replace(/\s+/g, ' ').trim()
++}
++
++function oneLine(text: string) {
++  return text.length > 240 ? `${text.slice(0, 239)}…` : text
++}
++
++function tail(path: string): Entry[] {
++  let fd
++  try {
++    fd = openSync(path, 'r')
++  } catch {
++    return []
++  }
++  try {
++    const size = fstatSync(fd).size
++    const start = Math.max(0, size - TAIL)
++    const chunk = Buffer.alloc(size - start)
++    readSync(fd, chunk, 0, chunk.length, start)
++    const lines = chunk.toString('utf8').split('\n')
++    return (start ? lines.slice(1) : lines).flatMap(line => {
++      try {
++        return [JSON.parse(line)]
++      } catch {
++        return []
++      }
++    })
++  } finally {
++    closeSync(fd)
++  }
++}
++
++function watchDir(dir: string, changed: (file: string | null) => void) {
++  try {
++    const watcher = watch(dir, (_, file) => changed(file))
++    return () => watcher.close()
++  } catch {
++    return () => {}
++  }
++}
++
++function alive(pid: unknown) {
++  try {
++    return typeof pid === 'number' && process.kill(pid, 0)
++  } catch (error) {
++    return (error as NodeJS.ErrnoException).code === 'EPERM'
++  }
++}
++
++function list(dir: string) {
++  try {
++    return readdirSync(dir)
++  } catch {
++    return []
++  }
++}
++
++function readJson(path: string) {
++  try {
++    return JSON.parse(readFileSync(path, 'utf8'))
++  } catch {}
++}
+diff --git a/hub/ledger.ts b/hub/ledger.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..8ff39f5de7e883f81fd0be5ec8ca892cc4a2959b
+--- /dev/null
++++ b/hub/ledger.ts
+@@ -0,0 +1,140 @@
++import { readFileSync, renameSync, writeFileSync } from 'fs'
++
++// via: where the answer came from: the chat app's own buttons, hex's voice app, or a call.
++export type Answer = { label: string; at: string; via: string }
++export type Ask = {
++  thread: string
++  message: number
++  text: string
++  options: string[]
++  at: string
++  poll?: string
++  answer?: Answer
++  settled?: { note: string; at: string }
++}
++export type Pin = { message: number; text: string; at: string }
++type Book = { asks: Ask[]; pins: Record<string, Pin> }
++
++const KEEP = 14 * 24 * 60 * 60_000
++
++// Every question a client asked with buttons or a poll, and what became of it, plus each thread's
++// pinned status post as last written. The client that sends and edits the messages keeps it, and
++// anything else (the voice app's asks, hex's check) reads the file.
++export class Ledger {
++  private book: Book
++
++  constructor(private file: string) {
++    this.book = read(file)
++  }
++
++  get asks(): readonly Ask[] {
++    return this.book.asks
++  }
++
++  pin(thread: string): Pin | undefined {
++    return this.book.pins[thread]
++  }
++
++  find(thread: string, message: number) {
++    return this.book.asks.find(ask => ask.thread === thread && ask.message === message)
++  }
++
++  byPoll(poll: string) {
++    return this.book.asks.find(ask => ask.poll === poll)
++  }
++
++  ask(thread: string, message: number, text: string, options: string[], poll?: string) {
++    this.book.asks.push({ thread, message, text, options, at: now(), ...(poll && { poll }) })
++    this.save()
++  }
++
++  answered(thread: string, message: number, label: string, via: string) {
++    this.update(thread, message, ask => {
++      ask.answer = { label, at: now(), via }
++      delete ask.settled
++    })
++  }
++
++  settled(thread: string, message: number, note: string) {
++    this.update(thread, message, ask => (ask.settled = { note, at: now() }))
++  }
++
++  reopened(thread: string, message: number) {
++    this.update(thread, message, ask => {
++      delete ask.answer
++      delete ask.settled
++    })
++  }
++
++  // A message's new text: a pinned post's latest status, or, for a question, the end of its
++  // buttons, since an edit that doesn't send them again takes them off.
++  edited(thread: string, message: number, text: string) {
++    const pin = this.book.pins[thread]
++    if (pin?.message === message) {
++      this.book.pins[thread] = { message, text, at: now() }
++      return this.save()
++    }
++    const ask = this.find(thread, message)
++    if (ask && !ask.answer && !ask.settled && !ask.poll) this.settled(thread, message, 'Edited')
++  }
++
++  pinned(thread: string, message: number, text = '') {
++    this.book.pins[thread] = { message, text, at: now() }
++    this.save()
++  }
++
++  unpinned(thread: string, message: number) {
++    if (this.book.pins[thread]?.message !== message) return
++    delete this.book.pins[thread]
++    this.save()
++  }
++
++  deleted(thread: string, message: number) {
++    this.book.asks = this.book.asks.filter(ask => !(ask.thread === thread && ask.message === message))
++    if (this.book.pins[thread]?.message === message) delete this.book.pins[thread]
++    this.save()
++  }
++
++  forget(thread: string) {
++    this.book.asks = this.book.asks.filter(ask => ask.thread !== thread)
++    delete this.book.pins[thread]
++    this.save()
++  }
++
++  private update(thread: string, message: number, change: (ask: Ask) => void) {
++    const ask = this.find(thread, message)
++    if (!ask) return
++    change(ask)
++    this.save()
++  }
++
++  // Open questions stay however old they get; settled ones go after two weeks.
++  private save() {
++    const since = new Date(Date.now() - KEEP).toISOString()
++    this.book.asks = this.book.asks.filter(ask => !(ask.answer || ask.settled) || ask.at > since)
++    writeFileSync(`${this.file}.tmp`, JSON.stringify(this.book, null, 1) + '\n')
++    renameSync(`${this.file}.tmp`, this.file)
++  }
++}
++
++function read(file: string): Book {
++  let text: string
++  try {
++    text = readFileSync(file, 'utf8')
++  } catch {
++    return { asks: [], pins: {} }
++  }
++  try {
++    const book = JSON.parse(text)
++    return { asks: Array.isArray(book.asks) ? book.asks : [], pins: book.pins ?? {} }
++  } catch (error) {
++    const aside = `${file}.corrupt-${Date.now()}`
++    renameSync(file, aside)
++    process.stderr.write(`hub: ${file} is unreadable (${error}), moved it to ${aside} and started a new ledger\n`)
++    return { asks: [], pins: {} }
++  }
++}
++
++function now() {
++  return new Date().toISOString()
++}
 diff --git a/scripts/__pycache__/fork_sync.cpython-314.pyc b/scripts/__pycache__/fork_sync.cpython-314.pyc
 new file mode 100644
 index 0000000000000000000000000000000000000000..efc6bfee55145b7ee3c235274d939b1133ba17e1
