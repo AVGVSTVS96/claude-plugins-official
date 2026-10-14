@@ -33,10 +33,10 @@ index 0000000000000000000000000000000000000000..07fdedd6c4bc9e7072f8d860f7eadd42
 +}
 diff --git a/external_plugins/voice/README.md b/external_plugins/voice/README.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..8435b32a4285eb570d46de9fd93806041084c957
+index 0000000000000000000000000000000000000000..6ac114b112f601c9585494999bd4b72171b59af4
 --- /dev/null
 +++ b/external_plugins/voice/README.md
-@@ -0,0 +1,367 @@
+@@ -0,0 +1,368 @@
 +# voice
 +
 +Live voice calls for Claude Code. OpenAI's `gpt-live-1` talks with you in real
@@ -153,7 +153,8 @@ index 0000000000000000000000000000000000000000..8435b32a4285eb570d46de9fd9380604
 +about 15 seconds before calling the call dropped. When the plugin starts, it
 +picks the latest call that never got an end back up the same way and sends
 +Claude a "call resumed" message with the call so far; any other call left
-+without an end is closed out as `dropped`. A phone call's audio runs through
++without an end is closed out as `dropped` and ends like any other call: Claude
++is told to name it, and the session renews. A phone call's audio runs through
 +the plugin, so a restart ends it. When a call starts, the plugin tells the hub
 +to keep the session (`keep`), so a renew asked for by the call before it
 +doesn't stop the session mid-call.
@@ -332,7 +333,7 @@ index 0000000000000000000000000000000000000000..8435b32a4285eb570d46de9fd9380604
 +   that turn is done the hub starts `voice` over fresh right away, with its own
 +   OptChat chat of past calls instead of one context that grows with every
 +   call. The hub holds `VOICE_PORT` meanwhile, so a call started then waits a
-+   few seconds instead of failing.
++   few seconds for the new session instead of failing or landing in the old one.
 +
 +3. Open the call page. The browser only allows the microphone on `localhost`
 +   or HTTPS:
@@ -804,7 +805,7 @@ index 0000000000000000000000000000000000000000..2895d5c588951ad5b27ad7b6c6f42f42
 +}
 diff --git a/external_plugins/voice/bot.ts b/external_plugins/voice/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..ca531607be84af2d51e1567f847c440c2d69ad02
+index 0000000000000000000000000000000000000000..e5284194cce732adc16343719742a5d8b4ada6d3
 --- /dev/null
 +++ b/external_plugins/voice/bot.ts
 @@ -0,0 +1,27 @@
@@ -818,7 +819,7 @@ index 0000000000000000000000000000000000000000..ca531607be84af2d51e1567f847c440c
 +const SOCKET = join(STATE_DIR, 'http.sock')
 +mkdirSync(STATE_DIR, { recursive: true })
 +
-+startHub({
++const hub = startHub({
 +  stateDir: STATE_DIR,
 +  channel: process.env.VOICE_CHANNEL ?? 'plugin:voice@hex',
 +  main: 'voice',
@@ -834,7 +835,7 @@ index 0000000000000000000000000000000000000000..ca531607be84af2d51e1567f847c440c
 +  failed: (_, reason) => process.stderr.write(`voice hub: the voice session couldn't start: ${reason}\n`),
 +})
 +
-+door({ port: voicePort(), socket: SOCKET })
++door({ port: voicePort(), socket: SOCKET, renewal: () => hub.renewal('voice') })
 diff --git a/external_plugins/voice/bun.lock b/external_plugins/voice/bun.lock
 new file mode 100644
 index 0000000000000000000000000000000000000000..c93a7a533bf379bd6b60b1f04ab67be3a521d768
@@ -1548,10 +1549,10 @@ index 0000000000000000000000000000000000000000..8b43569416466e50c388e80f9cf8baf9
 +}
 diff --git a/external_plugins/voice/door.test.ts b/external_plugins/voice/door.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..6e66ee08d89390ab5848c1175fc7f0215bf25a63
+index 0000000000000000000000000000000000000000..f0cf9ec9d94255e1e39a8a1ca655affb3574b355
 --- /dev/null
 +++ b/external_plugins/voice/door.test.ts
-@@ -0,0 +1,112 @@
+@@ -0,0 +1,135 @@
 +import { expect, test } from 'bun:test'
 +import { mkdtempSync, rmSync, writeFileSync } from 'fs'
 +import { tmpdir } from 'os'
@@ -1615,6 +1616,29 @@ index 0000000000000000000000000000000000000000..6e66ee08d89390ab5848c1175fc7f021
 +  expect(Date.now() - asked).toBeLessThan(2000)
 +})
 +
++test("a call that comes while the last call's session renews waits for the new session, and nothing else waits", async () => {
++  using s = scratch()
++  let renewed!: () => void
++  const renewal = new Promise<void>(resolve => (renewed = resolve))
++  s.plugin({ fetch: () => new Response('old') })
++  const front = door({ port: 0, socket: s.socket, renewal: () => renewal })!
++  s.servers.push(front)
++  const call = fetch(`http://127.0.0.1:${front.port}/session`, { method: 'POST', body: 'offer' })
++  expect(await (await fetch(`http://127.0.0.1:${front.port}/calls`)).text()).toBe('old')
++  s.servers[0]!.stop(true)
++  s.plugin({ fetch: () => new Response('new') })
++  renewed()
++  expect(await (await call).text()).toBe('new')
++})
++
++test('a call waits for a renew no longer than the wait, then goes to the session there is', async () => {
++  using s = scratch()
++  s.plugin({ fetch: () => new Response('old') })
++  const front = door({ port: 0, socket: s.socket, wait: 200, renewal: () => new Promise(() => {}) })!
++  s.servers.push(front)
++  expect(await (await fetch(`http://127.0.0.1:${front.port}/session`, { method: 'POST', body: 'offer' })).text()).toBe('old')
++})
++
 +test('with no plugin by the time the wait is up, the answer says so', async () => {
 +  using s = scratch()
 +  const front = door({ port: 0, socket: s.socket, wait: 200 })!
@@ -1666,10 +1690,10 @@ index 0000000000000000000000000000000000000000..6e66ee08d89390ab5848c1175fc7f021
 +})
 diff --git a/external_plugins/voice/door.ts b/external_plugins/voice/door.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..6abc6eb80a3aace6732466dfe2e62ab83a312165
+index 0000000000000000000000000000000000000000..9c67dbe8c48afc9e2f4231478df7e0c286e43b03
 --- /dev/null
 +++ b/external_plugins/voice/door.ts
-@@ -0,0 +1,86 @@
+@@ -0,0 +1,98 @@
 +import { readFileSync, watch, type FSWatcher } from 'fs'
 +import { homedir } from 'os'
 +import { basename, dirname, join } from 'path'
@@ -1684,10 +1708,15 @@ index 0000000000000000000000000000000000000000..6abc6eb80a3aace6732466dfe2e62ab8
 +  return Number(process.env.VOICE_PORT ?? text.match(/^\s*VOICE_PORT\s*=\s*(\d+)/m)?.[1] ?? 8790)
 +}
 +
++// Twilio gives up on a webhook after 15 seconds, so a phone call waits less for a new session
++// and lands in the old one rather than failing.
++const PHONE_WAIT = 10_000
++
 +// In hex the voice plugin restarts with every call's new session, so the hub holds its port:
 +// each request goes on to the plugin's socket, and one that comes while the plugin is
-+// restarting waits for it to come back instead of failing.
-+export function door({ port, socket, wait = 30_000 }: { port: number; socket: string; wait?: number }) {
++// restarting waits for it to come back instead of failing. A call that comes while the last
++// call's session is winding down to renew waits for the new session (renewal).
++export function door({ port, socket, wait = 30_000, renewal }: { port: number; socket: string; wait?: number; renewal?: () => Promise<void> }) {
 +  const dir = dirname(socket)
 +  const name = basename(socket)
 +
@@ -1701,10 +1730,17 @@ index 0000000000000000000000000000000000000000..6abc6eb80a3aace6732466dfe2e62ab8
 +    return { settled, close: () => (watcher?.close(), clearTimeout(timer)) }
 +  }
 +
++  function within(done: Promise<void>, until: number) {
++    let timer: ReturnType<typeof setTimeout> | undefined
++    return Promise.race([done, new Promise<void>(resolve => (timer = setTimeout(resolve, Math.max(0, until - Date.now()))))]).finally(() => clearTimeout(timer))
++  }
++
 +  async function pass(request: Request) {
 +    const { pathname, search } = new URL(request.url)
 +    const body = request.method === 'GET' || request.method === 'HEAD' ? undefined : await request.arrayBuffer()
 +    const until = Date.now() + wait
++    const calling = request.method === 'POST' && (pathname === '/session' || pathname === '/twilio/incoming')
++    if (calling && renewal) await within(renewal(), pathname === '/session' ? until : Date.now() + PHONE_WAIT)
 +    for (;;) {
 +      const next = moved(until)
 +      try {
@@ -1909,10 +1945,10 @@ index 0000000000000000000000000000000000000000..0ada79ea59ad789671d2c7bda2164d2e
 +</html>
 diff --git a/external_plugins/voice/server.ts b/external_plugins/voice/server.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..36c00e4aa551e40b60e7d7e10a36d5f763b27a4b
+index 0000000000000000000000000000000000000000..5cb733c5c395d65b9fa013a525ce21a1352f4751
 --- /dev/null
 +++ b/external_plugins/voice/server.ts
-@@ -0,0 +1,1086 @@
+@@ -0,0 +1,1101 @@
 +#!/usr/bin/env bun
 +import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 +import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
@@ -2011,6 +2047,7 @@ index 0000000000000000000000000000000000000000..36c00e4aa551e40b60e7d7e10a36d5f7
 +let live: Live | undefined
 +let ended: string | undefined
 +let hub: ReturnType<typeof connect> | undefined
++let standing: 'keep' | 'renew' | undefined
 +let seq = 0
 +const dials = new Map<string, Dial>()
 +const placed = new Map<string, Placed>()
@@ -2380,7 +2417,7 @@ index 0000000000000000000000000000000000000000..36c00e4aa551e40b60e7d7e10a36d5f7
 +    [`The call ended: ${ENDINGS[end]} (${reason}). Name it with title.`, ...(rest.length ? ['Last words:', transcript(rest)] : [])].join('\n'),
 +    { call: call.id, ended: end, reason },
 +  )
-+  hub?.write(JSON.stringify({ type: 'renew', thread: THREAD }) + '\n')
++  tell('renew')
 +  call.socket.onclose = null
 +  call.socket.close()
 +}
@@ -2410,7 +2447,7 @@ index 0000000000000000000000000000000000000000..36c00e4aa551e40b60e7d7e10a36d5f7
 +  live = current
 +  save(current)
 +  activity.changed()
-+  hub?.write(JSON.stringify({ type: 'keep', thread: THREAD }) + '\n')
++  tell('keep')
 +  listen(current, socket)
 +  warn(current)
 +  deliver(
@@ -2578,10 +2615,21 @@ index 0000000000000000000000000000000000000000..36c00e4aa551e40b60e7d7e10a36d5f7
 +  }
 +}
 +
++// A call lost with the plugin ends like any other: Claude names it, and the session renews.
 +function closeOut(record: CallRecord) {
 +  const heard = Math.max(0, ...record.turns.map(turn => turn.at), ...record.tasks.map(task => task.at), ...(record.moments ?? []).map(mark => mark.at))
-+  calls.save({ ...record, ended: new Date(Date.parse(record.started) + heard).toISOString(), end: 'dropped', reason: 'the voice plugin restarted and the call was gone' })
++  const reason = 'the voice plugin restarted and the call was gone'
++  calls.save({ ...record, ended: new Date(Date.parse(record.started) + heard).toISOString(), end: 'dropped', reason })
 +  trace(`closed out ${record.id}: it never got an end`)
++  deliver(`The call ended: ${ENDINGS.dropped} (${reason}). Name it with title.`, { call: record.id, ended: 'dropped', reason })
++  if (!live) tell('renew')
++}
++
++// The hub learns when a call starts (keep) or ends (renew), and hears it again after every
++// hello, since a hello clears what the hub knew of the session before it.
++function tell(type: 'keep' | 'renew') {
++  standing = type
++  hub?.write(JSON.stringify({ type, thread: THREAD }) + '\n')
 +}
 +
 +function reattach(record: CallRecord) {
@@ -2822,7 +2870,10 @@ index 0000000000000000000000000000000000000000..36c00e4aa551e40b60e7d7e10a36d5f7
 +  let buffer = ''
 +  socket.setEncoding('utf8')
 +  socket.on('connect', () => {
-+    setTimeout(() => socket.write(JSON.stringify({ type: 'hello', thread: THREAD, session: process.env.CLAUDE_CODE_SESSION_ID }) + '\n'), 1000)
++    setTimeout(() => {
++      socket.write(JSON.stringify({ type: 'hello', thread: THREAD, session: process.env.CLAUDE_CODE_SESSION_ID }) + '\n')
++      if (standing) socket.write(JSON.stringify({ type: standing, thread: THREAD }) + '\n')
++    }, 1000)
 +  })
 +  socket.on('data', (chunk: string) => {
 +    buffer += chunk

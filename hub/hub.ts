@@ -112,6 +112,9 @@ export function startHub({ stateDir, channel, main, mainName = 'main', general =
   const idle = new Map<string, ReturnType<typeof setTimeout>>()
   const busy = new Set<string>()
   const renewing = new Set<string>()
+  const renewed = new Set<string>()
+  const waiting = new Set<string>()
+  const held = new Map<string, (() => void)[]>()
   const retiring = new Set<string>()
   const compacting = new Set<string>()
   const leaving = new Map<string, (session: string) => void>()
@@ -152,23 +155,49 @@ export function startHub({ stateDir, channel, main, mainName = 'main', general =
     claim(thread)
     if (working) busy.add(thread)
     else busy.delete(thread)
-    if (!working && renewing.has(thread)) renew(thread)
+    if (!working) background ? waiting.add(thread) : waiting.delete(thread)
+    if (!working && !background && renewing.has(thread)) renew(thread, true)
     rest(thread)
+    letGo(thread)
   }
 
   // A thread that asked to renew (a voice call ended), or whose session is older than this hub
   // and so may run older code (an update restarts the hub), starts over at its next rest: the
   // main thread as soon as its process exits rather than after its relaunch delay, any other
-  // when its next message resumes it. A keep (a call started) cancels it.
-  function renew(thread: string) {
+  // when its next message resumes it. A keep (a call started) cancels it. A rest the Stop hook
+  // reported with no agents working is taken as it is: Claude's own status lags the hook and
+  // counts a running shell as busy, so checking it could put the renew off for good.
+  function renew(thread: string, rested = false) {
     const session = current(thread)
     if (!session) return
     agent(session, running => {
-      if (!renewing.has(thread) || busy.has(thread) || onCall.has(callOf(thread)) || running?.status === 'busy') return
+      if (!renewing.has(thread) || busy.has(thread) || onCall.has(callOf(thread)) || (!rested && running?.status === 'busy')) return
       renewing.delete(thread)
-      if (running && thread === main) cycle(thread, running)
-      else stop(thread)
+      if (running && thread === main) {
+        renewed.add(thread)
+        cycle(thread, running)
+      } else stop(thread)
+      letGo(thread)
     })
+  }
+
+  // A renew is on its way while the thread's session winds down its turn or restarts, but not
+  // while it waits on background agents, which can take as long as they like.
+  function pending(thread: string) {
+    return renewed.has(thread) || (renewing.has(thread) && !waiting.has(thread))
+  }
+
+  // Resolves once the thread's renew is through (its new session said hello) or off, right
+  // away when none is on its way, so a voice call can wait for the new session.
+  function renewal(thread: string): Promise<void> {
+    if (!pending(thread)) return Promise.resolve()
+    return new Promise(resolve => held.set(thread, [...(held.get(thread) ?? []), resolve]))
+  }
+
+  function letGo(thread: string) {
+    if (pending(thread)) return
+    for (const resolve of held.get(thread) ?? []) resolve()
+    held.delete(thread)
   }
 
   // A running session that isn't busy stops after a while; its next message resumes it.
@@ -408,6 +437,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', general =
   function fail(thread: string, reason: string) {
     if (!launching.has(thread) || live.has(thread)) return
     settle(thread)
+    renewed.delete(thread)
     failed(thread, reason)
     setState(thread, false)
   }
@@ -465,6 +495,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', general =
   function welcome(thread: string, session: string, socket: Socket) {
     live.set(thread, socket)
     renewing.delete(thread)
+    renewed.delete(thread)
     settle(thread)
     const known = threads[thread] ?? (threads[thread] = { name: thread })
     if (session && known.session !== session) unsaved.set(thread, session)
@@ -478,6 +509,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', general =
       renewing.add(thread)
       renew(thread)
     })
+    letGo(thread)
   }
 
   // A session that dies before Claude saves its conversation can't be resumed, so the
@@ -526,6 +558,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', general =
       if (request.type === 'keep') {
         renewing.delete(request.thread)
         onCall.add(callOf(request.thread))
+        letGo(request.thread)
       }
       if (request.type === 'open') launch(request.thread, request.name, request.prompt)
       if (request.type === 'permission_request') permission?.(thread, request)
@@ -575,6 +608,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', general =
     open: (thread: string, name: string, prompt?: string, cwd?: string) => launch(thread, name, prompt, undefined, cwd),
     fork: (thread: string, name: string, session: string, prompt: string, cwd?: string) => launch(thread, name, prompt, session, cwd),
     main,
+    renewal,
     session: current,
     name: (thread: string) => threads[thread]?.name,
     cwd: (thread: string) => threads[thread]?.cwd,

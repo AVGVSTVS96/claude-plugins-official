@@ -12,10 +12,15 @@ export function voicePort(env = join(homedir(), '.claude', 'channels', 'voice', 
   return Number(process.env.VOICE_PORT ?? text.match(/^\s*VOICE_PORT\s*=\s*(\d+)/m)?.[1] ?? 8790)
 }
 
+// Twilio gives up on a webhook after 15 seconds, so a phone call waits less for a new session
+// and lands in the old one rather than failing.
+const PHONE_WAIT = 10_000
+
 // In hex the voice plugin restarts with every call's new session, so the hub holds its port:
 // each request goes on to the plugin's socket, and one that comes while the plugin is
-// restarting waits for it to come back instead of failing.
-export function door({ port, socket, wait = 30_000 }: { port: number; socket: string; wait?: number }) {
+// restarting waits for it to come back instead of failing. A call that comes while the last
+// call's session is winding down to renew waits for the new session (renewal).
+export function door({ port, socket, wait = 30_000, renewal }: { port: number; socket: string; wait?: number; renewal?: () => Promise<void> }) {
   const dir = dirname(socket)
   const name = basename(socket)
 
@@ -29,10 +34,17 @@ export function door({ port, socket, wait = 30_000 }: { port: number; socket: st
     return { settled, close: () => (watcher?.close(), clearTimeout(timer)) }
   }
 
+  function within(done: Promise<void>, until: number) {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    return Promise.race([done, new Promise<void>(resolve => (timer = setTimeout(resolve, Math.max(0, until - Date.now()))))]).finally(() => clearTimeout(timer))
+  }
+
   async function pass(request: Request) {
     const { pathname, search } = new URL(request.url)
     const body = request.method === 'GET' || request.method === 'HEAD' ? undefined : await request.arrayBuffer()
     const until = Date.now() + wait
+    const calling = request.method === 'POST' && (pathname === '/session' || pathname === '/twilio/incoming')
+    if (calling && renewal) await within(renewal(), pathname === '/session' ? until : Date.now() + PHONE_WAIT)
     for (;;) {
       const next = moved(until)
       try {

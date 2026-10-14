@@ -4,7 +4,7 @@ id: voice
 summary: Add a voice channel where OpenAI's gpt-live-1 holds a live call and hands every real request to the Claude Code session.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: voice.patch
-patch_sha256: be227d64ed64c0f621288a1a2bbc71bf5eeff38a75352e802a7332f6eeee6fd6
+patch_sha256: fa6b2d7318904acde6ad5e41c6f7966a13be4cb90f8d532e9bfdbf56dc4303b3
 ---
 
 ## Intent
@@ -48,6 +48,11 @@ plugin with no hub code.
   that finds no plugin there waits for the socket to come back (a file change,
   up to 30 seconds) before answering 503. If the port is still taken (an old
   plugin during an update), the door binds it once the new plugin's socket appears.
+  A call that comes (`POST /session`, or `/twilio/incoming` for at most 10 seconds,
+  inside Twilio's 15-second webhook limit) while the last call's session winds down
+  to renew waits for the hub's `renewal`, the new session's hello, so a caller who
+  calls right back still gets a new session; a renew held up by background agents
+  doesn't hold the call, which goes to the session there is.
 - `dial` (the `phone` tool, or `POST /phone`) has Twilio ring a number; its
   TwiML comes from `/twilio/<one-time token>/twiml` (trial accounts can't pass
   TwiML inline) and streams the call to `wss://VOICE_PUBLIC_URL/twilio/<token>`. The plugin accepts only a token it issued, opens a `gpt-live-1`
@@ -89,8 +94,10 @@ plugin with no hub code.
   the plugin reattaches to the session by id a few times before calling the
   call dropped; on start it reattaches to the latest call whose record has no
   end, sends Claude a "call resumed" message with the call so far, and closes
-  out any other unended record as `dropped`. A new call sends the hub `keep`,
-  which cancels a pending `renew`.
+  out any other unended record as `dropped`, ending it like any other call: Claude
+  is told to name it, and the hub gets `renew`. A new call sends the hub `keep`,
+  which cancels a pending `renew`. The plugin sends its latest `keep` or `renew`
+  again after every hello, since a hello clears what the hub knew of the session.
 - Records keep Claude's exact `say` and `note` text as `moments`, plus
   `why` (from `phone`), `summary` and `waiting` (from `title`), `expires`
   and `usage` (billed seconds, dollars, context ratio from
@@ -120,7 +127,8 @@ plugin with no hub code.
 `bun test external_plugins/voice` covers transcript order, late fragments,
 the board, call records, step lines, following a sent message to done or
 failed through fake transcripts, and the door (requests and websockets passed
-through unchanged, a request held across a plugin restart, a taken port). `scripts/verify` builds `server.ts`. A live check: start
+through unchanged, a request held across a plugin restart, a call held for a
+renewing session and no longer than the wait, a taken port). `scripts/verify` builds `server.ts`. A live check: start
 `claude --channels plugin:voice@hex`, open the page, ask something that needs
 the backend, and see a `<channel source="voice">` handoff arrive and its
 `say` spoken.

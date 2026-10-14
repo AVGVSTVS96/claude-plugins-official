@@ -540,17 +540,62 @@ test('a thread that asks to renew starts over as a new session once its turn end
   expect(await launched()).not.toContain('--resume')
 })
 
-test('a renew waits out background agents Claude still reports working, then starts over at the next idle', async () => {
+test('a renew waits out background agents the turn ended with, then starts over at the next idle', async () => {
   start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: EXITED, status: 'busy' }], relaunch: 60_000, fresh: () => true })
   const { send } = await session('voice')
   send({ type: 'renew', thread: 'voice' })
-  send({ type: 'state', thread: 'voice', busy: false })
+  send({ type: 'state', thread: 'voice', busy: false, background: true })
   await Bun.sleep(150)
   expect(calls().some(args => args[0] === 'stop' || args[0] === '--bg')).toBe(false)
-  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid: EXITED, status: 'idle' }]))
   send({ type: 'state', thread: 'voice', busy: false })
   await until(() => calls().find(args => args[0] === 'stop'))
   expect(await launched()).not.toContain('--resume')
+})
+
+test('a renew goes through at a rest the Stop hook reports, though Claude still calls the session busy (its status lags, and a running shell counts)', async () => {
+  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: EXITED, status: 'busy' }], relaunch: 60_000, fresh: () => true })
+  const { send } = await session('voice')
+  send({ type: 'state', thread: 'voice', busy: true })
+  send({ type: 'renew', thread: 'voice' })
+  send({ type: 'state', thread: 'voice', busy: false })
+  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
+  expect(await launched()).not.toContain('--resume')
+})
+
+test('a call that comes while a renew is on its way waits for the new session to say hello', async () => {
+  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: EXITED, status: 'busy' }], relaunch: 60_000, fresh: () => true })
+  let through = false
+  await hub.renewal('voice')
+  const { send } = await session('voice')
+  send({ type: 'state', thread: 'voice', busy: true })
+  send({ type: 'renew', thread: 'voice' })
+  await until(() => calls().some(args => args[0] === 'agents'))
+  void hub.renewal('voice').then(() => (through = true))
+  send({ type: 'state', thread: 'voice', busy: false })
+  await launched()
+  await Bun.sleep(50)
+  expect(through).toBe(false)
+  await session('voice', '0a1b2c3d-0000-4000-8000-000000000009')
+  await until(() => through)
+})
+
+test('a call waits for no renew held up by background agents, or called off by a call already in the session', async () => {
+  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'busy' }], relaunch: 60_000, fresh: () => true })
+  let through = 0
+  const { send } = await session('voice')
+  send({ type: 'state', thread: 'voice', busy: true })
+  send({ type: 'renew', thread: 'voice' })
+  await Bun.sleep(50)
+  void hub.renewal('voice').then(() => through++)
+  send({ type: 'state', thread: 'voice', busy: false, background: true })
+  await until(() => through === 1)
+  send({ type: 'state', thread: 'voice', busy: true })
+  send({ type: 'renew', thread: 'voice' })
+  await Bun.sleep(50)
+  void hub.renewal('voice').then(() => through++)
+  send({ type: 'keep', thread: 'voice' })
+  await until(() => through === 2)
+  expect(calls().some(args => args[0] === 'stop')).toBe(false)
 })
 
 test('a fresh main thread still running when the hub starts is left to reconnect instead of getting a second session', async () => {

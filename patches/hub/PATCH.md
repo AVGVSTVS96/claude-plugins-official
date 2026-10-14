@@ -4,7 +4,7 @@ id: hub
 summary: Add a client-agnostic hub that gives every chat thread its own Claude Code session and moves threads between clients.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: hub.patch
-patch_sha256: 5239fc19e7f62cf68ca22038db13c283915c875fd8f3f0d1071b1dfad8516441
+patch_sha256: 3e57f90808f6026bc0efead2f83aee1639673d1703ba397711b9b32d68446f78
 ---
 
 ## Intent
@@ -71,8 +71,9 @@ has been gone for 30 seconds. After 54 minutes idle, just before its cache
 expires, a big main thread compacts the same way and keeps running. A client whose main thread is hex's General
 says so (`general`), and only that session's settings env says `HEX_MAIN`, so
 hex runs General's jobs in General alone, not in every client's main thread.
-A session can ask to `renew`: at its next rest, once Claude reports it idle,
-the hub stops it, and a main thread starts over as soon as its process exits,
+A session can ask to `renew`: at its next rest, once its Stop hook reports the
+turn over with no background agents or workflows working (Claude's own status
+lags the hook and counts a running shell as busy, so it isn't asked), the hub stops it, and a main thread starts over as soon as its process exits,
 as a new session for a fresh thread, without waiting out its 30 seconds; any
 other thread's next message resumes it. A session that says hello to a hub
 younger than it (Claude's `startedAt`) renews the same way, since it may run
@@ -80,7 +81,10 @@ code an update has since replaced: an update restarts the hub, and each
 session then moves onto the new code at its own next rest instead of all of
 them waiting for a moment none is busy. Asking to `keep` before then cancels a
 renew (a voice call started in the meantime), even while the hub is still
-asking Claude whether the session is working. A
+asking Claude whether the session is working. `renewal` resolves once a renew on
+its way is through (the new session's hello) or off, at once when none is, and
+doesn't wait on one held up by background agents, so a client can hold a new
+call for the new session. A
 fresh main thread whose session outlived the hub (a hub restart) gets the same
 30 seconds to reconnect before a new one starts, so it never runs twice; any
 running session under its name and folder counts, since a fresh session's id is
@@ -127,7 +131,9 @@ instead (`fork`, `--fork-session`).
 
 `bun test hub` drives routing, queueing, resume, folders, running sessions, the main
 thread (started with the hub, kept running, revived, `HEX_MAIN` only for General, renewed at once, a
-fresh one left to reconnect after a hub restart), sessions older than the hub renewing at their
+fresh one left to reconnect after a hub restart), renews at the rest the Stop hook reports and after
+background agents, `renewal` holding for the new session's hello and not for agents or a keep,
+sessions older than the hub renewing at their
 next rest and never during a call, `free` waiting for calls to end, the launcher and its
 environment, failed starts, busy and idle, idle stops, compacting big sessions before they rest, fresh threads, stopping, closing, naming and
 handoffs (release, adopt, fork), permission prompts and bad input against a fake `claude`. Run `scripts/verify`.

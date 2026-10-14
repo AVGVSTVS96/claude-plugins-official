@@ -114,7 +114,8 @@ same session by its id (`/v1/live/sessions/<id>/attach`) a few times over
 about 15 seconds before calling the call dropped. When the plugin starts, it
 picks the latest call that never got an end back up the same way and sends
 Claude a "call resumed" message with the call so far; any other call left
-without an end is closed out as `dropped`. A phone call's audio runs through
+without an end is closed out as `dropped` and ends like any other call: Claude
+is told to name it, and the session renews. A phone call's audio runs through
 the plugin, so a restart ends it. When a call starts, the plugin tells the hub
 to keep the session (`keep`), so a renew asked for by the call before it
 doesn't stop the session mid-call.
@@ -293,7 +294,7 @@ them with hex) gets Claude walking the list in order.
    that turn is done the hub starts `voice` over fresh right away, with its own
    OptChat chat of past calls instead of one context that grows with every
    call. The hub holds `VOICE_PORT` meanwhile, so a call started then waits a
-   few seconds instead of failing.
+   few seconds for the new session instead of failing or landing in the old one.
 
 3. Open the call page. The browser only allows the microphone on `localhost`
    or HTTPS:

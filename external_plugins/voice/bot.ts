@@ -8,7 +8,7 @@ const STATE_DIR = process.env.VOICE_STATE_DIR ?? join(HEX_DIR, 'state', 'voice')
 const SOCKET = join(STATE_DIR, 'http.sock')
 mkdirSync(STATE_DIR, { recursive: true })
 
-startHub({
+const hub = startHub({
   stateDir: STATE_DIR,
   channel: process.env.VOICE_CHANNEL ?? 'plugin:voice@hex',
   main: 'voice',
@@ -24,4 +24,4 @@ startHub({
   failed: (_, reason) => process.stderr.write(`voice hub: the voice session couldn't start: ${reason}\n`),
 })
 
-door({ port: voicePort(), socket: SOCKET })
+door({ port: voicePort(), socket: SOCKET, renewal: () => hub.renewal('voice') })

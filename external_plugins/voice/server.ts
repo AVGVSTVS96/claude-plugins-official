@@ -96,6 +96,7 @@ type Phone = Dial & { openai?: WebSocket; stream?: string; started?: true; refus
 let live: Live | undefined
 let ended: string | undefined
 let hub: ReturnType<typeof connect> | undefined
+let standing: 'keep' | 'renew' | undefined
 let seq = 0
 const dials = new Map<string, Dial>()
 const placed = new Map<string, Placed>()
@@ -465,7 +466,7 @@ function finish(call: Live, reason: string, by?: string) {
     [`The call ended: ${ENDINGS[end]} (${reason}). Name it with title.`, ...(rest.length ? ['Last words:', transcript(rest)] : [])].join('\n'),
     { call: call.id, ended: end, reason },
   )
-  hub?.write(JSON.stringify({ type: 'renew', thread: THREAD }) + '\n')
+  tell('renew')
   call.socket.onclose = null
   call.socket.close()
 }
@@ -495,7 +496,7 @@ function follow(socket: WebSocket, record: Live['record'], { call = new Call(), 
   live = current
   save(current)
   activity.changed()
-  hub?.write(JSON.stringify({ type: 'keep', thread: THREAD }) + '\n')
+  tell('keep')
   listen(current, socket)
   warn(current)
   deliver(
@@ -663,10 +664,21 @@ function recover() {
   }
 }
 
+// A call lost with the plugin ends like any other: Claude names it, and the session renews.
 function closeOut(record: CallRecord) {
   const heard = Math.max(0, ...record.turns.map(turn => turn.at), ...record.tasks.map(task => task.at), ...(record.moments ?? []).map(mark => mark.at))
-  calls.save({ ...record, ended: new Date(Date.parse(record.started) + heard).toISOString(), end: 'dropped', reason: 'the voice plugin restarted and the call was gone' })
+  const reason = 'the voice plugin restarted and the call was gone'
+  calls.save({ ...record, ended: new Date(Date.parse(record.started) + heard).toISOString(), end: 'dropped', reason })
   trace(`closed out ${record.id}: it never got an end`)
+  deliver(`The call ended: ${ENDINGS.dropped} (${reason}). Name it with title.`, { call: record.id, ended: 'dropped', reason })
+  if (!live) tell('renew')
+}
+
+// The hub learns when a call starts (keep) or ends (renew), and hears it again after every
+// hello, since a hello clears what the hub knew of the session before it.
+function tell(type: 'keep' | 'renew') {
+  standing = type
+  hub?.write(JSON.stringify({ type, thread: THREAD }) + '\n')
 }
 
 function reattach(record: CallRecord) {
@@ -907,7 +919,10 @@ function joinHub() {
   let buffer = ''
   socket.setEncoding('utf8')
   socket.on('connect', () => {
-    setTimeout(() => socket.write(JSON.stringify({ type: 'hello', thread: THREAD, session: process.env.CLAUDE_CODE_SESSION_ID }) + '\n'), 1000)
+    setTimeout(() => {
+      socket.write(JSON.stringify({ type: 'hello', thread: THREAD, session: process.env.CLAUDE_CODE_SESSION_ID }) + '\n')
+      if (standing) socket.write(JSON.stringify({ type: standing, thread: THREAD }) + '\n')
+    }, 1000)
   })
   socket.on('data', (chunk: string) => {
     buffer += chunk

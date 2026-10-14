@@ -61,6 +61,29 @@ test('a request made while the plugin restarts waits for it, past the socket the
   expect(Date.now() - asked).toBeLessThan(2000)
 })
 
+test("a call that comes while the last call's session renews waits for the new session, and nothing else waits", async () => {
+  using s = scratch()
+  let renewed!: () => void
+  const renewal = new Promise<void>(resolve => (renewed = resolve))
+  s.plugin({ fetch: () => new Response('old') })
+  const front = door({ port: 0, socket: s.socket, renewal: () => renewal })!
+  s.servers.push(front)
+  const call = fetch(`http://127.0.0.1:${front.port}/session`, { method: 'POST', body: 'offer' })
+  expect(await (await fetch(`http://127.0.0.1:${front.port}/calls`)).text()).toBe('old')
+  s.servers[0]!.stop(true)
+  s.plugin({ fetch: () => new Response('new') })
+  renewed()
+  expect(await (await call).text()).toBe('new')
+})
+
+test('a call waits for a renew no longer than the wait, then goes to the session there is', async () => {
+  using s = scratch()
+  s.plugin({ fetch: () => new Response('old') })
+  const front = door({ port: 0, socket: s.socket, wait: 200, renewal: () => new Promise(() => {}) })!
+  s.servers.push(front)
+  expect(await (await fetch(`http://127.0.0.1:${front.port}/session`, { method: 'POST', body: 'offer' })).text()).toBe('old')
+})
+
 test('with no plugin by the time the wait is up, the answer says so', async () => {
   using s = scratch()
   const front = door({ port: 0, socket: s.socket, wait: 200 })!
