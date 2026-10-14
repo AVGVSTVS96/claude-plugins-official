@@ -562,6 +562,14 @@ test('a renew goes through at a rest the Stop hook reports, though Claude still 
   expect(await launched()).not.toContain('--resume')
 })
 
+test('a session older than the hub that runs a shell renews only once Claude reports it idle, since it never asked', async () => {
+  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'busy', startedAt: 1 }] })
+  const { send } = await session('chat:7')
+  send({ type: 'state', thread: 'chat:7', busy: false })
+  await Bun.sleep(150)
+  expect(calls().some(args => args[0] === 'stop')).toBe(false)
+})
+
 test('a call that comes while a renew is on its way waits for the new session to say hello', async () => {
   start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: EXITED, status: 'busy' }], relaunch: 60_000, fresh: () => true })
   let through = false

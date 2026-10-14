@@ -1,9 +1,9 @@
 diff --git a/hub/hub.test.ts b/hub/hub.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..77790162f6a3cf5c9462f7d6c8064a6121fed1bb
+index 0000000000000000000000000000000000000000..4fa7c082c58b2bf08ff97b36e732e41033c622e9
 --- /dev/null
 +++ b/hub/hub.test.ts
-@@ -0,0 +1,921 @@
+@@ -0,0 +1,929 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { connect, createServer, type Socket } from 'net'
 +import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, chmodSync, existsSync } from 'fs'
@@ -568,6 +568,14 @@ index 0000000000000000000000000000000000000000..77790162f6a3cf5c9462f7d6c8064a61
 +  expect(await launched()).not.toContain('--resume')
 +})
 +
++test('a session older than the hub that runs a shell renews only once Claude reports it idle, since it never asked', async () => {
++  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'busy', startedAt: 1 }] })
++  const { send } = await session('chat:7')
++  send({ type: 'state', thread: 'chat:7', busy: false })
++  await Bun.sleep(150)
++  expect(calls().some(args => args[0] === 'stop')).toBe(false)
++})
++
 +test('a call that comes while a renew is on its way waits for the new session to say hello', async () => {
 +  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: EXITED, status: 'busy' }], relaunch: 60_000, fresh: () => true })
 +  let through = false
@@ -927,10 +935,10 @@ index 0000000000000000000000000000000000000000..77790162f6a3cf5c9462f7d6c8064a61
 +})
 diff --git a/hub/hub.ts b/hub/hub.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..3340a771c56f93427b2b6fcec4d82256a9f12f34
+index 0000000000000000000000000000000000000000..b1f1cf88baf4c824acee4bddb1f1539cae8fb18c
 --- /dev/null
 +++ b/hub/hub.ts
-@@ -0,0 +1,645 @@
+@@ -0,0 +1,651 @@
 +import { createServer, type Socket } from 'net'
 +import { execFile, spawn } from 'child_process'
 +import { createHash } from 'crypto'
@@ -1045,6 +1053,7 @@ index 0000000000000000000000000000000000000000..3340a771c56f93427b2b6fcec4d82256
 +  const idle = new Map<string, ReturnType<typeof setTimeout>>()
 +  const busy = new Set<string>()
 +  const renewing = new Set<string>()
++  const asked = new Set<string>()
 +  const renewed = new Set<string>()
 +  const waiting = new Set<string>()
 +  const held = new Map<string, (() => void)[]>()
@@ -1089,7 +1098,7 @@ index 0000000000000000000000000000000000000000..3340a771c56f93427b2b6fcec4d82256
 +    if (working) busy.add(thread)
 +    else busy.delete(thread)
 +    if (!working) background ? waiting.add(thread) : waiting.delete(thread)
-+    if (!working && !background && renewing.has(thread)) renew(thread, true)
++    if (!working && !background && renewing.has(thread)) renew(thread, asked.has(thread))
 +    rest(thread)
 +    letGo(thread)
 +  }
@@ -1097,15 +1106,17 @@ index 0000000000000000000000000000000000000000..3340a771c56f93427b2b6fcec4d82256
 +  // A thread that asked to renew (a voice call ended), or whose session is older than this hub
 +  // and so may run older code (an update restarts the hub), starts over at its next rest: the
 +  // main thread as soon as its process exits rather than after its relaunch delay, any other
-+  // when its next message resumes it. A keep (a call started) cancels it. A rest the Stop hook
-+  // reported with no agents working is taken as it is: Claude's own status lags the hook and
-+  // counts a running shell as busy, so checking it could put the renew off for good.
++  // when its next message resumes it. A keep (a call started) cancels it. When the session asked
++  // for it, a rest the Stop hook reported with no agents working is taken as it is: Claude's own
++  // status lags the hook and counts a running shell as busy, so checking it could put the renew
++  // off for good, and a session that asked is done with what its shells were for.
 +  function renew(thread: string, rested = false) {
 +    const session = current(thread)
 +    if (!session) return
 +    agent(session, running => {
 +      if (!renewing.has(thread) || busy.has(thread) || onCall.has(callOf(thread)) || (!rested && running?.status === 'busy')) return
 +      renewing.delete(thread)
++      asked.delete(thread)
 +      if (running && thread === main) {
 +        renewed.add(thread)
 +        cycle(thread, running)
@@ -1428,6 +1439,7 @@ index 0000000000000000000000000000000000000000..3340a771c56f93427b2b6fcec4d82256
 +  function welcome(thread: string, session: string, socket: Socket) {
 +    live.set(thread, socket)
 +    renewing.delete(thread)
++    asked.delete(thread)
 +    renewed.delete(thread)
 +    settle(thread)
 +    const known = threads[thread] ?? (threads[thread] = { name: thread })
@@ -1486,10 +1498,12 @@ index 0000000000000000000000000000000000000000..3340a771c56f93427b2b6fcec4d82256
 +      if (request.type === 'state') setState(request.thread, request.busy, request.background === true)
 +      if (request.type === 'renew') {
 +        renewing.add(request.thread)
++        asked.add(request.thread)
 +        hangUp(callOf(request.thread))
 +      }
 +      if (request.type === 'keep') {
 +        renewing.delete(request.thread)
++        asked.delete(request.thread)
 +        onCall.add(callOf(request.thread))
 +        letGo(request.thread)
 +      }

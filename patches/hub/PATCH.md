@@ -4,7 +4,7 @@ id: hub
 summary: Add a client-agnostic hub that gives every chat thread its own Claude Code session and moves threads between clients.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: hub.patch
-patch_sha256: 3e57f90808f6026bc0efead2f83aee1639673d1703ba397711b9b32d68446f78
+patch_sha256: 1cab5af5cec80cafdae3926e4cf091f2f9c56ae01953d701f33d5a0319405f24
 ---
 
 ## Intent
@@ -73,10 +73,11 @@ says so (`general`), and only that session's settings env says `HEX_MAIN`, so
 hex runs General's jobs in General alone, not in every client's main thread.
 A session can ask to `renew`: at its next rest, once its Stop hook reports the
 turn over with no background agents or workflows working (Claude's own status
-lags the hook and counts a running shell as busy, so it isn't asked), the hub stops it, and a main thread starts over as soon as its process exits,
+lags the hook and counts a running shell as busy, so it isn't asked for a renew
+the session asked for itself), the hub stops it, and a main thread starts over as soon as its process exits,
 as a new session for a fresh thread, without waiting out its 30 seconds; any
 other thread's next message resumes it. A session that says hello to a hub
-younger than it (Claude's `startedAt`) renews the same way, since it may run
+younger than it (Claude's `startedAt`) renews too, once Claude reports it idle, since it may run
 code an update has since replaced: an update restarts the hub, and each
 session then moves onto the new code at its own next rest instead of all of
 them waiting for a moment none is busy. Asking to `keep` before then cancels a
