@@ -20,7 +20,7 @@ export type Asks = {
   reopen: (thread: string, message: number, via: string) => void
 }
 type Thread = Settings & { name: string; session?: string; cwd?: string; launched?: string }
-type Agent = { sessionId: string; pid?: number; status?: string; name?: string; cwd?: string }
+type Agent = { sessionId: string; pid?: number; status?: string; name?: string; cwd?: string; startedAt?: number }
 export type Hub = ReturnType<typeof startHub>
 
 // Every client running in this process, so a thread can move between them.
@@ -50,6 +50,19 @@ const JOBS = join(CLAUDE, 'jobs')
 const IDLE_STOP = 30 * 60_000
 const RELAUNCH = 30_000
 const PRIVATE = /_BOT_TOKEN$|^HEX_|^BUZZ_/
+
+// A voice call passes through this process (its page and phone line go through the hub's
+// door), so a restart waits for every thread on a call to hang up.
+const onCall = new Set<string>()
+const hungUp: (() => void)[] = []
+
+export function free(): Promise<void> {
+  return new Promise(resolve => (onCall.size ? hungUp.push(resolve) : resolve()))
+}
+
+function hangUp(call: string) {
+  if (onCall.delete(call) && !onCall.size) for (const resolve of hungUp.splice(0)) resolve()
+}
 
 export function title(text: string): string {
   const title = text.trim()
@@ -94,6 +107,8 @@ export function startHub({ stateDir, channel, main, mainName = 'main', general =
   const retiring = new Set<string>()
   const leaving = new Map<string, (session: string) => void>()
   const unsaved = new Map<string, string>()
+  const born = Date.now()
+  const callOf = (thread: string) => `${socketPath}:${thread}`
   const plugin = channel.replace(/^plugin:/, '')
   const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !PRIVATE.test(name)))
   let closed = false
@@ -132,16 +147,17 @@ export function startHub({ stateDir, channel, main, mainName = 'main', general =
     rest(thread)
   }
 
-  // A thread that asked to renew (a voice call ended) starts over at its next rest, as soon as
-  // its process exits rather than after the main thread's relaunch delay. A keep that lands
-  // while Claude is asked whether it's still working cancels it.
+  // A thread that asked to renew (a voice call ended), or whose session is older than this hub
+  // and so may run older code (an update restarts the hub), starts over at its next rest: the
+  // main thread as soon as its process exits rather than after its relaunch delay, any other
+  // when its next message resumes it. A keep (a call started) cancels it.
   function renew(thread: string) {
     const session = current(thread)
     if (!session) return
     agent(session, running => {
-      if (!renewing.has(thread) || busy.has(thread) || running?.status === 'busy') return
+      if (!renewing.has(thread) || busy.has(thread) || onCall.has(callOf(thread)) || running?.status === 'busy') return
       renewing.delete(thread)
-      if (running) cycle(thread, running)
+      if (running && thread === main) cycle(thread, running)
       else stop(thread)
     })
   }
@@ -408,6 +424,11 @@ export function startHub({ stateDir, channel, main, mainName = 'main', general =
     for (const message of queued.get(thread) ?? []) send(socket, { type: 'inbound', ...message })
     queued.delete(thread)
     rest(thread)
+    agent(current(thread) ?? '', running => {
+      if (live.get(thread) !== socket || !running?.startedAt || running.startedAt >= born) return
+      renewing.add(thread)
+      renew(thread)
+    })
   }
 
   // A session that dies before Claude saves its conversation can't be resumed, so the
@@ -445,8 +466,14 @@ export function startHub({ stateDir, channel, main, mainName = 'main', general =
     function handle(request: any) {
       if (request.type === 'hello') welcome(thread = request.thread, request.session, socket)
       if (request.type === 'state') setState(request.thread, request.busy, request.background === true)
-      if (request.type === 'renew') renewing.add(request.thread)
-      if (request.type === 'keep') renewing.delete(request.thread)
+      if (request.type === 'renew') {
+        renewing.add(request.thread)
+        hangUp(callOf(request.thread))
+      }
+      if (request.type === 'keep') {
+        renewing.delete(request.thread)
+        onCall.add(callOf(request.thread))
+      }
       if (request.type === 'open') launch(request.thread, request.name, request.prompt)
       if (request.type === 'permission_request') permission?.(thread, request)
       if (request.type === 'answer') asks?.answer(request.thread, request.message, request.label, request.via)
@@ -463,6 +490,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', general =
     socket.on('close', () => {
       if (live.get(thread) !== socket) return
       live.delete(thread)
+      hangUp(callOf(thread))
       setState(thread, false)
       if (leaving.has(thread)) forget(thread)
       if (thread === main) setTimeout(revive, relaunch)

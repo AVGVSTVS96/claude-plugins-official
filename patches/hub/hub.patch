@@ -1,15 +1,15 @@
 diff --git a/hub/hub.test.ts b/hub/hub.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..36f8f4a6e62f4b9bb21a1e5ae38d32a45a582adf
+index 0000000000000000000000000000000000000000..50861fc4fb562b2cf2980d774f52c8bb790a89e6
 --- /dev/null
 +++ b/hub/hub.test.ts
-@@ -0,0 +1,745 @@
+@@ -0,0 +1,809 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { connect, createServer, type Socket } from 'net'
 +import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, chmodSync, existsSync } from 'fs'
 +import { tmpdir } from 'os'
 +import { join } from 'path'
-+import { startHub, tappable, transcribe, type Message, type Permission } from './hub.ts'
++import { free, startHub, tappable, transcribe, type Message, type Permission } from './hub.ts'
 +
 +const CHANNEL = 'plugin:telegram@hex'
 +const SESSION = '0a1b2c3d-0000-4000-8000-000000000000'
@@ -524,6 +524,70 @@ index 0000000000000000000000000000000000000000..36f8f4a6e62f4b9bb21a1e5ae38d32a4
 +  expect(calls().some(args => args[0] === 'stop')).toBe(false)
 +})
 +
++test('a session older than the hub stops at its next rest, so its next message resumes it on the current code', async () => {
++  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'busy', startedAt: 1 }] })
++  const { send } = await session('chat:7')
++  await Bun.sleep(150)
++  expect(calls().some(args => args[0] === 'stop')).toBe(false)
++  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid: 42, status: 'idle', startedAt: 1 }]))
++  send({ type: 'state', thread: 'chat:7', busy: false })
++  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
++  expect(calls().some(args => args[0] === '--bg')).toBe(false)
++})
++
++test('a main thread whose session is older than the hub starts over as soon as it rests', async () => {
++  const old = Bun.spawn(['sleep', '30'])
++  start({ main: 'chat', registry: { chat: { name: 'hex', session: SESSION } }, agents: [{ sessionId: SESSION, pid: old.pid, status: 'idle', startedAt: 1 }], relaunch: 60_000 })
++  await session('chat')
++  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
++  writeFileSync(join(dir, 'agents'), '[]')
++  old.kill()
++  expect(await launched()).toContain('--resume')
++})
++
++test('a session the hub started, or one younger than it, keeps running', async () => {
++  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'idle', startedAt: Date.now() + 60_000 }] })
++  const { send } = await session('chat:7')
++  send({ type: 'state', thread: 'chat:7', busy: false })
++  await Bun.sleep(150)
++  expect(calls().some(args => args[0] === 'stop')).toBe(false)
++})
++
++test('a voice session older than the hub waits out its call before starting over', async () => {
++  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'busy', startedAt: 1 }], relaunch: 60_000, fresh: () => true })
++  const { send } = await session('voice')
++  send({ type: 'keep', thread: 'voice' })
++  await Bun.sleep(100)
++  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid: EXITED, status: 'idle', startedAt: 1 }]))
++  send({ type: 'state', thread: 'voice', busy: false })
++  await Bun.sleep(150)
++  expect(calls().some(args => args[0] === 'stop')).toBe(false)
++  send({ type: 'renew', thread: 'voice' })
++  send({ type: 'state', thread: 'voice', busy: false })
++  await until(() => calls().find(args => args[0] === 'stop'))
++})
++
++test('a restart waits for every call to hang up, or for its session to go', async () => {
++  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, relaunch: 60_000, fresh: () => true })
++  let freed = false
++  await free()
++  const first = await session('voice')
++  first.send({ type: 'keep', thread: 'voice' })
++  await Bun.sleep(50)
++  void free().then(() => (freed = true))
++  await Bun.sleep(50)
++  expect(freed).toBe(false)
++  first.send({ type: 'renew', thread: 'voice' })
++  await until(() => freed)
++  freed = false
++  const second = await session('voice')
++  second.send({ type: 'keep', thread: 'voice' })
++  await Bun.sleep(50)
++  void free().then(() => (freed = true))
++  second.socket.destroy()
++  await until(() => freed)
++})
++
 +test('closing an idle thread stops its session right away, then forgets the thread', async () => {
 +  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } } })
 +  const { socket } = await session('chat:7')
@@ -751,10 +815,10 @@ index 0000000000000000000000000000000000000000..36f8f4a6e62f4b9bb21a1e5ae38d32a4
 +})
 diff --git a/hub/hub.ts b/hub/hub.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..198d489473db76fd4e9c6b9ef560091a2d6f928c
+index 0000000000000000000000000000000000000000..644a7f4c386c31df769f1c92075b695af372a0d8
 --- /dev/null
 +++ b/hub/hub.ts
-@@ -0,0 +1,519 @@
+@@ -0,0 +1,558 @@
 +import { createServer, type Socket } from 'net'
 +import { execFile, spawn } from 'child_process'
 +import { createHash } from 'crypto'
@@ -769,8 +833,15 @@ index 0000000000000000000000000000000000000000..198d489473db76fd4e9c6b9ef560091a
 +export type Failed = (thread: string, reason: string) => void
 +export type Permission = { request_id: string; tool_name: string; description: string; input_preview: string }
 +export type Settings = { model?: string; effort?: string }
++// What another process (the voice app, hex's check) can do with a question the client asked
++// with buttons: answer it for the owner, settle it as no longer asked, or take an answer back.
++export type Asks = {
++  answer: (thread: string, message: number, label: string, via: string) => void
++  settle: (thread: string, message: number, note: string) => void
++  reopen: (thread: string, message: number, via: string) => void
++}
 +type Thread = Settings & { name: string; session?: string; cwd?: string; launched?: string }
-+type Agent = { sessionId: string; pid?: number; status?: string; name?: string; cwd?: string }
++type Agent = { sessionId: string; pid?: number; status?: string; name?: string; cwd?: string; startedAt?: number }
 +export type Hub = ReturnType<typeof startHub>
 +
 +// Every client running in this process, so a thread can move between them.
@@ -801,13 +872,26 @@ index 0000000000000000000000000000000000000000..198d489473db76fd4e9c6b9ef560091a
 +const RELAUNCH = 30_000
 +const PRIVATE = /_BOT_TOKEN$|^HEX_|^BUZZ_/
 +
++// A voice call passes through this process (its page and phone line go through the hub's
++// door), so a restart waits for every thread on a call to hang up.
++const onCall = new Set<string>()
++const hungUp: (() => void)[] = []
++
++export function free(): Promise<void> {
++  return new Promise(resolve => (onCall.size ? hungUp.push(resolve) : resolve()))
++}
++
++function hangUp(call: string) {
++  if (onCall.delete(call) && !onCall.size) for (const resolve of hungUp.splice(0)) resolve()
++}
++
 +export function title(text: string): string {
 +  const title = text.trim()
 +  if (!/^[^\s_-]+$/.test(title)) throw new Error(`title must be one word, got "${title}"`)
 +  return title
 +}
 +
-+export function startHub({ stateDir, channel, main, mainName = 'main', general = false, call, state, failed, permission, args = () => [], bind = () => ({}), fresh = () => false, idleStop = IDLE_STOP, relaunch = RELAUNCH, jobsDir = JOBS, hexDir = process.cwd(), projectsDir = join(CLAUDE, 'projects'), launcher = 'claude' }: {
++export function startHub({ stateDir, channel, main, mainName = 'main', general = false, call, state, failed, permission, asks, args = () => [], bind = () => ({}), fresh = () => false, idleStop = IDLE_STOP, relaunch = RELAUNCH, jobsDir = JOBS, hexDir = process.cwd(), projectsDir = join(CLAUDE, 'projects'), launcher = 'claude' }: {
 +  stateDir: string
 +  channel: string
 +  main?: string
@@ -818,6 +902,7 @@ index 0000000000000000000000000000000000000000..198d489473db76fd4e9c6b9ef560091a
 +  state: State
 +  failed: Failed
 +  permission?: (thread: string, request: Permission) => void
++  asks?: Asks
 +  args?: (thread: string) => string[]
 +  // More of the thread's binding for its session's settings env, like where its plugin serves.
 +  bind?: (thread: string) => Record<string, string>
@@ -843,6 +928,8 @@ index 0000000000000000000000000000000000000000..198d489473db76fd4e9c6b9ef560091a
 +  const retiring = new Set<string>()
 +  const leaving = new Map<string, (session: string) => void>()
 +  const unsaved = new Map<string, string>()
++  const born = Date.now()
++  const callOf = (thread: string) => `${socketPath}:${thread}`
 +  const plugin = channel.replace(/^plugin:/, '')
 +  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !PRIVATE.test(name)))
 +  let closed = false
@@ -881,16 +968,17 @@ index 0000000000000000000000000000000000000000..198d489473db76fd4e9c6b9ef560091a
 +    rest(thread)
 +  }
 +
-+  // A thread that asked to renew (a voice call ended) starts over at its next rest, as soon as
-+  // its process exits rather than after the main thread's relaunch delay. A keep that lands
-+  // while Claude is asked whether it's still working cancels it.
++  // A thread that asked to renew (a voice call ended), or whose session is older than this hub
++  // and so may run older code (an update restarts the hub), starts over at its next rest: the
++  // main thread as soon as its process exits rather than after its relaunch delay, any other
++  // when its next message resumes it. A keep (a call started) cancels it.
 +  function renew(thread: string) {
 +    const session = current(thread)
 +    if (!session) return
 +    agent(session, running => {
-+      if (!renewing.has(thread) || busy.has(thread) || running?.status === 'busy') return
++      if (!renewing.has(thread) || busy.has(thread) || onCall.has(callOf(thread)) || running?.status === 'busy') return
 +      renewing.delete(thread)
-+      if (running) cycle(thread, running)
++      if (running && thread === main) cycle(thread, running)
 +      else stop(thread)
 +    })
 +  }
@@ -1157,6 +1245,11 @@ index 0000000000000000000000000000000000000000..198d489473db76fd4e9c6b9ef560091a
 +    for (const message of queued.get(thread) ?? []) send(socket, { type: 'inbound', ...message })
 +    queued.delete(thread)
 +    rest(thread)
++    agent(current(thread) ?? '', running => {
++      if (live.get(thread) !== socket || !running?.startedAt || running.startedAt >= born) return
++      renewing.add(thread)
++      renew(thread)
++    })
 +  }
 +
 +  // A session that dies before Claude saves its conversation can't be resumed, so the
@@ -1194,10 +1287,19 @@ index 0000000000000000000000000000000000000000..198d489473db76fd4e9c6b9ef560091a
 +    function handle(request: any) {
 +      if (request.type === 'hello') welcome(thread = request.thread, request.session, socket)
 +      if (request.type === 'state') setState(request.thread, request.busy, request.background === true)
-+      if (request.type === 'renew') renewing.add(request.thread)
-+      if (request.type === 'keep') renewing.delete(request.thread)
++      if (request.type === 'renew') {
++        renewing.add(request.thread)
++        hangUp(callOf(request.thread))
++      }
++      if (request.type === 'keep') {
++        renewing.delete(request.thread)
++        onCall.add(callOf(request.thread))
++      }
 +      if (request.type === 'open') launch(request.thread, request.name, request.prompt)
 +      if (request.type === 'permission_request') permission?.(thread, request)
++      if (request.type === 'answer') asks?.answer(request.thread, request.message, request.label, request.via)
++      if (request.type === 'settle') asks?.settle(request.thread, request.message, request.note)
++      if (request.type === 'reopen') asks?.reopen(request.thread, request.message, request.via)
 +      if (request.type === 'inbound') deliver(request.thread, threads[request.thread]?.name ?? request.thread, { content: request.content, meta: request.meta })
 +      if (request.type === 'call') {
 +        call(thread, request.tool, request.args ?? {}).then(
@@ -1209,6 +1311,7 @@ index 0000000000000000000000000000000000000000..198d489473db76fd4e9c6b9ef560091a
 +    socket.on('close', () => {
 +      if (live.get(thread) !== socket) return
 +      live.delete(thread)
++      hangUp(callOf(thread))
 +      setState(thread, false)
 +      if (leaving.has(thread)) forget(thread)
 +      if (thread === main) setTimeout(revive, relaunch)
@@ -1276,10 +1379,12 @@ index 0000000000000000000000000000000000000000..198d489473db76fd4e9c6b9ef560091a
 +}
 diff --git a/hub/serve.ts b/hub/serve.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..6f0497a3e3fb4ffea89c3139d93d8f17c9730a9b
+index 0000000000000000000000000000000000000000..94b202c07b0145cf91fde0d3cd43b38ad0ad9919
 --- /dev/null
 +++ b/hub/serve.ts
-@@ -0,0 +1,7 @@
+@@ -0,0 +1,11 @@
++import { free } from './hub.ts'
++
 +await Promise.all([
 +  import('../external_plugins/telegram/bot.ts'),
 +  import('../external_plugins/discord/bot.ts'),
@@ -1287,6 +1392,8 @@ index 0000000000000000000000000000000000000000..6f0497a3e3fb4ffea89c3139d93d8f17
 +  import('../external_plugins/t3/bot.ts'),
 +  import('../external_plugins/voice/bot.ts'),
 +])
++
++process.on('SIGHUP', () => void free().then(() => process.exit(0)))
 diff --git a/hub/state.ts b/hub/state.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..13680cbcb640b549f0cc7a61c90825746e4d2c8a

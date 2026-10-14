@@ -3,7 +3,7 @@ import { connect, createServer, type Socket } from 'net'
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, chmodSync, existsSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { startHub, tappable, transcribe, type Message, type Permission } from './hub.ts'
+import { free, startHub, tappable, transcribe, type Message, type Permission } from './hub.ts'
 
 const CHANNEL = 'plugin:telegram@hex'
 const SESSION = '0a1b2c3d-0000-4000-8000-000000000000'
@@ -516,6 +516,70 @@ test('a thread that asked to renew keeps running when it asks to keep before its
   send({ type: 'state', thread: 'voice', busy: false })
   await Bun.sleep(150)
   expect(calls().some(args => args[0] === 'stop')).toBe(false)
+})
+
+test('a session older than the hub stops at its next rest, so its next message resumes it on the current code', async () => {
+  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'busy', startedAt: 1 }] })
+  const { send } = await session('chat:7')
+  await Bun.sleep(150)
+  expect(calls().some(args => args[0] === 'stop')).toBe(false)
+  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid: 42, status: 'idle', startedAt: 1 }]))
+  send({ type: 'state', thread: 'chat:7', busy: false })
+  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
+  expect(calls().some(args => args[0] === '--bg')).toBe(false)
+})
+
+test('a main thread whose session is older than the hub starts over as soon as it rests', async () => {
+  const old = Bun.spawn(['sleep', '30'])
+  start({ main: 'chat', registry: { chat: { name: 'hex', session: SESSION } }, agents: [{ sessionId: SESSION, pid: old.pid, status: 'idle', startedAt: 1 }], relaunch: 60_000 })
+  await session('chat')
+  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
+  writeFileSync(join(dir, 'agents'), '[]')
+  old.kill()
+  expect(await launched()).toContain('--resume')
+})
+
+test('a session the hub started, or one younger than it, keeps running', async () => {
+  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'idle', startedAt: Date.now() + 60_000 }] })
+  const { send } = await session('chat:7')
+  send({ type: 'state', thread: 'chat:7', busy: false })
+  await Bun.sleep(150)
+  expect(calls().some(args => args[0] === 'stop')).toBe(false)
+})
+
+test('a voice session older than the hub waits out its call before starting over', async () => {
+  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'busy', startedAt: 1 }], relaunch: 60_000, fresh: () => true })
+  const { send } = await session('voice')
+  send({ type: 'keep', thread: 'voice' })
+  await Bun.sleep(100)
+  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid: EXITED, status: 'idle', startedAt: 1 }]))
+  send({ type: 'state', thread: 'voice', busy: false })
+  await Bun.sleep(150)
+  expect(calls().some(args => args[0] === 'stop')).toBe(false)
+  send({ type: 'renew', thread: 'voice' })
+  send({ type: 'state', thread: 'voice', busy: false })
+  await until(() => calls().find(args => args[0] === 'stop'))
+})
+
+test('a restart waits for every call to hang up, or for its session to go', async () => {
+  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, relaunch: 60_000, fresh: () => true })
+  let freed = false
+  await free()
+  const first = await session('voice')
+  first.send({ type: 'keep', thread: 'voice' })
+  await Bun.sleep(50)
+  void free().then(() => (freed = true))
+  await Bun.sleep(50)
+  expect(freed).toBe(false)
+  first.send({ type: 'renew', thread: 'voice' })
+  await until(() => freed)
+  freed = false
+  const second = await session('voice')
+  second.send({ type: 'keep', thread: 'voice' })
+  await Bun.sleep(50)
+  void free().then(() => (freed = true))
+  second.socket.destroy()
+  await until(() => freed)
 })
 
 test('closing an idle thread stops its session right away, then forgets the thread', async () => {

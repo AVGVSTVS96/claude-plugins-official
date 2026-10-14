@@ -4,7 +4,7 @@ id: hub
 summary: Add a client-agnostic hub that gives every chat thread its own Claude Code session and moves threads between clients.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: hub.patch
-patch_sha256: 73bf460234572b7a138cd0d4cbdfcb8680dc4181467aa3a8cf25504b854d4a6d
+patch_sha256: 34442083310cd26b9ad67224bb99600b883e5fc1c5127255a2d5e38acfc51c97
 ---
 
 ## Intent
@@ -64,17 +64,25 @@ has been gone for 30 seconds. A client whose main thread is hex's General
 says so (`general`), and only that session's settings env says `HEX_MAIN`, so
 hex runs General's jobs in General alone, not in every client's main thread.
 A session can ask to `renew`: at its next rest, once Claude reports it idle,
-the hub stops it and starts it over as soon as its process exits, as a new
-session for a fresh thread, without waiting out the main thread's 30 seconds.
-Asking to `keep` before then cancels it (a voice call started in the meantime),
-even while the hub is still asking Claude whether the session is working. A
+the hub stops it, and a main thread starts over as soon as its process exits,
+as a new session for a fresh thread, without waiting out its 30 seconds; any
+other thread's next message resumes it. A session that says hello to a hub
+younger than it (Claude's `startedAt`) renews the same way, since it may run
+code an update has since replaced: an update restarts the hub, and each
+session then moves onto the new code at its own next rest instead of all of
+them waiting for a moment none is busy. Asking to `keep` before then cancels a
+renew (a voice call started in the meantime), even while the hub is still
+asking Claude whether the session is working. A
 fresh main thread whose session outlived the hub (a hub restart) gets the same
 30 seconds to reconnect before a new one starts, so it never runs twice; any
 running session under its name and folder counts, since a fresh session's id is
 only saved once it has a conversation.
 
 `hub/serve.ts` is the service: it runs every client (Telegram, Discord,
-Buzz, T3 Code) in one process. Each chat client registers in `clients` with a `place` that opens a
+Buzz, T3 Code) in one process. A thread is on a call from its `keep` until its
+`renew` or until its session disconnects, and a voice call passes through this
+process, so on SIGHUP the service exits once no thread is on a call (`free`), and
+whatever runs it starts it again on the current code. Each chat client registers in `clients` with a `place` that opens a
 thread, led by a line saying what it's for when one is given, which lets `move` hand a thread to another client: its session
 stops once its turn ends (`release`) and resumes there with its memory
 (`adopt`). The main thread never leaves, so a copy of it continues there
@@ -82,7 +90,8 @@ instead (`fork`, `--fork-session`).
 
 ## Invariants
 
-1. The hub never stops the main thread unless it asks to renew, and never moves or closes it.
+1. The hub never stops the main thread unless it renews, and never moves or closes it.
+   Nothing renews a session or restarts the service while its thread is on a call.
 2. A session that is still running is never relaunched. A stopped one has
    its job record cleared (`claude rm`) before `--resume`, which otherwise
    copies the conversation to a new id.
@@ -109,7 +118,8 @@ instead (`fork`, `--fork-session`).
 
 `bun test hub` drives routing, queueing, resume, folders, running sessions, the main
 thread (started with the hub, kept running, revived, `HEX_MAIN` only for General, renewed at once, a
-fresh one left to reconnect after a hub restart), the launcher and its
+fresh one left to reconnect after a hub restart), sessions older than the hub renewing at their
+next rest and never during a call, `free` waiting for calls to end, the launcher and its
 environment, failed starts, busy and idle, idle stops, fresh threads, stopping, closing, naming and
 handoffs (release, adopt, fork), permission prompts and bad input against a fake `claude`. Run `scripts/verify`.
 
