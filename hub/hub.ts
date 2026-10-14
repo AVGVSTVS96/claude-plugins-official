@@ -12,6 +12,13 @@ export type State = (thread: string, busy: boolean, background: boolean) => void
 export type Failed = (thread: string, reason: string) => void
 export type Permission = { request_id: string; tool_name: string; description: string; input_preview: string }
 export type Settings = { model?: string; effort?: string }
+// What another process (the voice app, hex's check) can do with a question the client asked
+// with buttons: answer it for the owner, settle it as no longer asked, or take an answer back.
+export type Asks = {
+  answer: (thread: string, message: number, label: string, via: string) => void
+  settle: (thread: string, message: number, note: string) => void
+  reopen: (thread: string, message: number, via: string) => void
+}
 type Thread = Settings & { name: string; session?: string; cwd?: string; launched?: string }
 type Agent = { sessionId: string; pid?: number; status?: string; name?: string; cwd?: string }
 export type Hub = ReturnType<typeof startHub>
@@ -50,7 +57,7 @@ export function title(text: string): string {
   return title
 }
 
-export function startHub({ stateDir, channel, main, mainName = 'main', general = false, call, state, failed, permission, args = () => [], bind = () => ({}), fresh = () => false, idleStop = IDLE_STOP, relaunch = RELAUNCH, jobsDir = JOBS, hexDir = process.cwd(), projectsDir = join(CLAUDE, 'projects'), launcher = 'claude' }: {
+export function startHub({ stateDir, channel, main, mainName = 'main', general = false, call, state, failed, permission, asks, args = () => [], bind = () => ({}), fresh = () => false, idleStop = IDLE_STOP, relaunch = RELAUNCH, jobsDir = JOBS, hexDir = process.cwd(), projectsDir = join(CLAUDE, 'projects'), launcher = 'claude' }: {
   stateDir: string
   channel: string
   main?: string
@@ -61,6 +68,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', general =
   state: State
   failed: Failed
   permission?: (thread: string, request: Permission) => void
+  asks?: Asks
   args?: (thread: string) => string[]
   // More of the thread's binding for its session's settings env, like where its plugin serves.
   bind?: (thread: string) => Record<string, string>
@@ -441,6 +449,9 @@ export function startHub({ stateDir, channel, main, mainName = 'main', general =
       if (request.type === 'keep') renewing.delete(request.thread)
       if (request.type === 'open') launch(request.thread, request.name, request.prompt)
       if (request.type === 'permission_request') permission?.(thread, request)
+      if (request.type === 'answer') asks?.answer(request.thread, request.message, request.label, request.via)
+      if (request.type === 'settle') asks?.settle(request.thread, request.message, request.note)
+      if (request.type === 'reopen') asks?.reopen(request.thread, request.message, request.via)
       if (request.type === 'inbound') deliver(request.thread, threads[request.thread]?.name ?? request.thread, { content: request.content, meta: request.meta })
       if (request.type === 'call') {
         call(thread, request.tool, request.args ?? {}).then(

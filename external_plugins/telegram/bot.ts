@@ -5,6 +5,7 @@ import { readFileSync, writeFileSync, mkdirSync, statSync, realpathSync, chmodSy
 import { homedir } from 'os'
 import { basename, join, extname, sep } from 'path'
 import { startHub, clients, move, tappable, title, transcribe, type Message, type Permission } from '../../hub/hub.ts'
+import { Ledger } from '../../hub/ledger.ts'
 
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'hex', 'telegram')
 const ACCESS_FILE = join(STATE_DIR, 'access.json')
@@ -140,8 +141,9 @@ const topicNames = new Map<string, string>()
 // Telegram's reaction updates carry neither the message's text nor its topic,
 // so the hub keeps both for every message it sends or receives, per thread,
 // until the thread is forgotten.
-type Seen = { text?: string; user: string; poll?: { id: string; options: string[] } }
+type Seen = { text?: string; user: string }
 const seen = new Map<string, Map<number, Seen>>()
+const ledger = new Ledger(join(STATE_DIR, 'ledger.json'))
 
 function remember(thread: string, id: number, entry: Seen): void {
   if (!seen.has(thread)) seen.set(thread, new Map())
@@ -312,8 +314,9 @@ async function call(caller: string, tool: string, args: Record<string, unknown>)
       const replyMode = access.replyToMode ?? 'first'
       const chunks = !text || caption ? [] : markdown ? fenced(text, limit, access.chunkMode ?? 'length') : chunk(text, limit, access.chunkMode ?? 'length')
       const silent = args.silent ? { disable_notification: true } : {}
-      const keyboard = buttons.length ? { reply_markup: { inline_keyboard: [buttons.map((label, i) => ({ text: label, callback_data: String(i) }))] } } : {}
+      const keyboard = buttons.length ? { reply_markup: buttonsOf(buttons) } : {}
       const sentIds: number[] = []
+      let asked: number | undefined
 
       try {
         for (let i = 0; i < chunks.length; i++) {
@@ -329,6 +332,7 @@ async function call(caller: string, tool: string, args: Record<string, unknown>)
             : await bot.api.sendMessage(chat_id, chunks[i]!, { ...opts, ...parseMode })
           remember(thread, sent.message_id, { text: chunks[i], user: me() })
           sentIds.push(sent.message_id)
+          if (buttons.length && i === chunks.length - 1) asked = sent.message_id
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
@@ -349,7 +353,9 @@ async function call(caller: string, tool: string, args: Record<string, unknown>)
           : await bot.api.sendDocument(chat_id, input, opts)
         remember(thread, sent.message_id, { text: captioned ? caption : undefined, user: me() })
         sentIds.push(sent.message_id)
+        if (buttons.length && captioned) asked = sent.message_id
       }
+      if (asked) ledger.ask(thread, asked, text, buttons)
 
       return sentIds.length === 1 ? `sent (id: ${sentIds[0]})` : `sent ${sentIds.length} parts (ids: ${sentIds.join(', ')})`
     }
@@ -378,19 +384,28 @@ async function call(caller: string, tool: string, args: Record<string, unknown>)
           return bot.api.editMessageCaption(chat_id, id, { caption: text, ...parseMode })
         })
       }
-      if (text != null) remember(thread, id, { text, user: me() })
+      if (text != null) {
+        remember(thread, id, { text, user: me() })
+        ledger.edited(thread, id, text)
+      }
       return `edited (id: ${id})`
     }
     case 'delete_message': {
       const id = Number(args.message_id)
       await bot.api.deleteMessage(chat_id, id)
       seen.get(thread)?.delete(id)
+      ledger.deleted(thread, id)
       return `deleted (id: ${id})`
     }
     case 'pin': {
       const id = Number(args.message_id)
-      if (args.unpin) await bot.api.unpinChatMessage(chat_id, id)
-      else await bot.api.pinChatMessage(chat_id, id)
+      if (args.unpin) {
+        await bot.api.unpinChatMessage(chat_id, id)
+        ledger.unpinned(thread, id)
+      } else {
+        await bot.api.pinChatMessage(chat_id, id)
+        ledger.pinned(thread, id, seen.get(thread)?.get(id)?.text)
+      }
       return `${args.unpin ? 'unpinned' : 'pinned'} (id: ${id})`
     }
     case 'forward': {
@@ -408,7 +423,8 @@ async function call(caller: string, tool: string, args: Record<string, unknown>)
         is_anonymous: false,
         allows_multiple_answers: !!args.multiple,
       })
-      remember(thread, sent.message_id, { text: question, user: me(), poll: { id: sent.poll.id, options } })
+      remember(thread, sent.message_id, { text: question, user: me() })
+      ledger.ask(thread, sent.message_id, question, options, sent.poll.id)
       return `sent poll (id: ${sent.message_id})`
     }
     case 'rename_thread': {
@@ -482,6 +498,66 @@ async function callOrForget(caller: string, tool: string, args: Record<string, u
   }
 }
 
+// A question answered somewhere else (hex's voice app, a call) reaches the thread as the owner's
+// own tap would, and its buttons say where it was answered.
+const ANSWERED_IN: Record<string, string> = { app: 'in the app', call: 'on a call' }
+
+function only(text: string) {
+  return { inline_keyboard: [[{ text, disabled: {} }]] }
+}
+
+function buttonsOf(options: string[]) {
+  return { inline_keyboard: [options.map((label, i) => ({ text: label, callback_data: String(i) }))] }
+}
+
+// A poll can't take a vote from the bot, so one answered elsewhere closes instead.
+async function closeAsk(thread: string, message: number, poll: boolean, text: string) {
+  const { chat_id } = target(thread)
+  const done = poll ? bot.api.stopPoll(chat_id, message) : bot.api.editMessageReplyMarkup(chat_id, message, { reply_markup: only(text) })
+  await done.catch(err => process.stderr.write(`telegram hub: couldn't close the buttons on ${thread} ${message}: ${err}\n`))
+}
+
+async function answerAsk(thread: string, message: number, label: string, via: string) {
+  const ask = ledger.find(thread, message)
+  if (!ask || ask.answer) return
+  await closeAsk(thread, message, !!ask.poll, `✓ Answered ${ANSWERED_IN[via] ?? via}: ${label}`)
+  ledger.answered(thread, message, label, via)
+  const { chat_id } = target(thread)
+  hub.deliver(thread, topicNames.get(thread) ?? hub.name(thread) ?? thread, {
+    content: ask.poll ? `(vote: ${label})` : label,
+    meta: {
+      chat_id,
+      user: `hex ${via}`,
+      ts: new Date().toISOString(),
+      ...(ask.poll ? { vote: label, poll_message_id: String(message), poll: ask.text } : { button: 'true', button_message_id: String(message) }),
+      answered_in: ANSWERED_IN[via] ?? via,
+    },
+  })
+}
+
+async function settleAsk(thread: string, message: number, note: string) {
+  const ask = ledger.find(thread, message)
+  if (!ask || ask.answer || ask.settled) return
+  await closeAsk(thread, message, !!ask.poll, note)
+  ledger.settled(thread, message, note)
+}
+
+// Takes back an answer given elsewhere, or a settle: the buttons come back, and the thread hears
+// that the answer it got no longer stands. A closed poll stays closed.
+async function reopenAsk(thread: string, message: number, via: string) {
+  const ask = ledger.find(thread, message)
+  if (!ask || !(ask.answer || ask.settled)) return
+  const { chat_id } = target(thread)
+  if (!ask.poll) await bot.api.editMessageReplyMarkup(chat_id, message, { reply_markup: buttonsOf(ask.options) }).catch(err => process.stderr.write(`telegram hub: couldn't put the buttons back on ${thread} ${message}: ${err}\n`))
+  const taken = ask.answer?.label
+  ledger.reopened(thread, message)
+  if (!taken) return
+  hub.deliver(thread, topicNames.get(thread) ?? hub.name(thread) ?? thread, {
+    content: `(took back: ${taken})`,
+    meta: { chat_id, user: `hex ${via}`, ts: new Date().toISOString(), took_back: taken, [ask.poll ? 'poll_message_id' : 'button_message_id']: String(message) },
+  })
+}
+
 const hub = startHub({
   stateDir: STATE_DIR,
   channel: 'plugin:telegram@hex',
@@ -494,6 +570,11 @@ const hub = startHub({
   state: settle,
   fresh: thread => !thread.startsWith('-'),
   permission: (thread, request) => void ask(thread, request).catch(err => process.stderr.write(`telegram hub: couldn't relay a permission prompt to ${thread}: ${err}\n`)),
+  asks: {
+    answer: (thread, message, label, via) => void answerAsk(thread, message, label, via),
+    settle: (thread, message, note) => void settleAsk(thread, message, note),
+    reopen: (thread, message, via) => void reopenAsk(thread, message, via),
+  },
   failed: (thread, reason) => {
     const { chat_id, extra } = target(thread)
     void bot.api.sendMessage(chat_id, `Couldn't start this topic's session: ${reason}`, extra).catch(() => {})
@@ -680,6 +761,7 @@ bot.on('callback_query:data', async ctx => {
     asking.get(thread)?.delete(message.message_id)
     return hub.answer(thread, verdict[2]!, verdict[1] as 'allow' | 'deny')
   }
+  ledger.answered(thread, message.message_id, label, 'telegram')
   hub.deliver(thread, nameOf(ctx, thread), {
     content: label,
     meta: {
@@ -695,25 +777,23 @@ bot.on('callback_query:data', async ctx => {
 
 bot.on('poll_answer', ctx => {
   const { poll_id, user, option_ids } = ctx.pollAnswer
-  if (!allowed(user)) return
-  for (const [thread, messages] of seen) {
-    for (const [id, message] of messages) {
-      if (message.poll?.id !== poll_id) continue
-      const vote = option_ids.map(i => message.poll!.options[i]).join('; ')
-      hub.deliver(thread, nameOf(ctx, thread), {
-        content: vote ? `(vote: ${vote})` : '(vote removed)',
-        meta: {
-          chat_id: target(thread).chat_id,
-          user: user.username ?? String(user.id),
-          user_id: String(user.id),
-          ts: new Date().toISOString(),
-          ...(vote ? { vote } : { vote_removed: 'true' }),
-          poll_message_id: String(id),
-          poll: message.text!,
-        },
-      })
-    }
-  }
+  const ask = ledger.byPoll(poll_id)
+  if (!allowed(user) || !ask) return
+  const vote = option_ids.map(i => ask.options[i]).join('; ')
+  if (vote) ledger.answered(ask.thread, ask.message, vote, 'telegram')
+  else ledger.reopened(ask.thread, ask.message)
+  hub.deliver(ask.thread, nameOf(ctx, ask.thread), {
+    content: vote ? `(vote: ${vote})` : '(vote removed)',
+    meta: {
+      chat_id: target(ask.thread).chat_id,
+      user: user.username ?? String(user.id),
+      user_id: String(user.id),
+      ts: new Date().toISOString(),
+      ...(vote ? { vote } : { vote_removed: 'true' }),
+      poll_message_id: String(ask.message),
+      poll: ask.text,
+    },
+  })
 })
 
 function allowed<U extends { id: number }>(user: U | undefined): user is U {

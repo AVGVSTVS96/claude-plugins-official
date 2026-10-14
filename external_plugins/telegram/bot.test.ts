@@ -1,6 +1,6 @@
 import { beforeAll, expect, mock, test } from 'bun:test'
 import { connect } from 'net'
-import { mkdtempSync, writeFileSync } from 'fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import * as grammy from 'grammy'
@@ -339,4 +339,61 @@ test('a DM is its own thread: it reaches the DM session, not the group, and repl
   await until(() => lines.find(line => line.type === 'result' && line.id === 1))
   expect(await called('sendMessage', p => p.text === 'on it, from the DM')).toMatchObject({ chat_id: String(OWNER) })
   dm.destroy()
+})
+
+const ledger = () => JSON.parse(readFileSync(join(state, 'ledger.json'), 'utf8'))
+const asked = (id: number) => ledger().asks.find((ask: any) => ask.message === id)
+
+test('a question with buttons goes in the ledger, and a tap there answers it', async () => {
+  const sent = await call('reply', { text: 'Deploy now?', buttons: ['Deploy', 'Wait'] })
+  const id = Number(sent.text.match(/id: (\d+)/)[1])
+  expect(asked(id)).toMatchObject({ thread: DESK, message: id, text: 'Deploy now?', options: ['Deploy', 'Wait'] })
+  const markup = { inline_keyboard: [[{ text: 'Deploy', callback_data: '0' }, { text: 'Wait', callback_data: '1' }]] }
+  await update({ callback_query: { id: 'deploy', from: owner, chat_instance: 'x', data: '1', message: message({ message_id: id, from: hex, text: 'Deploy now?', reply_markup: markup }) } })
+  expect(await until(() => asked(id).answer)).toMatchObject({ label: 'Wait', via: 'telegram' })
+})
+
+test('a question answered in the app reaches its thread like a tap, says so on its buttons, and can be taken back', async () => {
+  const sent = await call('reply', { text: 'Which color?', buttons: ['Mint', 'Coral'] })
+  const id = Number(sent.text.match(/id: (\d+)/)[1])
+  session({ type: 'answer', thread: DESK, message: id, label: 'Coral', via: 'app' })
+  expect(await called('editMessageReplyMarkup', p => p.message_id === id)).toMatchObject({ reply_markup: { inline_keyboard: [[{ text: '✓ Answered in the app: Coral', disabled: {} }]] } })
+  const tap = await inbound(line => line.meta.button_message_id === String(id))
+  expect(tap.content).toBe('Coral')
+  expect(tap.meta).toMatchObject({ button: 'true', user: 'hex app', answered_in: 'in the app' })
+  expect(asked(id).answer).toMatchObject({ label: 'Coral', via: 'app' })
+
+  session({ type: 'reopen', thread: DESK, message: id, via: 'app' })
+  expect(await called('editMessageReplyMarkup', p => p.message_id === id && p.reply_markup.inline_keyboard[0].length === 2)).toMatchObject({ reply_markup: { inline_keyboard: [[{ text: 'Mint', callback_data: '0' }, { text: 'Coral', callback_data: '1' }]] } })
+  expect((await inbound(line => line.meta.took_back === 'Coral')).content).toBe('(took back: Coral)')
+  expect(asked(id).answer).toBeUndefined()
+})
+
+test('a settled question loses its buttons without reaching its thread, and an edit that drops the buttons settles one too', async () => {
+  const first = Number((await call('reply', { text: 'Buy the domain?', buttons: ['Buy', 'Skip'] })).text.match(/id: (\d+)/)[1])
+  const before = received.length
+  session({ type: 'settle', thread: DESK, message: first, note: 'Settled: bought on Oct 12' })
+  expect(await called('editMessageReplyMarkup', p => p.message_id === first)).toMatchObject({ reply_markup: { inline_keyboard: [[{ text: 'Settled: bought on Oct 12', disabled: {} }]] } })
+  expect(await until(() => asked(first).settled)).toMatchObject({ note: 'Settled: bought on Oct 12' })
+  expect(received.slice(before).filter(line => line.type === 'inbound')).toEqual([])
+
+  const second = Number((await call('reply', { text: 'Rename it?', buttons: ['Yes', 'No'] })).text.match(/id: (\d+)/)[1])
+  await call('edit_message', { message_id: String(second), text: 'Renamed, as you said in the call.' })
+  expect(asked(second).settled).toMatchObject({ note: 'Edited' })
+})
+
+test('a poll answered in the app closes, and its vote reaches the thread', async () => {
+  const id = Number((await call('poll', { question: 'Which take?', options: ['A', 'B'] })).text.match(/id: (\d+)/)[1])
+  expect(asked(id)).toMatchObject({ options: ['A', 'B'], poll: `poll-${id}` })
+  session({ type: 'answer', thread: DESK, message: id, label: 'B', via: 'call' })
+  expect(await called('stopPoll', p => p.message_id === id)).toBeTruthy()
+  expect((await inbound(line => line.meta.poll_message_id === String(id) && line.meta.answered_in)).meta).toMatchObject({ vote: 'B', answered_in: 'on a call', user: 'hex call' })
+})
+
+test('a pinned post keeps its latest text in the ledger', async () => {
+  const id = Number((await call('reply', { text: 'Status: starting' })).text.match(/id: (\d+)/)[1])
+  await call('pin', { message_id: String(id) })
+  expect(ledger().pins[DESK]).toMatchObject({ message: id, text: 'Status: starting' })
+  await call('edit_message', { message_id: String(id), text: 'Status: shipped' })
+  expect(ledger().pins[DESK]).toMatchObject({ message: id, text: 'Status: shipped' })
 })
