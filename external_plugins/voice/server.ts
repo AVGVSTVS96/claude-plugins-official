@@ -27,7 +27,7 @@ try {
 const KEY = process.env.OPENAI_API_KEY
 const VOICE = process.env.VOICE
 const PORT = Number(process.env.VOICE_PORT ?? 8790)
-const API = 'https://api.openai.com/v1/live/sessions'
+const API = `${process.env.OPENAI_BASE_URL ?? 'https://api.openai.com/v1'}/live/sessions`
 const TWILIO_SID = process.env.TWILIO_ACCOUNT_SID
 const TWILIO_TOKEN = process.env.TWILIO_AUTH_TOKEN
 const TWILIO_NUMBER = process.env.TWILIO_NUMBER
@@ -84,6 +84,7 @@ type Live = {
   record: Omit<CallRecord, 'turns' | 'tasks' | 'moments'>
   pending: Map<string, Pending>
   rings: Ring[]
+  changes: Changes
   spoke: number
   warning?: ReturnType<typeof setTimeout>
   speak?: (audio: string) => void
@@ -292,7 +293,12 @@ function remember(call: Live, kind: Mark['kind'], text: string, ask?: string) {
 }
 
 function save(call: Live) {
-  calls.save({ ...call.record, ...call.call.record() })
+  calls.save(whole(call))
+  call.changes.changed()
+}
+
+function whole(call: Live): CallRecord {
+  return { ...call.record, ...call.call.record() }
 }
 
 async function task(id: string, state: Task['state'], text: string, call = live?.id ?? ended, agent?: string) {
@@ -425,6 +431,7 @@ function ring(call: Live, { delegation, offset }: Ring) {
 
 function hear(call: Live, who: Speaker, event: { delta: string; start_ms: number; end_ms: number }) {
   call.call.hear({ who, text: event.delta, start: event.start_ms, end: event.end_ms })
+  call.changes.changed()
   while (call.rings[0] && call.rings[0].offset <= event.start_ms) ring(call, call.rings.shift()!)
 }
 
@@ -480,7 +487,7 @@ function follow(socket: WebSocket, record: Live['record'], { call = new Call(), 
     live.socket.send(JSON.stringify({ type: 'session.close', event_id: 'close-you-moved' }))
     finish(live, 'moved to a new call', 'close-you-moved')
   }
-  const current: Live = { id: record.id, shown: new Map(), socket, call, record, pending: new Map(), rings: [], spoke: 0, speak }
+  const current: Live = { id: record.id, shown: new Map(), socket, call, record, pending: new Map(), rings: [], changes: new Changes(), spoke: 0, speak }
   live = current
   save(current)
   activity.changed()
@@ -1016,6 +1023,16 @@ function taskRoutes(request: Request, url: URL) {
   if (!talking && request.method === 'GET') return Response.json({ ...task, ...hexAsks()!.of(task.id) })
 }
 
+// A live call's record is read from the call itself, so it has every word heard so far, and a
+// request with after waits until the next word or change; an ended call's comes from disk.
+async function showCall(id: string, url: URL) {
+  const after = url.searchParams.get('after')
+  if (after && live?.id === id) await live.changes.changes(Number(after), 25_000)
+  if (live?.id === id) return Response.json({ ...whole(live), version: live.changes.version })
+  const record = calls.get(id)
+  return record ? Response.json(record) : new Response('404', { status: 404 })
+}
+
 async function listCalls(url: URL) {
   const after = url.searchParams.get('after')
   if (after) await calls.changes(Number(after), 25_000)
@@ -1035,10 +1052,7 @@ function routes(request: Request) {
   if (/^\/(asks|stuck|fresh)(\/|$)/.test(pathname)) return askRoutes(request, new URL(request.url))
   const [, callId, moments] = pathname.match(/^\/calls\/([\w-]+)(\/moments)?$/) ?? []
   if (callId && moments && request.method === 'POST') return interruption(request, callId)
-  if (callId && !moments && request.method === 'GET') {
-    const record = calls.get(callId)
-    return record ? Response.json(record) : new Response('404', { status: 404 })
-  }
+  if (callId && !moments && request.method === 'GET') return showCall(callId, new URL(request.url))
   if (callId && !moments && request.method === 'DELETE') {
     if (live?.id === callId) return new Response('That call is still going', { status: 409 })
     return new Response(null, { status: calls.delete(callId) ? 204 : 404 })

@@ -102,7 +102,8 @@ updating its record.
 | --- | --- |
 | `GET /calls` | `{ version, live, calls }`, newest first, each without its turns, with `seconds`, how many `tasks` and a `preview` of the caller's first words |
 | `GET /calls?after=<version>` | the same, once anything has changed since that version (or after 25 seconds) |
-| `GET /calls/<id>` | one whole call |
+| `GET /calls/<id>` | one whole call; while it's live, every word heard so far, with a `version` |
+| `GET /calls/<id>?after=<version>` | the live call, once a word or anything else in it has changed (or after 25 seconds), so an app follows a phone call it isn't on |
 | `DELETE /calls/<id>` | deletes a finished call |
 | `POST /calls/<id>/moments` | `{ "kind": "paused" \| "resumed", "text": "..." }` from the app when the phone takes its audio (a phone call or Siri) and gives it back; the voice is told to wait |
 
@@ -266,6 +267,7 @@ them with hex) gets Claude walking the list in order.
    VOICE=marin        # one of OpenAI's built-in voices; OpenAI's default if unset
    VOICE_PORT=8790    # the call page's local port
    VOICE_TOKEN=...    # if set, /session, /calls and /phone need "Authorization: Bearer <token>"
+   OPENAI_BASE_URL=... # another endpoint that speaks OpenAI's live API; https://api.openai.com/v1 if unset
    ```
 
    Who the voice is goes in `~/.claude/channels/voice/instructions.md`, the
