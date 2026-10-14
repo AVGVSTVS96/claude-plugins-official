@@ -1,4 +1,5 @@
 import { spawn } from 'child_process'
+import { createHash } from 'crypto'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'fs'
 import { homedir, tmpdir } from 'os'
 import { dirname, join } from 'path'
@@ -19,7 +20,8 @@ const LONG = 2400
 // questions into one list (repeats merged, its pick, what each unblocks), settles the questions the
 // records show are already decided or done, and flags what it can't settle. It answers nothing for
 // him. One runs at a time in a process of its own, so it outlives the voice session that started
-// it, and anything that happens while it runs starts one more pass when it ends.
+// it. Events that land while it runs leave one mark, so a burst of them costs one more pass at
+// most, and a pass whose records haven't changed since the last one skips Opus.
 export class Check {
   private dir: string
 
@@ -34,35 +36,46 @@ export class Check {
   }
 
   start(why: string) {
-    if (this.running) return writeFileSync(join(this.dir, 'next'), why)
-    spawn(process.execPath, [import.meta.path, this.state, why], { detached: true, stdio: 'ignore' }).unref()
+    writeFileSync(join(this.dir, 'next'), why)
+    if (!this.running) spawn(process.execPath, [import.meta.path, this.state], { detached: true, stdio: 'ignore' }).unref()
   }
 }
 
-async function run(state: string, why: string) {
+// Whoever holds the lock runs a pass per mark until none is left; a mark left in the moment the
+// lock is let go is picked up again, by this process or the one that took the lock.
+async function run(state: string) {
   const dir = join(state, 'voice', 'check')
-  writeFileSync(join(dir, 'lock'), String(process.pid))
-  try {
-    for (let next: string | undefined = why; next; next = take(join(dir, 'next'))) {
-      await pass(state, next).then(
-        () => rmSync(join(dir, 'error'), { force: true }),
-        error => writeFileSync(join(dir, 'error'), `${new Date().toISOString()} ${next}: ${error instanceof Error ? error.message : error}\n`),
-      )
+  while (existsSync(join(dir, 'next')) && hold(join(dir, 'lock'))) {
+    try {
+      for (let why = take(join(dir, 'next')); why; why = take(join(dir, 'next'))) {
+        await pass(state, why).then(
+          () => rmSync(join(dir, 'error'), { force: true }),
+          error => writeFileSync(join(dir, 'error'), `${new Date().toISOString()} ${why}: ${error instanceof Error ? error.message : error}\n`),
+        )
+      }
+    } finally {
+      rmSync(join(dir, 'lock'), { force: true })
     }
-  } finally {
-    rmSync(join(dir, 'lock'), { force: true })
   }
 }
 
-// One pass's judgment, with no effect yet.
-export async function review(state: string) {
-  const records = gather(state)
-  return { records, verdict: vet(await claude(prompt(records), dirname(state)), records.ledgers) }
+function hold(lock: string): boolean {
+  try {
+    writeFileSync(lock, String(process.pid), { flag: 'wx' })
+    return true
+  } catch {
+    if (alive(Number(read(lock)))) return false
+    rmSync(lock, { force: true })
+    return hold(lock)
+  }
 }
 
 async function pass(state: string, why: string) {
   const started = new Date().toISOString()
-  const { records, verdict } = await review(state)
+  const records = gather(state)
+  const inputs = digest(records)
+  if (records.previous?.inputs === inputs) return
+  const verdict = vet(await claude(prompt(records), dirname(state)), records.ledgers)
   for (const ref of verdict.settle) await relay(state, ref.app, { type: 'settle', thread: ref.thread, message: ref.message, note: ref.note }).catch(error => process.stderr.write(`voice: check: ${error}\n`))
   const result: CheckResult = {
     at: started,
@@ -77,6 +90,7 @@ async function pass(state: string, why: string) {
     fixed: verdict.fixed,
     flagged: verdict.flagged,
     stuck: verdict.stuck,
+    inputs,
   }
   const file = join(state, 'voice', 'check.json')
   writeFileSync(`${file}.tmp`, JSON.stringify(result, null, 1) + '\n')
@@ -116,6 +130,11 @@ function gather(state: string) {
     .filter(call => call?.ended && (call.summary || call.waiting?.length))
     .map(call => ({ title: call.title, ended: call.ended, summary: call.summary, waiting: call.waiting ?? [] }))
   return { now: new Date(now).toISOString(), threads: names, open, closed, pins: Object.fromEntries(Object.entries(pins).map(([task, text]) => [`${task} (${names[task] ?? task})`, text])), calls, t3: t3Now, previous: json(join(state, 'voice', 'check.json')), ledgers }
+}
+
+// What a pass reads, as one fingerprint: the same records give the same verdict.
+export function digest({ open, closed, pins, calls, t3 }: ReturnType<typeof gather>) {
+  return createHash('sha256').update(JSON.stringify({ open, closed, pins, calls, t3 })).digest('hex')
 }
 
 function prompt({ ledgers, ...records }: ReturnType<typeof gather>) {
@@ -268,4 +287,4 @@ function alive(pid: number) {
   }
 }
 
-if (import.meta.main) await run(process.argv[2]!, process.argv[3] ?? 'asked')
+if (import.meta.main) await run(process.argv[2]!)

@@ -36,6 +36,7 @@ export type CheckResult = {
   fixed: Note[]
   flagged: Note[]
   stuck: Stuck[]
+  inputs?: string
 }
 export type View = {
   version: number
