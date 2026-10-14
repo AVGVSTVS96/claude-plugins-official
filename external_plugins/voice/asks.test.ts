@@ -5,6 +5,7 @@ import { createServer, type Server } from 'net'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { Asks, fromLedger } from './asks.ts'
+import { vet } from './check.ts'
 import { T3 } from './t3.ts'
 
 const GROUP = '-1001234'
@@ -13,6 +14,7 @@ let state: string
 let asks: Asks
 let hub: Server
 let lines: any[]
+let checks: string[]
 
 function ledger(asks: object[], pins = {}) {
   writeFileSync(join(state, 'telegram', 'ledger.json'), JSON.stringify({ asks, pins }))
@@ -36,6 +38,7 @@ beforeEach(async () => {
   mkdirSync(join(state, 'voice'))
   writeFileSync(join(state, 'telegram', 'threads.json'), JSON.stringify({ [GROUP]: { name: 'hex' }, [DESK]: { name: 'desk' } }))
   lines = []
+  checks = []
   hub = createServer(socket => {
     socket.setEncoding('utf8')
     socket.on('data', (chunk: string) => lines.push(...chunk.trim().split('\n').map(line => JSON.parse(line))))
@@ -62,7 +65,7 @@ test('a question asked with buttons reads as its first line, its context and the
 
 test('open questions come newest first with a link to each, answered and settled ones drop out', () => {
   ledger([asked(1, 'Ship it?', ['Yes', 'No']), asked(2, 'Rename it?', ['Yes', 'No'], { answer: { label: 'No', at: '', via: 'telegram' } }), asked(3, 'Which color?', ['Mint', 'Coral'])])
-  asks = new Asks(state, '/nonexistent')
+  asks = new Asks(state, { t3Database: '/nonexistent', check: why => checks.push(why) })
   expect(asks.view.asks.map(ask => [ask.question, ask.topic, ask.link])).toEqual([
     ['Which color?', 'desk', 'https://t.me/c/1234/5/3'],
     ['Ship it?', 'desk', 'https://t.me/c/1234/5/1'],
@@ -95,7 +98,7 @@ test('the check’s version of a question stands in for every place that asked i
       ],
     }),
   )
-  asks = new Asks(state, '/nonexistent')
+  asks = new Asks(state, { t3Database: '/nonexistent', check: why => checks.push(why) })
   expect(asks.view.asks.map(ask => ask.id)).toEqual([`telegram:${DESK}:9`, 'check:twilio', 'check:read'])
   expect(asks.view.check).toEqual({ at: '2026-10-13T15:00:00.000Z', why: 'a pinned post changed', fixed: 0, flagged: 0 })
 
@@ -115,7 +118,7 @@ test('the check’s version of a question stands in for every place that asked i
 
 test('an answer that lands in the ledger takes the question off the list, and undo asks for its buttons back', async () => {
   ledger([asked(1, 'Ship it?', ['Yes', 'No'])])
-  asks = new Asks(state, '/nonexistent')
+  asks = new Asks(state, { t3Database: '/nonexistent', check: why => checks.push(why) })
   const version = asks.version
   await asks.answer(`telegram:${DESK}:1`, 'Yes', 'app')
   expect(await until(() => lines[0])).toEqual({ type: 'answer', thread: DESK, message: 1, label: 'Yes', via: 'app' })
@@ -137,7 +140,7 @@ test('a stuck item with a request goes to General, one without is put away', asy
       ],
     }),
   )
-  asks = new Asks(state, '/nonexistent')
+  asks = new Asks(state, { t3Database: '/nonexistent', check: why => checks.push(why) })
   await asks.act('disk')
   expect(await until(() => lines[0])).toEqual({ type: 'inbound', thread: GROUP, content: 'Restore cloud from checkpoint v7.', meta: { user: 'hex app' } })
   await asks.act('runs')
@@ -179,4 +182,22 @@ test('T3 Code’s records give what waits on a limit, what never started, what f
   ])
   expect(stuck.every(item => item.request)).toBe(true)
   expect(fresh).toEqual([{ id: expect.stringMatching(/^t3-done-/), title: 'finished thread', where: 'T3 · hex', line: 'Done', at: '2026-10-13T10:00:00.000Z' }])
+})
+
+test('a check’s verdict is held to the ledger: real open refs and buttons only, and nothing both settled and listed', () => {
+  const asks = { telegram: [asked(1, 'Twilio?', ['Upgrade', 'Not yet']), asked(2, 'Old?', ['Yes', 'No'], { settled: { note: 'x', at: '' } }), asked(3, 'Music?', ['A', 'B'])] }
+  const ref = (message: number) => ({ app: 'telegram', thread: DESK, message })
+  const verdict = vet(
+    {
+      asks: [{ id: 'twilio', kind: 'do', task: `telegram:${DESK}`, at: '', question: 'Upgrade Twilio', options: [{ label: 'Upgrade', value: 'Upgrade' }, { label: 'Later', value: 'Wait' }], refs: [ref(1), ref(2), ref(9)] }],
+      settle: [{ ...ref(1), note: 'Settled' }, { ...ref(2), note: 'Settled' }, { ...ref(3), note: 'Settled: Tech Live, picked on a call with a very long note' }],
+      fixed: [],
+      flagged: [],
+      stuck: [{ id: 'disk', title: 'disk', why: '', action: 'Look', mark: 'failed', at: '' }],
+    },
+    asks,
+  )
+  expect(verdict.asks[0]).toMatchObject({ id: 'check:twilio', refs: [ref(1)], options: [{ label: 'Upgrade', value: 'Upgrade' }, { label: 'Later' }] })
+  expect(verdict.settle).toEqual([{ ...ref(3), note: 'Settled: Tech Live, picked on a call with a very long note'.slice(0, 60) }])
+  expect(verdict.stuck[0]!.id).toBe('check-disk')
 })

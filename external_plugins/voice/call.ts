@@ -8,7 +8,8 @@ export type Task = { id: string; state: 'running' | 'done' | 'failed'; text: str
 
 export type Moment = Task & { at: number }
 
-export type Mark = { at: number; kind: 'say' | 'note' | 'paused' | 'resumed' | 'warned'; text: string }
+// ask: a question put on the caller's screen (its text) by its id; answered: its answer.
+export type Mark = { at: number; kind: 'say' | 'note' | 'paused' | 'resumed' | 'warned' | 'ask' | 'answered'; text: string; ask?: string }
 
 export type Saved = { turns: { who: Speaker; at: number; text: string }[]; tasks: Moment[]; moments?: Mark[] }
 

@@ -221,7 +221,36 @@ buttons back and tells the thread the answer no longer stands.
 | `POST /asks/<id>/undo` | takes that answer back |
 | `POST /stuck/<id>/act` | does its action: asks hex's General to fix it, or puts it away until it changes |
 | `POST /fresh/<id>/read` | marks a finished result read |
+| `POST /asks/talk` | during a call: Claude walks you through them, one card at a time |
+| `GET /asks/check` | the last check in full: what it `read`, what it `fixed` on its own, what it `flagged` |
 | `GET /tasks/summary` | also counts what's `yours` |
+| `GET /tasks/<id>` | also the thread's own `asks` and its pinned post (`pin`) |
+
+### The check
+
+`check.ts` is hex auditing its own asks against what actually happened: an
+Opus pass (`claude -p`, read-only tools, structured output) over the ledger's
+open and lately closed questions, every pinned post, the last three days of
+call wrap-ups and what T3 Code shows. It rewrites the raw questions into one
+list (repeats merged into one ask with every place that asked it, hex's pick,
+what each unblocks or costs, most unblocking first), settles the questions the
+records show are already decided or done (their buttons say why), and flags
+what it can't settle. It never answers for you.
+
+It runs on real events, one pass at a time in a process of its own (so it
+outlives the voice session that started it), and anything that happens during
+a pass starts one more when it ends: a pinned post changes, a T3 run ends, a
+call's wrap-up lands, or Tasks opens with questions newer than the last pass.
+It writes `state/voice/check.json`; `check/error` keeps the last failure.
+
+### On a call
+
+In hex the voice session also has `ask` (put an open ask on the caller's
+screen as a card in the transcript, by id) and `answer` (send the choice they
+said aloud). `GET /activity` carries the call's cards as `asks`, each with its
+answer once it has one; a tap on a card answers it like the Tasks sheet does,
+and Claude hears it. An app starting a call with `"about": "asks"` (Go through
+them with hex) gets Claude walking the list in order.
 
 ## Setup
 

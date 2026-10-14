@@ -11,7 +11,7 @@ import { findThread, followAgent, followThread, type Step, type Thread } from '.
 import { Call, transcript, type Mark, type Speaker, type Task } from './call.ts'
 import { CallLog, ending, usage, type CallRecord, type Ending, type Source } from './calls.ts'
 import { Changes } from './changes.ts'
-import { Asks } from './asks.ts'
+import { Asks, type Ask } from './asks.ts'
 import { relay } from './relay.ts'
 import { Tasks, opener, type HexTask } from './tasks.ts'
 import page from './page.html' with { type: 'text' }
@@ -78,6 +78,7 @@ type Pending = { resolve: () => void; reject: (error: Error) => void }
 type Ring = { delegation: string; offset: number }
 type Live = {
   id: string
+  shown: Map<string, Ask>
   socket: WebSocket
   call: Call
   record: Omit<CallRecord, 'turns' | 'tasks' | 'moments'>
@@ -167,6 +168,21 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     ...(HEX_STATE
       ? [
           {
+            name: 'ask',
+            description:
+              "Put one of the caller's open asks on their screen as a card in the call's transcript, by its id from the list you were given: they can tap a choice there or say it.",
+            inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
+          },
+          {
+            name: 'answer',
+            description: "Answer one of the caller's asks with the choice they said aloud: it reaches the thread that asked as their own tap would, and its Telegram buttons say it was answered on a call.",
+            inputSchema: {
+              type: 'object',
+              properties: { id: { type: 'string' }, label: { type: 'string', description: "The option's label, or their own words when none fits" } },
+              required: ['id', 'label'],
+            },
+          },
+          {
             name: 'send',
             description:
               "Hand work to a hex thread, by its name or id: your message reaches that thread's session from hex voice, the work goes on the board as running, the caller sees each step the thread takes on it, and the board shows it done or failed when the thread's turn ends with none of its agents still out.",
@@ -223,6 +239,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async request => {
     if (request.params.name === 'title') return done(name(args.call, args))
     if (request.params.name === 'task') return done(await task(args.id, args.state as Task['state'], args.text, args.call, args.agent))
     if (request.params.name === 'send') return done(await pass(args.thread, args.about, args.text))
+    if (request.params.name === 'answer') return done(await settleAsk(args.id, args.label, 'call'))
     if (request.params.name === 'note' && !live && ringing()) {
       briefing.push(args.text)
       return done('the call is still ringing; the voice gets this when it connects')
@@ -237,6 +254,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async request => {
         return done('noted')
       case 'hang_up':
         return done(await hangUpCall(live))
+      case 'ask':
+        return done(show(live, args.id))
       default:
         throw new Error(`unknown tool ${request.params.name}`)
     }
@@ -265,8 +284,8 @@ function since(call: Live) {
   return Date.now() - Date.parse(call.record.started)
 }
 
-function remember(call: Live, kind: Mark['kind'], text: string) {
-  call.call.mark({ at: since(call), kind, text })
+function remember(call: Live, kind: Mark['kind'], text: string, ask?: string) {
+  call.call.mark({ at: since(call), kind, text, ...(ask && { ask }) })
   save(call)
 }
 
@@ -366,6 +385,7 @@ function name(call: string, { title, summary, waiting }: { title?: string; summa
     Object.assign(live.record, change)
     save(live)
   } else calls.save({ ...past(call), ...change })
+  if (Array.isArray(waiting)) hexAsks()?.called()
   return 'saved'
 }
 
@@ -449,12 +469,12 @@ function ringing() {
   return [...placed.values()].some(call => !call.session)
 }
 
-function follow(socket: WebSocket, record: Live['record'], { call = new Call(), speak, hello, about }: { call?: Call; speak?: Live['speak']; hello?: string; about?: HexTask } = {}) {
+function follow(socket: WebSocket, record: Live['record'], { call = new Call(), speak, hello, about }: { call?: Call; speak?: Live['speak']; hello?: string; about?: Topic } = {}) {
   if (live) {
     live.socket.send(JSON.stringify({ type: 'session.close', event_id: 'close-you-moved' }))
     finish(live, 'moved to a new call', 'close-you-moved')
   }
-  const current: Live = { id: record.id, socket, call, record, pending: new Map(), rings: [], spoke: 0, speak }
+  const current: Live = { id: record.id, shown: new Map(), socket, call, record, pending: new Map(), rings: [], spoke: 0, speak }
   live = current
   save(current)
   activity.changed()
@@ -465,13 +485,13 @@ function follow(socket: WebSocket, record: Live['record'], { call = new Call(), 
     hello ??
       [
         `A call started.${record.why ? ` You placed it because: ${record.why}` : ''}`,
-        ...(about ? [`The caller started it with Talk it through on a task. ${opener(about)}`] : []),
+        ...(about ? [about.claude] : []),
         'Send the voice what it should know right away, with note.',
       ].join('\n'),
     { call: record.id, started: 'true', ...(about && { task: about.id }) },
   )
   for (const text of briefing.splice(0)) void tell(current, 'note', text).catch(() => {})
-  if (about) whenOpen(socket, () => void send(current, 'session.instructions.append', bringUp(about)).catch(() => {}))
+  if (about) whenOpen(socket, () => void send(current, 'session.instructions.append', about.voice).catch(() => {}))
   return current
 }
 
@@ -480,16 +500,63 @@ function whenOpen(socket: WebSocket, then: () => void) {
   else socket.addEventListener('open', then, { once: true })
 }
 
-function bringUp(task: HexTask) {
-  return `The caller tapped Talk it through on a task, so bring it up now in a sentence or two, then listen. ${opener(task)}`
+// What a call is about when the app starts it on something: what Claude hears, and what the voice
+// is told to do first.
+type Topic = { id: string; claude: string; voice: string }
+
+function taskTopic(task: HexTask): Topic {
+  return {
+    id: task.id,
+    claude: `The caller started it with Talk it through on a task. ${opener(task)}`,
+    voice: `The caller tapped Talk it through on a task, so bring it up now in a sentence or two, then listen. ${opener(task)}`,
+  }
 }
 
-// Talk it through, tapped during a call: the voice brings the task up, and Claude hears which one.
-function talk(task: HexTask) {
+// Go through them with hex: Claude walks the caller's asks in the app's order, one card at a time.
+function walkTopic(asks: Ask[]): Topic {
+  const list = asks.map(
+    (ask, i) =>
+      `${i + 1}. ${ask.id} · ${ask.topic} · ${ask.question}${ask.context ? ` (${ask.context})` : ''} Options: ${ask.options.map(option => `${option.label}${option.pick ? ' (hex’s pick)' : ''}`).join(' / ')}${ask.tag ? ` [${ask.tag}]` : ''}`,
+  )
+  return {
+    id: 'asks',
+    claude: [
+      `The caller tapped Go through them with hex: walk them through the ${asks.length} things waiting on them, one at a time, in this order. For each, put it on screen with ask, say it in a sentence or two with hex's pick if it has one, and listen. When they say a choice, answer sends it to the thread that asked; when they tap the card instead, a message tells you. Move on when they skip one. Say so when a choice costs money or goes out in their name.`,
+      ...list,
+    ].join('\n'),
+    voice: `The caller wants to go through what's waiting on them, one at a time. Say you'll start with the first one, and hand off to the backend now: it brings each one up.`,
+  }
+}
+
+function talkAbout(topic: Topic) {
   if (!live) return new Response('No call is live', { status: 409 })
-  deliver(`The caller opened a task in the app and tapped Talk it through. ${opener(task)}`, { call: live.id, task: task.id })
-  void send(live, 'session.instructions.append', bringUp(task)).catch(() => {})
+  deliver(`The caller asked for this from the app during the call. ${topic.claude}`, { call: live.id, task: topic.id })
+  void send(live, 'session.instructions.append', topic.voice).catch(() => {})
   return new Response(null, { status: 204 })
+}
+
+// Puts an ask on the caller's screen as a card in the transcript.
+function show(call: Live, id: string) {
+  const ask = hexAsks()?.find(id)
+  if (!ask) throw new Error(`no open ask ${id}`)
+  call.shown.set(id, ask)
+  remember(call, 'ask', ask.question, id)
+  activity.changed()
+  return `showing "${ask.question}" to the caller`
+}
+
+// An ask answered on a call, said aloud (via call) or tapped on its card (via app).
+async function settleAsk(id: string, label: string, via: string) {
+  const asks = hexAsks()
+  if (!asks) throw new Error('asks are hex threads, and this voice plugin runs outside hex')
+  const ask = asks.find(id) ?? live?.shown.get(id)
+  await asks.answer(id, label, via)
+  if (live && ask) {
+    live.shown.set(id, ask)
+    remember(live, 'answered', label, id)
+    activity.changed()
+  }
+  return `sent "${label}" to ${ask?.topic ?? 'its thread'}`
 }
 
 function listen(call: Live, socket: WebSocket, attempt = 0) {
@@ -792,7 +859,7 @@ async function start(request: Request) {
     return new Response(text, { status: response.status })
   }
   const result = (await response.json()) as { session: { id: string; expires_at?: number } }
-  follow(sideband(result.session.id), base(result.session.id, from, { voice, expires: expiry(result.session.expires_at) }), { about: about ? hexTasks()?.get(about) : undefined })
+  follow(sideband(result.session.id), base(result.session.id, from, { voice, expires: expiry(result.session.expires_at) }), { about: topicOf(about) })
   return Response.json(result, { status: 201 })
 }
 
@@ -855,7 +922,21 @@ process.stdin.on('close', () => process.exit(0))
 async function showActivity(url: URL) {
   const after = url.searchParams.get('after')
   if (after) await activity.changes(Number(after), 25_000)
-  return Response.json({ version: activity.version, call: live?.id ?? null, tasks: live?.call.activity() ?? [] })
+  return Response.json({ version: activity.version, call: live?.id ?? null, tasks: live?.call.activity() ?? [], asks: live ? cards(live) : [] })
+}
+
+// The asks put on screen in this call, in order, each with its answer once it has one.
+function cards(call: Live) {
+  const marks = call.call.record().moments
+  return marks
+    .filter(mark => mark.kind === 'ask' && call.shown.has(mark.ask!))
+    .map(mark => ({ at: mark.at, ask: call.shown.get(mark.ask!)!, answer: marks.findLast(answer => answer.kind === 'answered' && answer.ask === mark.ask)?.text }))
+}
+
+function topicOf(about?: string): Topic | undefined {
+  if (about === 'asks') return hexAsks() && walkTopic(hexAsks()!.view.asks)
+  const task = about ? hexTasks()?.get(about) : undefined
+  return task && taskTopic(task)
 }
 
 function hexTasks() {
@@ -891,8 +972,12 @@ async function showAsks(url: URL, asks: Asks) {
 async function askRoutes(request: Request, url: URL) {
   const asks = hexAsks()
   if (!asks) return new Response('Asks are hex threads, and this voice plugin runs outside hex', { status: 404 })
-  if (url.pathname === '/asks' && request.method === 'GET') return showAsks(url, asks)
-  if (url.pathname === '/asks/check' && request.method === 'GET') return asks.check ? Response.json(asks.check) : new Response('No check yet', { status: 404 })
+  if (url.pathname === '/asks' && request.method === 'GET') {
+    if (!url.searchParams.get('after')) asks.opened()
+    return showAsks(url, asks)
+  }
+  if (url.pathname === '/asks/check' && request.method === 'GET') return asks.lastCheck ? Response.json(asks.lastCheck) : new Response('No check yet', { status: 404 })
+  if (url.pathname === '/asks/talk' && request.method === 'POST') return talkAbout(walkTopic(asks.view.asks))
   const [, kind, id, verb] = url.pathname.match(/^\/(asks|stuck|fresh)\/([^/]+)\/(answer|undo|act|read)$/) ?? []
   if (!kind || request.method !== 'POST') return new Response('404', { status: 404 })
   const key = decodeURIComponent(id!)
@@ -900,7 +985,9 @@ async function askRoutes(request: Request, url: URL) {
     if (kind === 'asks' && verb === 'answer') {
       const { label } = (await request.json()) as { label?: string }
       if (!label) return new Response('An answer needs its label', { status: 400 })
-      await asks.answer(key, label, 'app')
+      const shown = live?.shown.has(key)
+      await settleAsk(key, label, 'app')
+      if (shown) deliver(`The caller tapped "${label}" on the card for ${key}; it's sent to its thread.`, { call: live!.id })
     } else if (kind === 'asks' && verb === 'undo') await asks.undo(key, 'app')
     else if (kind === 'stuck' && verb === 'act') await asks.act(key)
     else if (kind === 'fresh' && verb === 'read') asks.read(key)
@@ -919,8 +1006,8 @@ function taskRoutes(request: Request, url: URL) {
   const [, id, talking] = url.pathname.match(/^\/tasks\/([^/]+)(\/talk)?$/) ?? []
   const task = id && tasks.get(decodeURIComponent(id))
   if (!task) return new Response('404', { status: 404 })
-  if (talking && request.method === 'POST') return talk(task)
-  if (!talking && request.method === 'GET') return Response.json(task)
+  if (talking && request.method === 'POST') return talkAbout(taskTopic(task))
+  if (!talking && request.method === 'GET') return Response.json({ ...task, ...hexAsks()!.of(task.id) })
 }
 
 async function listCalls(url: URL) {

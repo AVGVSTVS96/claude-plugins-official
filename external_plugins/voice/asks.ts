@@ -2,6 +2,7 @@ import { readdirSync, readFileSync, renameSync, watch, writeFileSync } from 'fs'
 import { join } from 'path'
 import type { Ask as Asked } from '../../hub/ledger.ts'
 import { Changes } from './changes.ts'
+import { Check } from './check.ts'
 import { relay } from './relay.ts'
 import { T3, type Fresh, type Stuck } from './t3.ts'
 
@@ -58,17 +59,21 @@ export class Asks extends Changes {
   counts = new Changes()
   private ledgers = new Map<string, Asked[]>()
   private names = new Map<string, string>()
+  private pins = new Map<string, string>()
   private result?: CheckResult
   private marks: Marks
   private pending?: ReturnType<typeof setTimeout>
   private stops: (() => void)[] = []
   private t3: T3
+  private check: (why: string) => void
+  private seen?: { pins: string; t3: string }
 
   constructor(
     private state: string,
-    t3Database?: string,
+    { t3Database, check = why => new Check(state).start(why) }: { t3Database?: string; check?: (why: string) => void } = {},
   ) {
     super()
+    this.check = check
     this.marks = readMarks(join(state, 'voice', 'marks.json'))
     this.t3 = new T3(() => this.schedule(), t3Database)
     for (const app of apps(state)) this.stops.push(watchDir(join(state, app), file => (file === 'ledger.json' || file === 'threads.json') && this.schedule()))
@@ -76,8 +81,18 @@ export class Asks extends Changes {
     this.build()
   }
 
-  get check() {
+  get lastCheck() {
     return this.result
+  }
+
+  // Tasks opened with questions newer than the last check, or a call ended: hex checks again.
+  opened() {
+    const checked = this.result?.at ?? ''
+    if ([...this.ledgers.values()].some(asks => asks.some(ask => !ask.answer && !ask.settled && ask.at > checked))) this.check('you opened Tasks')
+  }
+
+  called() {
+    this.check('a call ended')
   }
 
   close() {
@@ -90,9 +105,9 @@ export class Asks extends Changes {
     return this.view.asks.find(ask => ask.id === id)
   }
 
-  // The thread's own questions, for its page.
+  // The thread's own questions and its pinned status post, for its page.
   of(task: string) {
-    return this.view.asks.filter(ask => ask.task === task)
+    return { asks: this.view.asks.filter(ask => ask.task === task), ...(this.pins.has(task) && { pin: this.pins.get(task) }) }
   }
 
   async answer(id: string, label: string, via: string) {
@@ -181,11 +196,15 @@ export class Asks extends Changes {
 
   private build() {
     this.names.clear()
+    this.pins.clear()
     for (const app of apps(this.state)) {
-      this.ledgers.set(app, readJson(join(this.state, app, 'ledger.json'))?.asks ?? [])
+      const book = readJson(join(this.state, app, 'ledger.json'))
+      this.ledgers.set(app, book?.asks ?? [])
+      for (const [thread, pin] of Object.entries<any>(book?.pins ?? {})) if (pin.text) this.pins.set(`${app}:${thread}`, pin.text)
       for (const [thread, known] of Object.entries<any>(readJson(join(this.state, app, 'threads.json')) ?? {})) this.names.set(`${app}:${thread}`, known.name ?? thread)
     }
     this.result = readJson(join(this.state, 'voice', 'check.json'))
+    this.notice()
     const used = new Set<string>()
     const curated = (this.result?.asks ?? []).flatMap(ask => {
       for (const ref of ask.refs ?? []) used.add(refId(ref))
@@ -211,6 +230,17 @@ export class Asks extends Changes {
     this.view = view
     this.changed()
     if (moved) this.counts.changed()
+  }
+
+  // A pinned post that changed or a T3 run that ended starts a check; the first read only takes note.
+  private notice() {
+    const now = {
+      pins: JSON.stringify([...this.pins]),
+      t3: JSON.stringify([this.t3.stuck, this.t3.fresh].map(items => items.map(item => item.id))),
+    }
+    const why = !this.seen ? undefined : now.pins !== this.seen.pins ? 'a pinned post changed' : now.t3 !== this.seen.t3 ? 'a T3 run ended' : undefined
+    this.seen = now
+    if (why) this.check(why)
   }
 
   private dress(ask: Curated): Ask {
