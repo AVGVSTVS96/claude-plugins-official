@@ -230,3 +230,7 @@ jobs:
           gh api -X PATCH "repos/${GITHUB_REPOSITORY}/git/refs/heads/main" -f sha="$signed" >/dev/null
           gh api "repos/${GITHUB_REPOSITORY}/commits/${signed}" \
             --jq '"synced \(.sha[0:12]), verified: \(.commit.verification.verified)"'
+
+      - name: Capture Claude accounting
+        if: always()
+        uses: AVGVSTVS96/autofork/.github/actions/usage@0fb1e96705913302e556e71c9909966e8da44331
