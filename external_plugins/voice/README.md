@@ -32,6 +32,9 @@ Claude to stop that task.
 3. When the voice model hands off (`session.delegation.created`), the plugin
    waits for the first words spoken after that moment, so the request is fully
    transcribed, then sends Claude everything said since the last handoff.
+   Every message to Claude carries the caller's local time (`time`), and the
+   voice model is told the time the call started, so both can answer "the last
+   ten minutes" without guessing.
 4. Claude answers with its tools:
 
    | Tool | Goes to the voice as | For |

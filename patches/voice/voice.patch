@@ -33,10 +33,10 @@ index 0000000000000000000000000000000000000000..07fdedd6c4bc9e7072f8d860f7eadd42
 +}
 diff --git a/external_plugins/voice/README.md b/external_plugins/voice/README.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..c421510e562538b86ffda15f2c777c211f7a48f0
+index 0000000000000000000000000000000000000000..cdeb777080408b6ac18a688122670702e08dd626
 --- /dev/null
 +++ b/external_plugins/voice/README.md
-@@ -0,0 +1,362 @@
+@@ -0,0 +1,365 @@
 +# voice
 +
 +Live voice calls for Claude Code. OpenAI's `gpt-live-1` talks with you in real
@@ -71,6 +71,9 @@ index 0000000000000000000000000000000000000000..c421510e562538b86ffda15f2c777c21
 +3. When the voice model hands off (`session.delegation.created`), the plugin
 +   waits for the first words spoken after that moment, so the request is fully
 +   transcribed, then sends Claude everything said since the last handoff.
++   Every message to Claude carries the caller's local time (`time`), and the
++   voice model is told the time the call started, so both can answer "the last
++   ten minutes" without guessing.
 +4. Claude answers with its tools:
 +
 +   | Tool | Goes to the voice as | For |
@@ -1887,10 +1890,10 @@ index 0000000000000000000000000000000000000000..0ada79ea59ad789671d2c7bda2164d2e
 +</html>
 diff --git a/external_plugins/voice/server.ts b/external_plugins/voice/server.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..c8fedbdf96ddedb6149305396097577ed9f78ac2
+index 0000000000000000000000000000000000000000..85f9c236e6f7705b5b0af851273e5cba638cb30a
 --- /dev/null
 +++ b/external_plugins/voice/server.ts
-@@ -0,0 +1,1067 @@
+@@ -0,0 +1,1073 @@
 +#!/usr/bin/env bun
 +import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 +import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
@@ -2004,6 +2007,8 @@ index 0000000000000000000000000000000000000000..c8fedbdf96ddedb6149305396097577e
 +When a call starts you get a "call started" message: send the voice, with note, what it should know right away about the caller and what's going on now, in a few short lines.
 +
 +Each handoff arrives as <channel source="voice" delegation_id="..."> with the transcript since the last handoff, oldest first, timestamped from the start of the call: "you" is the caller, "voice" is the voice model. Speech transcripts can mishear words, and the latest correction wins. A late line can belong before one you already got; its timestamp places it.
++
++Every message's time attribute is the caller's local time right now: go by it whenever time matters, like "the last ten minutes" or "tonight". Before you say what's new or how something is going, check its live state right then (claude agents --json and ~/.claude/jobs/<id>/state.json for every session, the newest lines of its thread, the thing itself) and answer from that, never from what you knew earlier in the call or the last message about it.
 +
 +Answer every handoff with say(delegation_id, text): the voice says only what you give it, so you are the one talking. It paraphrases aloud, so write one or two plain spoken sentences, no markdown. Use note for facts the voice should know without saying them yet.
 +
@@ -2297,7 +2302,11 @@ index 0000000000000000000000000000000000000000..c8fedbdf96ddedb6149305396097577e
 +}
 +
 +function deliver(content: string, meta: Record<string, string>) {
-+  void mcp.notification({ method: 'notifications/claude/channel', params: { content, meta } })
++  void mcp.notification({ method: 'notifications/claude/channel', params: { content, meta: { ...meta, time: clock() } } })
++}
++
++function clock() {
++  return new Date().toLocaleString('en-US', { weekday: 'long', month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' })
 +}
 +
 +function ring(call: Live, { delegation, offset }: Ring) {
@@ -2717,7 +2726,7 @@ index 0000000000000000000000000000000000000000..c8fedbdf96ddedb6149305396097577e
 +function session(extra: object = {}) {
 +  return {
 +    model: 'gpt-live-1',
-+    instructions: VOICE_PROMPT,
++    instructions: `${VOICE_PROMPT}\n\nThe call started ${clock()}, the caller's local time.`,
 +    delegation: { type: 'client' },
 +    ...extra,
 +  }

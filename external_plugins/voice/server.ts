@@ -112,6 +112,8 @@ When a call starts you get a "call started" message: send the voice, with note, 
 
 Each handoff arrives as <channel source="voice" delegation_id="..."> with the transcript since the last handoff, oldest first, timestamped from the start of the call: "you" is the caller, "voice" is the voice model. Speech transcripts can mishear words, and the latest correction wins. A late line can belong before one you already got; its timestamp places it.
 
+Every message's time attribute is the caller's local time right now: go by it whenever time matters, like "the last ten minutes" or "tonight". Before you say what's new or how something is going, check its live state right then (claude agents --json and ~/.claude/jobs/<id>/state.json for every session, the newest lines of its thread, the thing itself) and answer from that, never from what you knew earlier in the call or the last message about it.
+
 Answer every handoff with say(delegation_id, text): the voice says only what you give it, so you are the one talking. It paraphrases aloud, so write one or two plain spoken sentences, no markdown. Use note for facts the voice should know without saying them yet.
 
 Keep each turn quick so the next handoff reaches you fast. Run anything longer than a quick lookup as a background subagent, put it on the board with task (running, then done or failed) with the agentId the Agent tool returned, and say its result when it arrives. The caller sees each step the agent takes. Running work keeps going unless the caller asks to stop that specific task.
@@ -404,7 +406,11 @@ async function hangUpCall(call: Live) {
 }
 
 function deliver(content: string, meta: Record<string, string>) {
-  void mcp.notification({ method: 'notifications/claude/channel', params: { content, meta } })
+  void mcp.notification({ method: 'notifications/claude/channel', params: { content, meta: { ...meta, time: clock() } } })
+}
+
+function clock() {
+  return new Date().toLocaleString('en-US', { weekday: 'long', month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' })
 }
 
 function ring(call: Live, { delegation, offset }: Ring) {
@@ -824,7 +830,7 @@ function hangUp(twilio: Bun.ServerWebSocket<Phone>) {
 function session(extra: object = {}) {
   return {
     model: 'gpt-live-1',
-    instructions: VOICE_PROMPT,
+    instructions: `${VOICE_PROMPT}\n\nThe call started ${clock()}, the caller's local time.`,
     delegation: { type: 'client' },
     ...extra,
   }
