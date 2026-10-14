@@ -25,9 +25,9 @@ function job(session: string, record: object, timeline: object[] = []) {
   writeFileSync(join(dir, 'state.json'), JSON.stringify(record))
 }
 
-function running(session: string, status: 'busy' | 'idle', pid = process.pid) {
+function running(session: string, status: 'busy' | 'idle', pid = process.pid, more: object = {}) {
   mkdirSync(join(claude, 'sessions'), { recursive: true })
-  writeFileSync(join(claude, 'sessions', `${session.slice(0, 8)}.json`), JSON.stringify({ pid, sessionId: session, status }))
+  writeFileSync(join(claude, 'sessions', `${session.slice(0, 8)}.json`), JSON.stringify({ pid, sessionId: session, status, ...more }))
 }
 
 function step(path: string, name: string, input: object) {
@@ -42,13 +42,14 @@ async function until(check: () => boolean) {
 
 mkdirSync(join(claude, 'jobs'), { recursive: true })
 mkdirSync(join(claude, 'sessions'), { recursive: true })
-threads('telegram', {
+const telegram = {
   '-1004422245734': { name: 'hex', session: 'aaaaaaaa-general' },
   '-1004422245734:908': { name: 'autofork', session: 'bbbbbbbb-autofork' },
   '-1004422245734:2583': { name: 'voiceapp', session: 'cccccccc-voiceapp' },
   '-1004422245734:65': { name: 'Theo clips', session: 'dddddddd-theo' },
   '-1004422245734:72': { name: 'Leisure time', session: 'eeeeeeee-leisure' },
-})
+}
+threads('telegram', telegram)
 threads('buzz', { b1: { name: 'Old news', session: 'ffffffff-old' } })
 job('aaaaaaaa-general', { state: 'done', detail: 'heartbeat ran', updatedAt: ago(5) })
 const asked = ago(40)
@@ -136,6 +137,32 @@ test('a new thread shows up when its app writes threads.json, once its session h
   await until(() => tasks.get('discord:d1')?.state === 'failed')
   expect(tasks.get('discord:d1')).toMatchObject({ where: 'Discord', line: "You've hit your weekly limit" })
   expect(tasks.get('discord:d1')!.link).toBeUndefined()
+})
+
+test("a thread whose turn ended stays working while its workflow runs, each workflow agent with its own steps", async () => {
+  threads('telegram', { ...telegram, '-1004422245734:513': { name: 'antibody', session: '51351351-antibody' } })
+  job('51351351-antibody', { state: 'working', detail: 'Phase 1 resumed', updatedAt: ago(0), fan: [{ id: 'wfbills', kind: 'workflow', label: 'build:bills' }, { id: 'sh', kind: 'shell', label: 'sleep' }], inFlight: { tasks: 1, kinds: ['local_workflow'] } }, [
+    { at: ago(3), state: 'working', detail: 'Phase 1 resumed', text: 'Resumed Phase 1' },
+  ])
+  running('51351351-antibody', 'idle')
+  const antibody = () => tasks.get('telegram:-1004422245734:513')
+  await until(() => antibody()?.state === 'working')
+  expect(antibody()!.agents.map(agent => [agent.label, agent.state])).toEqual([['build:bills', 'working']])
+  step(join(project, '51351351-antibody', 'subagents', 'workflows', 'wf_1', 'agent-wfbills.jsonl'), 'Read', { file_path: '/repo/bills.ts' })
+  await until(() => antibody()?.agents[0].line === 'Reading bills.ts')
+})
+
+test('a background session no thread holds is a task of its own while it works', async () => {
+  job('12121212-review', { state: 'working', detail: 'reviewing autofork', updatedAt: ago(0) })
+  job('34343434-probe', { state: 'done', detail: 'probe ran', updatedAt: ago(0) })
+  running('12121212-review', 'busy', process.pid, { kind: 'bg', name: 'autofork-review', cwd: '/repo' })
+  running('34343434-probe', 'idle', process.pid, { kind: 'bg', name: 'probe' })
+  running('56565656-terminal', 'busy', process.pid, { kind: 'interactive', name: 'bassim-1' })
+  await until(() => tasks.get('claude:12121212')?.state === 'working')
+  expect(tasks.get('claude:12121212')).toMatchObject({ name: 'autofork-review', where: 'Claude Code', line: 'reviewing autofork' })
+  expect(tasks.tasks.filter(task => task.app === 'claude').map(task => task.name)).toEqual(['autofork-review'])
+  job('12121212-review', { state: 'done', detail: 'reviewed', updatedAt: ago(0) })
+  await until(() => !tasks.get('claude:12121212'))
 })
 
 test('talking a task through tells the voice which thread it is and where it stands', () => {

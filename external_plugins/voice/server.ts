@@ -193,7 +193,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
             name: 'send',
             _meta: { 'anthropic/alwaysLoad': true },
             description:
-              "Hand work to a hex thread, by its name or id: your message reaches that thread's session from hex voice, the work goes on the board as running, the caller sees each step the thread takes on it, and the board shows it done or failed when the thread's turn ends with none of its agents still out.",
+              "Hand work to a hex thread, by its name or id: your message reaches that thread's session from hex voice, the work goes on the board as running, the caller sees each step the thread takes on it, and the board shows it done or failed once the thread's work is, its background agents and workflows included.",
             inputSchema: {
               type: 'object',
               properties: {
@@ -348,7 +348,25 @@ function resume() {
 }
 
 function watch(call: string, id: string, thread: Thread, resumed: boolean) {
-  follows.set(`${call} ${id}`, followThread(thread, dirname(HEX_STATE!), `${call}:${id}`, resumed, step => see(call, id, step)))
+  follows.set(`${call} ${id}`, followThread(thread, dirname(HEX_STATE!), `${call}:${id}`, resumed, step => (step.end ? settle(call, id, thread, step.end) : see(call, id, step))))
+}
+
+// The turn that took the message in has ended, but the thread's work may not have: the board keeps
+// a thread working while its background agents, workflows or next turns run, so the task follows
+// the board's row until it rests.
+function settle(call: string, id: string, thread: Thread, end: NonNullable<Step['end']>) {
+  const board = hexTasks()!
+  const check = () => {
+    const row = board.get(`${thread.app}:${thread.id}`)
+    if (row?.state === 'working') see(call, id, { line: newest(row) })
+    else see(call, id, { end: row?.state === 'failed' ? 'failed' : end })
+  }
+  follows.set(`${call} ${id}`, board.listen(check))
+  check()
+}
+
+function newest(row: HexTask) {
+  return row.agents.find(agent => agent.state === 'working' && agent.line)?.line ?? row.line
 }
 
 function fresh(call: string, about: string) {
@@ -949,7 +967,16 @@ process.stdin.on('close', () => process.exit(0))
 async function showActivity(url: URL) {
   const after = url.searchParams.get('after')
   if (after) await activity.changes(Number(after), 25_000)
-  return Response.json({ version: activity.version, call: live?.id ?? null, tasks: live?.call.activity() ?? [], asks: live ? cards(live) : [] })
+  return Response.json({ version: activity.version, call: live?.id ?? null, tasks: live ? [...live.call.activity(), ...elsewhere(live)] : [], asks: live ? cards(live) : [] })
+}
+
+// Everything else hex is working on, from the board: every thread and background session at work
+// that the call isn't already following, so a call shows all of it and not only what it sent.
+function elsewhere(call: Live): (Task & { line?: string })[] {
+  const following = new Set(call.call.activity().flatMap(task => (task.state === 'running' && task.agent ? [task.agent] : [])))
+  return (hexTasks()?.tasks ?? [])
+    .filter(row => row.state === 'working' && row.app !== 'voice' && !following.has(row.thread))
+    .map(row => ({ id: row.id, state: 'running', text: row.name, to: row.name, line: newest(row) }))
 }
 
 // The asks put on screen in this call, in order, each with its answer once it has one.
@@ -967,7 +994,10 @@ function topicOf(about?: string): Topic | undefined {
 }
 
 function hexTasks() {
-  return HEX_STATE ? (board ??= new Tasks(HEX_STATE, dirname(HEX_STATE))) : undefined
+  if (!HEX_STATE || board) return board
+  board = new Tasks(HEX_STATE, dirname(HEX_STATE))
+  board.listen(() => activity.changed())
+  return board
 }
 
 function hexAsks() {

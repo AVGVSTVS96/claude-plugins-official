@@ -1,4 +1,4 @@
-import { closeSync, fstatSync, openSync, readdirSync, readFileSync, readSync, watch, type FSWatcher } from 'fs'
+import { closeSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, watch, type FSWatcher } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 import { followTranscript, headline, sizeOf } from './activity.ts'
@@ -28,6 +28,7 @@ export type HexTask = {
 }
 
 type Thread = { app: string; id: string; name: string; session?: string; cwd?: string }
+type Session = { status: string; kind?: string; name?: string; cwd?: string }
 type Job = {
   state?: string
   detail?: string
@@ -46,11 +47,13 @@ const STEPS = 12
 const KEEP = 7 * 24 * 60 * 60_000
 const ORDER: State[] = ['needs', 'working', 'done', 'failed', 'idle']
 const STATES: Record<string, State> = { working: 'working', blocked: 'needs', done: 'done', failed: 'failed' }
-const APPS: Record<string, string> = { telegram: 'Telegram', discord: 'Discord', buzz: 'Buzz', t3: 'T3 Code', voice: 'Voice' }
+const APPS: Record<string, string> = { telegram: 'Telegram', discord: 'Discord', buzz: 'Buzz', t3: 'T3 Code', voice: 'Voice', claude: 'Claude Code' }
+const WORK = new Set(['agent', 'workflow'])
 
 // Every hex thread as a task, from the records Claude Code already keeps (the same ones
 // `claude agents --json` prints): each session's job state and timeline, which sessions are
-// running, and each app's threads.json for its name. It wakes when one of those files changes,
+// running, and each app's threads.json for its name. A background session no thread holds is a
+// task of its own while it works. It wakes when one of those files changes,
 // follows a working thread's transcript for its newest step, and bumps a version on any change.
 // The counts behind the app's Tasks button keep their own version, so it hears only when one moves.
 export class Tasks extends Changes {
@@ -59,7 +62,7 @@ export class Tasks extends Changes {
   counts = new Changes()
   private threads: Thread[] = []
   private jobs = new Map<string, { job?: Job; timeline: Entry[] }>()
-  private sessions = new Map<string, string>()
+  private sessions = new Map<string, Session>()
   private watchers = new Map<string, FSWatcher>()
   private appWatchers = new Map<string, () => void>()
   private followers = new Map<string, Follower>()
@@ -100,7 +103,7 @@ export class Tasks extends Changes {
   }
 
   private jobChanged(short: string | null) {
-    if (!short || !this.threads.some(thread => thread.session?.startsWith(short))) return
+    if (!short || !this.wanted().has(short)) return
     this.jobs.delete(short)
     this.watchJob(short)
     this.schedule()
@@ -115,9 +118,11 @@ export class Tasks extends Changes {
   private build() {
     if (this.stale.threads) this.readThreads()
     if (this.stale.sessions) this.readSessions()
+    if (this.stale.threads || this.stale.sessions) this.watchJobs()
     this.stale = { threads: false, sessions: false }
     const since = new Date(Date.now() - KEEP).toISOString()
-    const tasks = this.threads.map(thread => this.task(thread)).filter(task => task.state === 'needs' || task.state === 'working' || task.at > since)
+    const threads = this.threads.map(thread => this.task(thread)).filter(task => task.state === 'needs' || task.state === 'working' || task.at > since)
+    const tasks = [...threads, ...this.loose().map(thread => this.task(thread)).filter(task => task.state === 'working')]
     this.follow(tasks)
     tasks.sort((a, b) => ORDER.indexOf(a.state) - ORDER.indexOf(b.state) || b.at.localeCompare(a.at))
     if (JSON.stringify(tasks) === JSON.stringify(this.tasks)) return
@@ -141,7 +146,22 @@ export class Tasks extends Changes {
         cwd: thread.cwd,
       })),
     )
-    const wanted = new Set(this.threads.flatMap(thread => (thread.session ? [short(thread.session)] : [])))
+  }
+
+  // Background sessions that are running but aren't any thread's session, named as Claude Code named them.
+  private loose(): Thread[] {
+    const held = new Set(this.threads.map(thread => thread.session))
+    return [...this.sessions]
+      .filter(([id, session]) => session.kind === 'bg' && !held.has(id))
+      .map(([id, session]) => ({ app: 'claude', id: short(id), name: session.name ?? short(id), session: id, cwd: session.cwd }))
+  }
+
+  private wanted() {
+    return new Set([...this.threads, ...this.loose()].flatMap(thread => (thread.session ? [short(thread.session)] : [])))
+  }
+
+  private watchJobs() {
+    const wanted = this.wanted()
     for (const [id, watcher] of this.watchers) {
       if (wanted.has(id)) continue
       watcher.close()
@@ -165,7 +185,8 @@ export class Tasks extends Changes {
     for (const name of list(dir)) {
       if (!name.endsWith('.json')) continue
       const session = readJson(join(dir, name))
-      if (session?.sessionId && alive(session.pid)) this.sessions.set(session.sessionId, session.status ?? 'idle')
+      if (session?.sessionId && alive(session.pid))
+        this.sessions.set(session.sessionId, { status: session.status ?? 'idle', kind: session.kind, name: session.name, cwd: session.cwd })
     }
   }
 
@@ -182,7 +203,7 @@ export class Tasks extends Changes {
 
   private task(thread: Thread): HexTask {
     const { job, timeline } = thread.session ? this.job(thread.session) : { job: undefined, timeline: [] }
-    const status = thread.session && this.sessions.get(thread.session)
+    const status = thread.session && this.sessions.get(thread.session)?.status
     const running = !!status
     let state: State = (job?.state && STATES[job.state]) ?? (status === 'busy' ? 'working' : 'idle')
     if ((state === 'working' && !running) || job?.detail?.startsWith('(idle')) state = 'idle'
@@ -198,7 +219,7 @@ export class Tasks extends Changes {
     const steps = state === 'working' ? this.steps(thread.session!) : []
     const line = steps[0]?.text ?? needs ?? detail ?? lately[0]?.text ?? ''
     const agents = (state === 'working' ? (job?.fan ?? []) : [])
-      .filter(fan => fan.kind === 'agent' && (!fan.doneAt || fan.doneAt >= Date.parse(since)))
+      .filter(fan => WORK.has(fan.kind) && (!fan.doneAt || fan.doneAt >= Date.parse(since)))
       .map(({ id, label, doneAt }): Agent => {
         const steps = this.steps(`${thread.session} ${id}`)
         return { id, label, state: doneAt ? 'done' : 'working', ...(steps[0] && { line: steps[0].text }), steps }
@@ -227,34 +248,46 @@ export class Tasks extends Changes {
     return [...(this.followers.get(key)?.steps ?? [])].reverse()
   }
 
-  // A working thread's transcript, and its subagents' from this stretch of work, give its steps.
+  // A working thread's transcript, and its subagents' and workflow agents' from this stretch of
+  // work, give its steps.
   private follow(tasks: HexTask[]) {
-    const wanted = new Map<string, string>()
+    const wanted = new Map<string, (path: (found: string) => () => void) => () => void>()
+    const threads = [...this.threads, ...this.loose()]
     for (const task of tasks) {
       if (task.state !== 'working') continue
-      const thread = this.threads.find(thread => `${thread.app}:${thread.id}` === task.id)!
-      const project = join(this.claude, 'projects', (this.job(thread.session!).job?.cwd ?? thread.cwd ?? this.hexDir).replace(/[^a-zA-Z0-9]/g, '-'))
-      wanted.set(thread.session!, join(project, `${thread.session}.jsonl`))
-      for (const agent of task.agents) wanted.set(`${thread.session} ${agent.id}`, join(project, thread.session!, 'subagents', `agent-${agent.id}.jsonl`))
+      const thread = threads.find(thread => `${thread.app}:${thread.id}` === task.id)!
+      const session = thread.session!
+      const job = this.job(session).job
+      const project = join(this.claude, 'projects', (job?.cwd ?? thread.cwd ?? this.hexDir).replace(/[^a-zA-Z0-9]/g, '-'))
+      const subagents = join(project, session, 'subagents')
+      wanted.set(session, follow => follow(join(project, `${session}.jsonl`)))
+      for (const agent of task.agents)
+        wanted.set(`${session} ${agent.id}`, follow =>
+          job?.fan?.find(one => one.id === agent.id)?.kind === 'workflow'
+            ? inRun(join(subagents, 'workflows'), `agent-${agent.id}.jsonl`, follow)
+            : follow(join(subagents, `agent-${agent.id}.jsonl`)),
+        )
     }
     for (const [key, follower] of this.followers) {
       if (wanted.has(key)) continue
       follower.stop()
       this.followers.delete(key)
     }
-    for (const [key, path] of wanted) {
+    for (const [key, start] of wanted) {
       if (this.followers.has(key)) continue
       const follower: Follower = { stop: () => {}, steps: [] }
       this.followers.set(key, follower)
-      follower.stop = followTranscript(path, Math.max(0, sizeOf(path) - TAIL), (entry, updates) => {
-        for (const update of updates()) {
-          const text = headline(update)
-          if (!text || text === follower.steps.at(-1)?.text) continue
-          follower.steps.push({ at: entry.timestamp ?? new Date().toISOString(), text: oneLine(text) })
-          if (follower.steps.length > STEPS) follower.steps.shift()
-        }
-        this.schedule()
-      })
+      follower.stop = start(path =>
+        followTranscript(path, Math.max(0, sizeOf(path) - TAIL), (entry, updates) => {
+          for (const update of updates()) {
+            const text = headline(update)
+            if (!text || text === follower.steps.at(-1)?.text) continue
+            follower.steps.push({ at: entry.timestamp ?? new Date().toISOString(), text: oneLine(text) })
+            if (follower.steps.length > STEPS) follower.steps.shift()
+          }
+          this.schedule()
+        }),
+      )
     }
   }
 }
@@ -295,6 +328,25 @@ function streak(timeline: Entry[], state?: string) {
   let since: string | undefined
   for (let i = timeline.length - 1; i >= 0 && timeline[i].state === state; i--) since = timeline[i].at
   return since
+}
+
+// A workflow agent's transcript lands in its run's own folder, so it's followed once it's written there.
+function inRun(runs: string, name: string, follow: (path: string) => () => void) {
+  let stop: (() => void) | undefined
+  mkdirSync(runs, { recursive: true })
+  const watcher = watch(runs, { recursive: true }, (_, file) => file?.endsWith(name) && find())
+  find()
+  return () => {
+    watcher.close()
+    stop?.()
+  }
+
+  function find() {
+    const path = !stop && new Bun.Glob(`*/${name}`).scanSync({ cwd: runs, absolute: true }).next().value
+    if (!path) return
+    watcher.close()
+    stop = follow(path)
+  }
 }
 
 function short(session: string) {
