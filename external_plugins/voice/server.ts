@@ -484,7 +484,7 @@ function finish(call: Live, reason: string, by?: string) {
     [`The call ended: ${ENDINGS[end]} (${reason}). Name it with title.`, ...(rest.length ? ['Last words:', transcript(rest)] : [])].join('\n'),
     { call: call.id, ended: end, reason },
   )
-  tell('renew')
+  stand('renew')
   call.socket.onclose = null
   call.socket.close()
 }
@@ -514,7 +514,7 @@ function follow(socket: WebSocket, record: Live['record'], { call = new Call(), 
   live = current
   save(current)
   activity.changed()
-  tell('keep')
+  stand('keep')
   listen(current, socket)
   warn(current)
   deliver(
@@ -689,12 +689,12 @@ function closeOut(record: CallRecord) {
   calls.save({ ...record, ended: new Date(Date.parse(record.started) + heard).toISOString(), end: 'dropped', reason })
   trace(`closed out ${record.id}: it never got an end`)
   deliver(`The call ended: ${ENDINGS.dropped} (${reason}). Name it with title.`, { call: record.id, ended: 'dropped', reason })
-  if (!live) tell('renew')
+  if (!live) stand('renew')
 }
 
 // The hub learns when a call starts (keep) or ends (renew), and hears it again after every
 // hello, since a hello clears what the hub knew of the session before it.
-function tell(type: 'keep' | 'renew') {
+function stand(type: 'keep' | 'renew') {
   standing = type
   hub?.write(JSON.stringify({ type, thread: THREAD }) + '\n')
 }

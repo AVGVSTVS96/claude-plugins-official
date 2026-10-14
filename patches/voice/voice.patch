@@ -1521,13 +1521,14 @@ index 0000000000000000000000000000000000000000..bf99b7abd3335c71c446a3b541df58df
 +}
 diff --git a/external_plugins/voice/changes.ts b/external_plugins/voice/changes.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..8b43569416466e50c388e80f9cf8baf9693f9661
+index 0000000000000000000000000000000000000000..e104c27234643ab5b1f431b40bae2826f7d7ffd5
 --- /dev/null
 +++ b/external_plugins/voice/changes.ts
-@@ -0,0 +1,22 @@
+@@ -0,0 +1,28 @@
 +export class Changes {
 +  version = Date.now()
 +  private waiting = new Set<() => void>()
++  private listeners = new Set<() => void>()
 +
 +  changes(after: number, wait: number) {
 +    if (after !== this.version) return Promise.resolve()
@@ -1542,9 +1543,14 @@ index 0000000000000000000000000000000000000000..8b43569416466e50c388e80f9cf8baf9
 +    })
 +  }
 +
++  listen(listener: () => void) {
++    this.listeners.add(listener)
++    return () => void this.listeners.delete(listener)
++  }
++
 +  changed() {
 +    this.version = Math.max(this.version + 1, Date.now())
-+    for (const done of [...this.waiting]) done()
++    for (const done of [...this.waiting, ...this.listeners]) done()
 +  }
 +}
 diff --git a/external_plugins/voice/door.test.ts b/external_plugins/voice/door.test.ts
@@ -1945,10 +1951,10 @@ index 0000000000000000000000000000000000000000..0ada79ea59ad789671d2c7bda2164d2e
 +</html>
 diff --git a/external_plugins/voice/server.ts b/external_plugins/voice/server.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..5cb733c5c395d65b9fa013a525ce21a1352f4751
+index 0000000000000000000000000000000000000000..24dda69d15f793110521217d32c16b425a391b88
 --- /dev/null
 +++ b/external_plugins/voice/server.ts
-@@ -0,0 +1,1101 @@
+@@ -0,0 +1,1131 @@
 +#!/usr/bin/env bun
 +import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 +import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
@@ -2144,7 +2150,7 @@ index 0000000000000000000000000000000000000000..5cb733c5c395d65b9fa013a525ce21a1
 +            name: 'send',
 +            _meta: { 'anthropic/alwaysLoad': true },
 +            description:
-+              "Hand work to a hex thread, by its name or id: your message reaches that thread's session from hex voice, the work goes on the board as running, the caller sees each step the thread takes on it, and the board shows it done or failed when the thread's turn ends with none of its agents still out.",
++              "Hand work to a hex thread, by its name or id: your message reaches that thread's session from hex voice, the work goes on the board as running, the caller sees each step the thread takes on it, and the board shows it done or failed once the thread's work is, its background agents and workflows included.",
 +            inputSchema: {
 +              type: 'object',
 +              properties: {
@@ -2299,7 +2305,25 @@ index 0000000000000000000000000000000000000000..5cb733c5c395d65b9fa013a525ce21a1
 +}
 +
 +function watch(call: string, id: string, thread: Thread, resumed: boolean) {
-+  follows.set(`${call} ${id}`, followThread(thread, dirname(HEX_STATE!), `${call}:${id}`, resumed, step => see(call, id, step)))
++  follows.set(`${call} ${id}`, followThread(thread, dirname(HEX_STATE!), `${call}:${id}`, resumed, step => (step.end ? settle(call, id, thread, step.end) : see(call, id, step))))
++}
++
++// The turn that took the message in has ended, but the thread's work may not have: the board keeps
++// a thread working while its background agents, workflows or next turns run, so the task follows
++// the board's row until it rests.
++function settle(call: string, id: string, thread: Thread, end: NonNullable<Step['end']>) {
++  const board = hexTasks()!
++  const check = () => {
++    const row = board.get(`${thread.app}:${thread.id}`)
++    if (row?.state === 'working') see(call, id, { line: newest(row) })
++    else see(call, id, { end: row?.state === 'failed' ? 'failed' : end })
++  }
++  follows.set(`${call} ${id}`, board.listen(check))
++  check()
++}
++
++function newest(row: HexTask) {
++  return row.agents.find(agent => agent.state === 'working' && agent.line)?.line ?? row.line
 +}
 +
 +function fresh(call: string, about: string) {
@@ -2417,7 +2441,7 @@ index 0000000000000000000000000000000000000000..5cb733c5c395d65b9fa013a525ce21a1
 +    [`The call ended: ${ENDINGS[end]} (${reason}). Name it with title.`, ...(rest.length ? ['Last words:', transcript(rest)] : [])].join('\n'),
 +    { call: call.id, ended: end, reason },
 +  )
-+  tell('renew')
++  stand('renew')
 +  call.socket.onclose = null
 +  call.socket.close()
 +}
@@ -2447,7 +2471,7 @@ index 0000000000000000000000000000000000000000..5cb733c5c395d65b9fa013a525ce21a1
 +  live = current
 +  save(current)
 +  activity.changed()
-+  tell('keep')
++  stand('keep')
 +  listen(current, socket)
 +  warn(current)
 +  deliver(
@@ -2622,12 +2646,12 @@ index 0000000000000000000000000000000000000000..5cb733c5c395d65b9fa013a525ce21a1
 +  calls.save({ ...record, ended: new Date(Date.parse(record.started) + heard).toISOString(), end: 'dropped', reason })
 +  trace(`closed out ${record.id}: it never got an end`)
 +  deliver(`The call ended: ${ENDINGS.dropped} (${reason}). Name it with title.`, { call: record.id, ended: 'dropped', reason })
-+  if (!live) tell('renew')
++  if (!live) stand('renew')
 +}
 +
 +// The hub learns when a call starts (keep) or ends (renew), and hears it again after every
 +// hello, since a hello clears what the hub knew of the session before it.
-+function tell(type: 'keep' | 'renew') {
++function stand(type: 'keep' | 'renew') {
 +  standing = type
 +  hub?.write(JSON.stringify({ type, thread: THREAD }) + '\n')
 +}
@@ -2900,7 +2924,16 @@ index 0000000000000000000000000000000000000000..5cb733c5c395d65b9fa013a525ce21a1
 +async function showActivity(url: URL) {
 +  const after = url.searchParams.get('after')
 +  if (after) await activity.changes(Number(after), 25_000)
-+  return Response.json({ version: activity.version, call: live?.id ?? null, tasks: live?.call.activity() ?? [], asks: live ? cards(live) : [] })
++  return Response.json({ version: activity.version, call: live?.id ?? null, tasks: live ? [...live.call.activity(), ...elsewhere(live)] : [], asks: live ? cards(live) : [] })
++}
++
++// Everything else hex is working on, from the board: every thread and background session at work
++// that the call isn't already following, so a call shows all of it and not only what it sent.
++function elsewhere(call: Live): (Task & { line?: string })[] {
++  const following = new Set(call.call.activity().flatMap(task => (task.state === 'running' && task.agent ? [task.agent] : [])))
++  return (hexTasks()?.tasks ?? [])
++    .filter(row => row.state === 'working' && row.app !== 'voice' && !following.has(row.thread))
++    .map(row => ({ id: row.id, state: 'running', text: row.name, to: row.name, line: newest(row) }))
 +}
 +
 +// The asks put on screen in this call, in order, each with its answer once it has one.
@@ -2918,7 +2951,10 @@ index 0000000000000000000000000000000000000000..5cb733c5c395d65b9fa013a525ce21a1
 +}
 +
 +function hexTasks() {
-+  return HEX_STATE ? (board ??= new Tasks(HEX_STATE, dirname(HEX_STATE))) : undefined
++  if (!HEX_STATE || board) return board
++  board = new Tasks(HEX_STATE, dirname(HEX_STATE))
++  board.listen(() => activity.changed())
++  return board
 +}
 +
 +function hexAsks() {
