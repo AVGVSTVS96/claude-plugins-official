@@ -48,31 +48,31 @@ const IDENTITY = (() => {
   try {
     return readFileSync(process.env.VOICE_INSTRUCTIONS ?? join(STATE_DIR, 'instructions.md'), 'utf8').trim()
   } catch {
-    return 'You are the voice of a personal assistant, talking with the person it works for.'
+    return 'You are the voice of a personal assistant, on a live call with the person it works for. Speak warmly and naturally, like a sharp friend: plain words, short answers.'
   }
 })()
 
 const VOICE_PROMPT = `${IDENTITY}
 
-Speak warmly and naturally, like a sharp friend: plain words, short answers.
-
 Backchannel policy: Use light backchannels. Acknowledge naturally without competing with the main response.
 
-Interruption policy: Stop speaking when the user interrupts. Listen to what they say.
+Interruption policy: Stop speaking when the caller interrupts. Listen to what they say.
 
 Delegation policy:
 Backend tools:
-- Assistant: the real assistant, an agent with the user's files, machines, projects, memory, messages, email, calendar and the web. It can look things up, take actions and run long tasks in the background. It does the thinking; you are its voice.
+- Assistant: the agent behind your voice, with the caller's files, machines, projects, memory, messages, email, calendar and the web. It looks things up, takes actions and runs long tasks in the background.
 
 Delegate to the backend when:
-- The user asks anything, says anything that needs an answer, or asks for anything to be done. That is almost every turn, including questions about you, about them, and how a task is going.
+- The caller asks something or wants something done, including questions about you, about them, and how a task is going.
 - A correction or addition changes work already requested.
 
 Do not delegate to the backend when:
-- The user only greets you, thanks you, or asks you to repeat what the backend just said.
+- You can answer from the conversation or a still-current result, like repeating what the backend just said.
+- The caller only greets or thanks you.
+- You need a brief clarification to understand the request.
 
-Delegate before you answer. While the backend works, say a few words like "one sec" and wait for its result; then say what it gave you. Every answer you give comes from the backend, never from your own knowledge.
-Backend work keeps running while you talk, and several tasks can run at once. A task board arrives as quiet context whenever a task starts or finishes.`
+Delegate before you answer anything that depends on backend work. While it works, tell the caller in a few words of your own that you're on it, then wait for its result without guessing it, and say what it gave you. Facts you give come from the backend or the conversation, never from your own knowledge.
+Backend work keeps running while you talk, and several tasks can run at once. Each time a task starts or finishes, its new state arrives as quiet context.`
 
 type Pending = { resolve: () => void; reject: (error: Error) => void }
 type Ring = { delegation: string; offset: number }
@@ -136,6 +136,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
       name: 'say',
+      _meta: { 'anthropic/alwaysLoad': true },
       description: 'Give the voice model a result to say aloud for a handoff. It paraphrases, so write one or two plain spoken sentences.',
       inputSchema: {
         type: 'object',
@@ -145,6 +146,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'note',
+      _meta: { 'anthropic/alwaysLoad': true },
       description: 'Give the voice model a fact to know without saying it now. Pass delegation_id when it belongs to a handoff. While a call you placed is ringing, it waits and reaches the voice when the call connects.',
       inputSchema: {
         type: 'object',
@@ -154,6 +156,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'task',
+      _meta: { 'anthropic/alwaysLoad': true },
       description:
         "Put a task on the board the voice model reads to answer status questions: running when it starts, then done or failed. After its call ends, pass that call's id to update its record.",
       inputSchema: {
@@ -187,6 +190,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
           {
             name: 'send',
+            _meta: { 'anthropic/alwaysLoad': true },
             description:
               "Hand work to a hex thread, by its name or id: your message reaches that thread's session from hex voice, the work goes on the board as running, the caller sees each step the thread takes on it, and the board shows it done or failed when the thread's turn ends with none of its agents still out.",
             inputSchema: {
@@ -366,7 +370,7 @@ async function mark(call: string, task: Task) {
     live.call.track(task, Date.now() - Date.parse(live.record.started))
     save(live)
     activity.changed()
-    await send(live, 'session.thinking.append', live.call.board())
+    await send(live, 'session.thinking.append', live.call.change(task.id))
     return 'board updated'
   }
   const record = past(call)
@@ -504,13 +508,7 @@ function follow(socket: WebSocket, record: Live['record'], { call = new Call(), 
     { call: record.id, started: 'true', ...(about && { task: about.id }) },
   )
   for (const text of briefing.splice(0)) void tell(current, 'note', text).catch(() => {})
-  if (about) whenOpen(socket, () => void send(current, 'session.instructions.append', about.voice).catch(() => {}))
   return current
-}
-
-function whenOpen(socket: WebSocket, then: () => void) {
-  if (socket.readyState === WebSocket.OPEN) then()
-  else socket.addEventListener('open', then, { once: true })
 }
 
 // What a call is about when the app starts it on something: what Claude hears, and what the voice
@@ -755,7 +753,7 @@ function answer(twilio: Bun.ServerWebSocket<Phone>) {
   openai.onopen = () =>
     openai.send(JSON.stringify({
       type: 'session.start',
-      session: session({ audio: { format: { type: 'audio/pcmu', rate: 8000 }, ...(VOICE ? { output: { voice: VOICE } } : {}) } }),
+      session: session({ audio: { format: { type: 'audio/pcmu', rate: 8000 }, ...(VOICE ? { output: { voice: VOICE } } : {}) } }, twilio.data.greeting),
     }))
   openai.addEventListener('message', ({ data }) => {
     const event = JSON.parse(String(data))
@@ -766,7 +764,6 @@ function answer(twilio: Bun.ServerWebSocket<Phone>) {
     if (call) call.session = event.session.id
     const record = base(event.session.id, twilio.data.from, { voice: VOICE, why: twilio.data.why, expires: expiry(event.session.expires_at) })
     follow(openai, record, { speak: audio => twilio.send(JSON.stringify({ event: 'media', streamSid: twilio.data.stream, media: { payload: audio } })) })
-    openai.send(JSON.stringify({ type: 'session.instructions.append', delegation_id: null, content: twilio.data.greeting }))
   })
   openai.addEventListener('close', ({ code, reason }) => {
     trace(`OpenAI closed the phone session (${code} ${reason})`)
@@ -834,11 +831,12 @@ function hangUp(twilio: Bun.ServerWebSocket<Phone>) {
   if (openai?.readyState === WebSocket.OPEN) openai.send(JSON.stringify({ type: 'session.close', event_id: 'close-you-phone' }))
 }
 
-function session(extra: object = {}) {
+function session(extra: object = {}, opening?: string) {
   return {
     model: 'gpt-live-1',
     instructions: `${VOICE_PROMPT}\n\nThe call started ${clock()}, the caller's local time.`,
     delegation: { type: 'client' },
+    ...(opening && { input: [{ type: 'message', role: 'developer', content: [{ type: 'input_text', text: opening }] }] }),
     ...extra,
   }
 }
@@ -848,6 +846,7 @@ async function start(request: Request) {
   const { sdp, voice = VOICE, from: origin, about } = (await request.json()) as { sdp?: string; voice?: string; from?: string; about?: string }
   if (!sdp) return new Response('An SDP offer is required', { status: 400 })
   const from = origin === 'app' ? 'app' : 'web'
+  const topic = topicOf(about)
   let response: Response
   try {
     response = await fetch(API, {
@@ -857,7 +856,7 @@ async function start(request: Request) {
         session: session({
           ...(voice ? { audio: { output: { voice } } } : {}),
           client: { data_channel: { allowed_client_events: ['session.input_audio.mute', 'session.input_audio.unmute', 'session.close'] } },
-        }),
+        }, topic?.voice),
         transport: { type: 'webrtc', sdp },
       }),
     })
@@ -872,7 +871,7 @@ async function start(request: Request) {
     return new Response(text, { status: response.status })
   }
   const result = (await response.json()) as { session: { id: string; expires_at?: number } }
-  follow(sideband(result.session.id), base(result.session.id, from, { voice, expires: expiry(result.session.expires_at) }), { about: topicOf(about) })
+  follow(sideband(result.session.id), base(result.session.id, from, { voice, expires: expiry(result.session.expires_at) }), { about: topic })
   return Response.json(result, { status: 201 })
 }
 

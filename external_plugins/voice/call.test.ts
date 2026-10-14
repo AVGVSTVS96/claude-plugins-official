@@ -29,6 +29,15 @@ test('the board lists every task with its latest state', () => {
   expect(call.board()).toBe('Task board:\n- build done: CI is green\n- mail running: drafting the reply')
 })
 
+test('a change names only the task that changed', () => {
+  const call = new Call()
+  call.track({ id: 'build', state: 'running', text: 'checking CI' })
+  call.track({ id: 'orb', state: 'running', text: 'your orb feedback', to: 'voiceapp' })
+  call.track({ id: 'build', state: 'done', text: 'CI is green' })
+  expect(call.change('build')).toBe('Task update:\n- build done: CI is green')
+  expect(call.change('orb')).toBe('Task update:\n- orb running: your orb feedback (sent to voiceapp)')
+})
+
 test('the record keeps the whole call, each speaker joined like the live captions, with every task change in time', () => {
   const call = new Call()
   call.hear({ who: 'you', text: 'check if ', start: 1000, end: 1400 })

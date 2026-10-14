@@ -4,7 +4,7 @@ id: voice
 summary: Add a voice channel where OpenAI's gpt-live-1 holds a live call and hands every real request to the Claude Code session.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: voice.patch
-patch_sha256: 8b867217304c2558856039c5d74cc6bfadc98487c4bf269f2a1a1cf19475298a
+patch_sha256: be227d64ed64c0f621288a1a2bbc71bf5eeff38a75352e802a7332f6eeee6fd6
 ---
 
 ## Intent
@@ -25,9 +25,14 @@ plugin with no hub code.
   fragment that starts at or after its `offset_ms` arrives, then delivers
   every unsent turn as a channel message with `delegation_id` in its meta.
 - Claude answers with `say` (`session.commentary.append`), `note`
-  (`session.thinking.append`) and `task` (updates the board and sends it as
-  `session.thinking.append` with no delegation id). Each tool resolves on
-  OpenAI's matching `*.appended` acknowledgement, or fails with its `error`.
+  (`session.thinking.append`) and `task` (updates the board and sends the
+  task that changed as `session.thinking.append` with no delegation id). Each
+  tool resolves on OpenAI's matching `*.appended` acknowledgement, or fails
+  with its `error`. `say`, `note`, `task` and `send` are marked
+  `anthropic/alwaysLoad`, so a call never waits on a tool search for them.
+- What the voice says first (a phone call's greeting, a topic the app started
+  the call on) goes in the session's creation as a `developer` message in
+  `session.input`, where GPT-Live has it before the caller speaks.
 - `bot.ts` runs in the hub service (`hub/serve.ts`) and keeps one session,
   `voice`, always running as its main thread, so the call page is back as
   soon as the hub restarts it. That session's `server.ts` says hello on the

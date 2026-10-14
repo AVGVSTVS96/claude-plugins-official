@@ -41,7 +41,7 @@ Claude to stop that task.
    | --- | --- | --- |
    | `say` | `session.commentary.append` | a result to say aloud (it paraphrases) |
    | `note` | `session.thinking.append` | a fact to know without saying it yet |
-   | `task` | `session.thinking.append` (the whole board) | task status: running, done, failed |
+   | `task` | `session.thinking.append` (the task that changed) | task status: running, done, failed |
    | `send` | the board, as running until the thread is done | work for another hex thread (hex only) |
    | `hang_up` | `session.close`, once the voice stops talking | ending the call |
 

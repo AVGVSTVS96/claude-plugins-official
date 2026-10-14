@@ -85,7 +85,11 @@ export class Call {
 
   board(): string {
     if (!this.tasks.size) return 'Task board: nothing running or finished yet.'
-    return ['Task board:', ...[...this.tasks.values()].map(task => `- ${task.id} ${task.state}: ${task.text}${task.to ? ` (sent to ${task.to})` : ''}`)].join('\n')
+    return ['Task board:', ...[...this.tasks.values()].map(entry)].join('\n')
+  }
+
+  change(id: string): string {
+    return `Task update:\n${entry(this.tasks.get(id)!)}`
   }
 
   record() {
@@ -103,6 +107,10 @@ export class Call {
       moments: [...this.marks],
     }
   }
+}
+
+function entry(task: Task) {
+  return `- ${task.id} ${task.state}: ${task.text}${task.to ? ` (sent to ${task.to})` : ''}`
 }
 
 function tidy<T extends Turn>(turns: T[]): T[] {
