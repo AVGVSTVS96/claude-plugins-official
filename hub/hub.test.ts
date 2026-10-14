@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { connect, createServer, type Socket } from 'net'
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, chmodSync, existsSync } from 'fs'
+import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, chmodSync, existsSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { free, startHub, tappable, transcribe, type Message, type Permission } from './hub.ts'
@@ -39,7 +39,7 @@ afterEach(() => {
   process.env.PATH = process.env.PATH!.split(':').slice(1).join(':')
 })
 
-function start(options: { main?: string; general?: boolean; idleStop?: number; relaunch?: number; launcher?: string; registry?: object; agents?: object[]; fresh?: (thread: string) => boolean; bind?: (thread: string) => Record<string, string> } = {}) {
+function start(options: { main?: string; general?: boolean; idleStop?: number; cacheWarm?: number; compactAbove?: number; relaunch?: number; launcher?: string; registry?: object; agents?: object[]; fresh?: (thread: string) => boolean; bind?: (thread: string) => Record<string, string> } = {}) {
   if (options.registry) writeFileSync(join(dir, 'threads.json'), JSON.stringify(options.registry))
   if (options.agents) writeFileSync(join(dir, 'agents'), JSON.stringify(options.agents))
   const seen: [string, boolean][] = (states = [])
@@ -58,6 +58,8 @@ function start(options: { main?: string; general?: boolean; idleStop?: number; r
     hexDir: join(dir, 'hex'),
     projectsDir: join(dir, 'projects'),
     idleStop: options.idleStop,
+    cacheWarm: options.cacheWarm,
+    compactAbove: options.compactAbove,
     relaunch: options.relaunch,
     launcher: options.launcher,
     fresh: options.fresh,
@@ -104,6 +106,16 @@ function saved(id = SESSION, folder = join(dir, 'hex')) {
   const project = join(dir, 'projects', folder.replace(/[^a-zA-Z0-9]/g, '-'))
   mkdirSync(project, { recursive: true })
   writeFileSync(join(project, `${id}.jsonl`), '{}\n')
+}
+
+// A line of the session's transcript: a request that sent this much context, or a compaction down to it.
+function said(tokens: number, compacted = false, id = SESSION) {
+  const project = join(dir, 'projects', join(dir, 'hex').replace(/[^a-zA-Z0-9]/g, '-'))
+  mkdirSync(project, { recursive: true })
+  const line = compacted
+    ? { type: 'system', subtype: 'compact_boundary', compactMetadata: { trigger: 'manual', preTokens: 0, postTokens: tokens } }
+    : { type: 'assistant', message: { usage: { input_tokens: 2, cache_creation_input_tokens: 100, cache_read_input_tokens: tokens - 102 } } }
+  appendFileSync(join(project, `${id}.jsonl`), JSON.stringify(line) + '\n')
 }
 
 function settingsOf(args: string[]) {
@@ -305,6 +317,61 @@ test('an idle thread whose session Claude still reports busy is not stopped unti
   writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid: 42, status: 'idle' }]))
   send({ type: 'state', thread: 'chat:7', busy: false })
   expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
+})
+
+test('an idle thread with a big conversation compacts while its cache is warm, without showing as working, then stops', async () => {
+  const old = Bun.spawn(['sleep', '30'])
+  start({ idleStop: 50, compactAbove: 150_000, registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } }, agents: [{ sessionId: SESSION, pid: old.pid, status: 'idle', startedAt: Date.now() + 60_000 }] })
+  said(40_000)
+  said(200_000)
+  const first = await session('chat:7')
+  first.send({ type: 'state', thread: 'chat:7', busy: false })
+  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
+  writeFileSync(join(dir, 'agents'), '[]')
+  first.socket.destroy()
+  old.kill()
+  const args = await launched()
+  expect(args[args.indexOf('--resume') + 1]).toBe(SESSION)
+  expect(args.at(-1)).toBe('/compact')
+  said(9_000, true)
+  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid: 42, status: 'idle', startedAt: Date.now() + 60_000 }]))
+  await session('chat:7')
+  await until(() => calls().filter(args => args[0] === 'stop').length === 2)
+  expect(calls().filter(args => args[0] === '--bg')).toHaveLength(1)
+  expect(states.filter(([, busy]) => busy)).toEqual([])
+})
+
+test('an idle thread with a small conversation, or one leaving, stops without compacting', async () => {
+  start({ idleStop: 50, compactAbove: 150_000, registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'idle', startedAt: Date.now() + 60_000 }] })
+  said(120_000)
+  const { send } = await session('chat:7')
+  send({ type: 'state', thread: 'chat:7', busy: false })
+  await until(() => calls().find(args => args[0] === 'stop'))
+  said(400_000)
+  void hub.retire('chat:7')
+  await until(() => calls().filter(args => args[0] === 'stop').length === 2)
+  await Bun.sleep(100)
+  expect(calls().some(args => args[0] === '--bg')).toBe(false)
+})
+
+test('the main thread compacts a big conversation before its cache goes cold, and otherwise keeps running', async () => {
+  const old = Bun.spawn(['sleep', '30'])
+  start({ main: 'chat', cacheWarm: 50, compactAbove: 150_000, relaunch: 60_000, registry: { chat: { name: 'hex', session: SESSION } }, agents: [{ sessionId: SESSION, pid: old.pid, status: 'idle', startedAt: Date.now() + 60_000 }] })
+  said(100_000)
+  const { send, socket } = await session('chat')
+  send({ type: 'state', thread: 'chat', busy: false })
+  await Bun.sleep(200)
+  expect(calls().some(args => args[0] === 'stop')).toBe(false)
+  said(300_000)
+  send({ type: 'state', thread: 'chat', busy: false })
+  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
+  writeFileSync(join(dir, 'agents'), '[]')
+  socket.destroy()
+  old.kill()
+  const args = await launched()
+  expect(args[args.indexOf('--resume') + 1]).toBe(SESSION)
+  expect(args.at(-1)).toBe('/compact')
+  expect(states.filter(([, busy]) => busy)).toEqual([])
 })
 
 test('a bad line from a session is dropped, and the lines after it still work', async () => {

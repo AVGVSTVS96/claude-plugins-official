@@ -1,12 +1,12 @@
 diff --git a/hub/hub.test.ts b/hub/hub.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..50861fc4fb562b2cf2980d774f52c8bb790a89e6
+index 0000000000000000000000000000000000000000..14a209397d7b007170fb330708789c7fa070d2d3
 --- /dev/null
 +++ b/hub/hub.test.ts
-@@ -0,0 +1,809 @@
+@@ -0,0 +1,876 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { connect, createServer, type Socket } from 'net'
-+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, chmodSync, existsSync } from 'fs'
++import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, chmodSync, existsSync } from 'fs'
 +import { tmpdir } from 'os'
 +import { join } from 'path'
 +import { free, startHub, tappable, transcribe, type Message, type Permission } from './hub.ts'
@@ -45,7 +45,7 @@ index 0000000000000000000000000000000000000000..50861fc4fb562b2cf2980d774f52c8bb
 +  process.env.PATH = process.env.PATH!.split(':').slice(1).join(':')
 +})
 +
-+function start(options: { main?: string; general?: boolean; idleStop?: number; relaunch?: number; launcher?: string; registry?: object; agents?: object[]; fresh?: (thread: string) => boolean; bind?: (thread: string) => Record<string, string> } = {}) {
++function start(options: { main?: string; general?: boolean; idleStop?: number; cacheWarm?: number; compactAbove?: number; relaunch?: number; launcher?: string; registry?: object; agents?: object[]; fresh?: (thread: string) => boolean; bind?: (thread: string) => Record<string, string> } = {}) {
 +  if (options.registry) writeFileSync(join(dir, 'threads.json'), JSON.stringify(options.registry))
 +  if (options.agents) writeFileSync(join(dir, 'agents'), JSON.stringify(options.agents))
 +  const seen: [string, boolean][] = (states = [])
@@ -64,6 +64,8 @@ index 0000000000000000000000000000000000000000..50861fc4fb562b2cf2980d774f52c8bb
 +    hexDir: join(dir, 'hex'),
 +    projectsDir: join(dir, 'projects'),
 +    idleStop: options.idleStop,
++    cacheWarm: options.cacheWarm,
++    compactAbove: options.compactAbove,
 +    relaunch: options.relaunch,
 +    launcher: options.launcher,
 +    fresh: options.fresh,
@@ -110,6 +112,16 @@ index 0000000000000000000000000000000000000000..50861fc4fb562b2cf2980d774f52c8bb
 +  const project = join(dir, 'projects', folder.replace(/[^a-zA-Z0-9]/g, '-'))
 +  mkdirSync(project, { recursive: true })
 +  writeFileSync(join(project, `${id}.jsonl`), '{}\n')
++}
++
++// A line of the session's transcript: a request that sent this much context, or a compaction down to it.
++function said(tokens: number, compacted = false, id = SESSION) {
++  const project = join(dir, 'projects', join(dir, 'hex').replace(/[^a-zA-Z0-9]/g, '-'))
++  mkdirSync(project, { recursive: true })
++  const line = compacted
++    ? { type: 'system', subtype: 'compact_boundary', compactMetadata: { trigger: 'manual', preTokens: 0, postTokens: tokens } }
++    : { type: 'assistant', message: { usage: { input_tokens: 2, cache_creation_input_tokens: 100, cache_read_input_tokens: tokens - 102 } } }
++  appendFileSync(join(project, `${id}.jsonl`), JSON.stringify(line) + '\n')
 +}
 +
 +function settingsOf(args: string[]) {
@@ -311,6 +323,61 @@ index 0000000000000000000000000000000000000000..50861fc4fb562b2cf2980d774f52c8bb
 +  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid: 42, status: 'idle' }]))
 +  send({ type: 'state', thread: 'chat:7', busy: false })
 +  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
++})
++
++test('an idle thread with a big conversation compacts while its cache is warm, without showing as working, then stops', async () => {
++  const old = Bun.spawn(['sleep', '30'])
++  start({ idleStop: 50, compactAbove: 150_000, registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } }, agents: [{ sessionId: SESSION, pid: old.pid, status: 'idle', startedAt: Date.now() + 60_000 }] })
++  said(40_000)
++  said(200_000)
++  const first = await session('chat:7')
++  first.send({ type: 'state', thread: 'chat:7', busy: false })
++  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
++  writeFileSync(join(dir, 'agents'), '[]')
++  first.socket.destroy()
++  old.kill()
++  const args = await launched()
++  expect(args[args.indexOf('--resume') + 1]).toBe(SESSION)
++  expect(args.at(-1)).toBe('/compact')
++  said(9_000, true)
++  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid: 42, status: 'idle', startedAt: Date.now() + 60_000 }]))
++  await session('chat:7')
++  await until(() => calls().filter(args => args[0] === 'stop').length === 2)
++  expect(calls().filter(args => args[0] === '--bg')).toHaveLength(1)
++  expect(states.filter(([, busy]) => busy)).toEqual([])
++})
++
++test('an idle thread with a small conversation, or one leaving, stops without compacting', async () => {
++  start({ idleStop: 50, compactAbove: 150_000, registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'idle', startedAt: Date.now() + 60_000 }] })
++  said(120_000)
++  const { send } = await session('chat:7')
++  send({ type: 'state', thread: 'chat:7', busy: false })
++  await until(() => calls().find(args => args[0] === 'stop'))
++  said(400_000)
++  void hub.retire('chat:7')
++  await until(() => calls().filter(args => args[0] === 'stop').length === 2)
++  await Bun.sleep(100)
++  expect(calls().some(args => args[0] === '--bg')).toBe(false)
++})
++
++test('the main thread compacts a big conversation before its cache goes cold, and otherwise keeps running', async () => {
++  const old = Bun.spawn(['sleep', '30'])
++  start({ main: 'chat', cacheWarm: 50, compactAbove: 150_000, relaunch: 60_000, registry: { chat: { name: 'hex', session: SESSION } }, agents: [{ sessionId: SESSION, pid: old.pid, status: 'idle', startedAt: Date.now() + 60_000 }] })
++  said(100_000)
++  const { send, socket } = await session('chat')
++  send({ type: 'state', thread: 'chat', busy: false })
++  await Bun.sleep(200)
++  expect(calls().some(args => args[0] === 'stop')).toBe(false)
++  said(300_000)
++  send({ type: 'state', thread: 'chat', busy: false })
++  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
++  writeFileSync(join(dir, 'agents'), '[]')
++  socket.destroy()
++  old.kill()
++  const args = await launched()
++  expect(args[args.indexOf('--resume') + 1]).toBe(SESSION)
++  expect(args.at(-1)).toBe('/compact')
++  expect(states.filter(([, busy]) => busy)).toEqual([])
 +})
 +
 +test('a bad line from a session is dropped, and the lines after it still work', async () => {
@@ -815,14 +882,14 @@ index 0000000000000000000000000000000000000000..50861fc4fb562b2cf2980d774f52c8bb
 +})
 diff --git a/hub/hub.ts b/hub/hub.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..644a7f4c386c31df769f1c92075b695af372a0d8
+index 0000000000000000000000000000000000000000..58e9275de26aed8e8f40c7f3bcdd0d02d8fb546d
 --- /dev/null
 +++ b/hub/hub.ts
-@@ -0,0 +1,558 @@
+@@ -0,0 +1,611 @@
 +import { createServer, type Socket } from 'net'
 +import { execFile, spawn } from 'child_process'
 +import { createHash } from 'crypto'
-+import { existsSync, readFileSync, writeFileSync, renameSync, rmSync, watch, type FSWatcher } from 'fs'
++import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, writeFileSync, renameSync, rmSync, watch, type FSWatcher } from 'fs'
 +import { homedir } from 'os'
 +import { basename, join } from 'path'
 +
@@ -870,6 +937,10 @@ index 0000000000000000000000000000000000000000..644a7f4c386c31df769f1c92075b695a
 +const JOBS = join(CLAUDE, 'jobs')
 +const IDLE_STOP = 30 * 60_000
 +const RELAUNCH = 30_000
++// Claude Code keeps a conversation in the prompt cache for an hour after its last request,
++// and compacts a background session only when told to.
++const CACHE_WARM = 54 * 60_000
++const COMPACT_ABOVE = 150_000
 +const PRIVATE = /_BOT_TOKEN$|^HEX_|^BUZZ_/
 +
 +// A voice call passes through this process (its page and phone line go through the hub's
@@ -891,7 +962,7 @@ index 0000000000000000000000000000000000000000..644a7f4c386c31df769f1c92075b695a
 +  return title
 +}
 +
-+export function startHub({ stateDir, channel, main, mainName = 'main', general = false, call, state, failed, permission, asks, args = () => [], bind = () => ({}), fresh = () => false, idleStop = IDLE_STOP, relaunch = RELAUNCH, jobsDir = JOBS, hexDir = process.cwd(), projectsDir = join(CLAUDE, 'projects'), launcher = 'claude' }: {
++export function startHub({ stateDir, channel, main, mainName = 'main', general = false, call, state, failed, permission, asks, args = () => [], bind = () => ({}), fresh = () => false, idleStop = IDLE_STOP, cacheWarm = CACHE_WARM, compactAbove = COMPACT_ABOVE, relaunch = RELAUNCH, jobsDir = JOBS, hexDir = process.cwd(), projectsDir = join(CLAUDE, 'projects'), launcher = 'claude' }: {
 +  stateDir: string
 +  channel: string
 +  main?: string
@@ -910,6 +981,10 @@ index 0000000000000000000000000000000000000000..644a7f4c386c31df769f1c92075b695a
 +  // instead of resuming it, and the launcher builds what that session knows of the chat.
 +  fresh?: (thread: string) => boolean
 +  idleStop?: number
++  // How long the main thread rests before it compacts, while its cache is still warm.
++  cacheWarm?: number
++  // A session whose context is bigger than this compacts before it rests.
++  compactAbove?: number
 +  relaunch?: number
 +  jobsDir?: string
 +  hexDir?: string
@@ -926,6 +1001,7 @@ index 0000000000000000000000000000000000000000..644a7f4c386c31df769f1c92075b695a
 +  const busy = new Set<string>()
 +  const renewing = new Set<string>()
 +  const retiring = new Set<string>()
++  const compacting = new Set<string>()
 +  const leaving = new Map<string, (session: string) => void>()
 +  const unsaved = new Map<string, string>()
 +  const born = Date.now()
@@ -984,23 +1060,62 @@ index 0000000000000000000000000000000000000000..644a7f4c386c31df769f1c92075b695a
 +  }
 +
 +  // A running session that isn't busy stops after a while; its next message resumes it.
++  // The main thread keeps running, and compacts before its cache goes cold.
 +  function rest(thread: string) {
 +    clearTimeout(idle.get(thread))
 +    idle.delete(thread)
-+    if (busy.has(thread) || thread === main || !live.has(thread)) return
-+    if (retiring.has(thread)) stop(thread)
++    if (busy.has(thread) || !live.has(thread)) return
++    if (thread === main) idle.set(thread, setTimeout(() => stopIfIdle(thread), cacheWarm))
++    else if (retiring.has(thread)) stop(thread)
 +    else idle.set(thread, setTimeout(() => stopIfIdle(thread), idleStop))
 +  }
 +
 +  // The Stop hook ends a turn, but background tasks keep a session busy past it,
 +  // so Claude's own status decides; a busy session reports idle again when it's done.
++  // A big conversation compacts first, while its cache is warm: resumed after the cache
++  // expires, it would be written to the cache whole again.
 +  function stopIfIdle(thread: string) {
 +    idle.delete(thread)
 +    const session = current(thread)
 +    if (!session) return
 +    agent(session, running => {
-+      if (!busy.has(thread) && running?.status !== 'busy') stop(thread)
++      if (busy.has(thread) || running?.status === 'busy') return
++      if (running && !retiring.has(thread) && !fresh(thread) && !onCall.has(callOf(thread)) && context(thread, session) > compactAbove) {
++        compacting.add(thread)
++        cycle(thread, running, '/compact')
++      } else if (thread !== main) stop(thread)
 +    })
++  }
++
++  // The context a session's last request sent, from the newest usage or compaction in its transcript.
++  function context(thread: string, session: string): number {
++    let file: number
++    try {
++      file = openSync(transcript(thread, session), 'r')
++    } catch {
++      return 0
++    }
++    try {
++      const size = fstatSync(file).size
++      const tail = Buffer.alloc(Math.min(size, 1 << 20))
++      readSync(file, tail, 0, tail.length, size - tail.length)
++      for (const line of tail.toString('utf8').split('\n').reverse()) {
++        if (!line.includes('"usage"') && !line.includes('"compact_boundary"')) continue
++        let entry: any
++        try {
++          entry = JSON.parse(line)
++        } catch {
++          continue
++        }
++        if (entry.type === 'system' && entry.subtype === 'compact_boundary') return entry.compactMetadata?.postTokens ?? 0
++        const usage = entry.type === 'assistant' && !entry.isSidechain ? entry.message?.usage : undefined
++        const sent = usage ? (usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0) : 0
++        if (sent) return sent
++      }
++      return 0
++    } finally {
++      closeSync(file)
++    }
 +  }
 +
 +  function stop(thread: string) {
@@ -1066,11 +1181,12 @@ index 0000000000000000000000000000000000000000..644a7f4c386c31df769f1c92075b695a
 +  }
 +
 +  function launch(thread: string, name: string, prompt?: string, fork?: string, cwd?: string) {
++    const quiet = compacting.delete(thread)
 +    if (launching.has(thread)) return
 +    retiring.delete(thread)
 +    const known = register(thread, name, cwd)
 +    claim(thread)
-+    if (prompt || queued.has(thread)) setState(thread, true)
++    if ((prompt && !quiet) || queued.has(thread)) setState(thread, true)
 +    launching.set(thread, undefined)
 +    if (fork) return start(known, thread, prompt, fork)
 +    if (!known.session || fresh(thread)) return start(known, thread, prompt)
@@ -1257,10 +1373,14 @@ index 0000000000000000000000000000000000000000..644a7f4c386c31df769f1c92075b695a
 +  function claim(thread: string) {
 +    const session = unsaved.get(thread)
 +    const known = threads[thread]
-+    if (!session || !known || !existsSync(join(projectsDir, (known.cwd ?? hexDir).replace(/[^a-zA-Z0-9]/g, '-'), `${session}.jsonl`))) return
++    if (!session || !known || !existsSync(transcript(thread, session))) return
 +    unsaved.delete(thread)
 +    known.session = session
 +    save()
++  }
++
++  function transcript(thread: string, session: string) {
++    return join(projectsDir, (threads[thread]?.cwd ?? hexDir).replace(/[^a-zA-Z0-9]/g, '-'), `${session}.jsonl`)
 +  }
 +
 +  function current(thread: string) {

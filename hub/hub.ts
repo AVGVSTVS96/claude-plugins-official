@@ -1,7 +1,7 @@
 import { createServer, type Socket } from 'net'
 import { execFile, spawn } from 'child_process'
 import { createHash } from 'crypto'
-import { existsSync, readFileSync, writeFileSync, renameSync, rmSync, watch, type FSWatcher } from 'fs'
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, writeFileSync, renameSync, rmSync, watch, type FSWatcher } from 'fs'
 import { homedir } from 'os'
 import { basename, join } from 'path'
 
@@ -49,6 +49,10 @@ const CLAUDE = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude')
 const JOBS = join(CLAUDE, 'jobs')
 const IDLE_STOP = 30 * 60_000
 const RELAUNCH = 30_000
+// Claude Code keeps a conversation in the prompt cache for an hour after its last request,
+// and compacts a background session only when told to.
+const CACHE_WARM = 54 * 60_000
+const COMPACT_ABOVE = 150_000
 const PRIVATE = /_BOT_TOKEN$|^HEX_|^BUZZ_/
 
 // A voice call passes through this process (its page and phone line go through the hub's
@@ -70,7 +74,7 @@ export function title(text: string): string {
   return title
 }
 
-export function startHub({ stateDir, channel, main, mainName = 'main', general = false, call, state, failed, permission, asks, args = () => [], bind = () => ({}), fresh = () => false, idleStop = IDLE_STOP, relaunch = RELAUNCH, jobsDir = JOBS, hexDir = process.cwd(), projectsDir = join(CLAUDE, 'projects'), launcher = 'claude' }: {
+export function startHub({ stateDir, channel, main, mainName = 'main', general = false, call, state, failed, permission, asks, args = () => [], bind = () => ({}), fresh = () => false, idleStop = IDLE_STOP, cacheWarm = CACHE_WARM, compactAbove = COMPACT_ABOVE, relaunch = RELAUNCH, jobsDir = JOBS, hexDir = process.cwd(), projectsDir = join(CLAUDE, 'projects'), launcher = 'claude' }: {
   stateDir: string
   channel: string
   main?: string
@@ -89,6 +93,10 @@ export function startHub({ stateDir, channel, main, mainName = 'main', general =
   // instead of resuming it, and the launcher builds what that session knows of the chat.
   fresh?: (thread: string) => boolean
   idleStop?: number
+  // How long the main thread rests before it compacts, while its cache is still warm.
+  cacheWarm?: number
+  // A session whose context is bigger than this compacts before it rests.
+  compactAbove?: number
   relaunch?: number
   jobsDir?: string
   hexDir?: string
@@ -105,6 +113,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', general =
   const busy = new Set<string>()
   const renewing = new Set<string>()
   const retiring = new Set<string>()
+  const compacting = new Set<string>()
   const leaving = new Map<string, (session: string) => void>()
   const unsaved = new Map<string, string>()
   const born = Date.now()
@@ -163,23 +172,62 @@ export function startHub({ stateDir, channel, main, mainName = 'main', general =
   }
 
   // A running session that isn't busy stops after a while; its next message resumes it.
+  // The main thread keeps running, and compacts before its cache goes cold.
   function rest(thread: string) {
     clearTimeout(idle.get(thread))
     idle.delete(thread)
-    if (busy.has(thread) || thread === main || !live.has(thread)) return
-    if (retiring.has(thread)) stop(thread)
+    if (busy.has(thread) || !live.has(thread)) return
+    if (thread === main) idle.set(thread, setTimeout(() => stopIfIdle(thread), cacheWarm))
+    else if (retiring.has(thread)) stop(thread)
     else idle.set(thread, setTimeout(() => stopIfIdle(thread), idleStop))
   }
 
   // The Stop hook ends a turn, but background tasks keep a session busy past it,
   // so Claude's own status decides; a busy session reports idle again when it's done.
+  // A big conversation compacts first, while its cache is warm: resumed after the cache
+  // expires, it would be written to the cache whole again.
   function stopIfIdle(thread: string) {
     idle.delete(thread)
     const session = current(thread)
     if (!session) return
     agent(session, running => {
-      if (!busy.has(thread) && running?.status !== 'busy') stop(thread)
+      if (busy.has(thread) || running?.status === 'busy') return
+      if (running && !retiring.has(thread) && !fresh(thread) && !onCall.has(callOf(thread)) && context(thread, session) > compactAbove) {
+        compacting.add(thread)
+        cycle(thread, running, '/compact')
+      } else if (thread !== main) stop(thread)
     })
+  }
+
+  // The context a session's last request sent, from the newest usage or compaction in its transcript.
+  function context(thread: string, session: string): number {
+    let file: number
+    try {
+      file = openSync(transcript(thread, session), 'r')
+    } catch {
+      return 0
+    }
+    try {
+      const size = fstatSync(file).size
+      const tail = Buffer.alloc(Math.min(size, 1 << 20))
+      readSync(file, tail, 0, tail.length, size - tail.length)
+      for (const line of tail.toString('utf8').split('\n').reverse()) {
+        if (!line.includes('"usage"') && !line.includes('"compact_boundary"')) continue
+        let entry: any
+        try {
+          entry = JSON.parse(line)
+        } catch {
+          continue
+        }
+        if (entry.type === 'system' && entry.subtype === 'compact_boundary') return entry.compactMetadata?.postTokens ?? 0
+        const usage = entry.type === 'assistant' && !entry.isSidechain ? entry.message?.usage : undefined
+        const sent = usage ? (usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0) : 0
+        if (sent) return sent
+      }
+      return 0
+    } finally {
+      closeSync(file)
+    }
   }
 
   function stop(thread: string) {
@@ -245,11 +293,12 @@ export function startHub({ stateDir, channel, main, mainName = 'main', general =
   }
 
   function launch(thread: string, name: string, prompt?: string, fork?: string, cwd?: string) {
+    const quiet = compacting.delete(thread)
     if (launching.has(thread)) return
     retiring.delete(thread)
     const known = register(thread, name, cwd)
     claim(thread)
-    if (prompt || queued.has(thread)) setState(thread, true)
+    if ((prompt && !quiet) || queued.has(thread)) setState(thread, true)
     launching.set(thread, undefined)
     if (fork) return start(known, thread, prompt, fork)
     if (!known.session || fresh(thread)) return start(known, thread, prompt)
@@ -436,10 +485,14 @@ export function startHub({ stateDir, channel, main, mainName = 'main', general =
   function claim(thread: string) {
     const session = unsaved.get(thread)
     const known = threads[thread]
-    if (!session || !known || !existsSync(join(projectsDir, (known.cwd ?? hexDir).replace(/[^a-zA-Z0-9]/g, '-'), `${session}.jsonl`))) return
+    if (!session || !known || !existsSync(transcript(thread, session))) return
     unsaved.delete(thread)
     known.session = session
     save()
+  }
+
+  function transcript(thread: string, session: string) {
+    return join(projectsDir, (threads[thread]?.cwd ?? hexDir).replace(/[^a-zA-Z0-9]/g, '-'), `${session}.jsonl`)
   }
 
   function current(thread: string) {

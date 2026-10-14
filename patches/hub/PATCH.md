@@ -4,7 +4,7 @@ id: hub
 summary: Add a client-agnostic hub that gives every chat thread its own Claude Code session and moves threads between clients.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: hub.patch
-patch_sha256: 34442083310cd26b9ad67224bb99600b883e5fc1c5127255a2d5e38acfc51c97
+patch_sha256: 5239fc19e7f62cf68ca22038db13c283915c875fd8f3f0d1071b1dfad8516441
 ---
 
 ## Intent
@@ -28,7 +28,14 @@ idle report says when the turn stopped with background agents or workflows still
 working (the Stop hook's `background_tasks`; Claude Code counts those, not shells
 or monitors, as the session working); the hub hands those to the client and stops a session that stays idle, unless
 `claude agents --json` still reports it busy (background tasks outlive the
-turn's Stop hook). A thread's session runs in the hex folder, or in a folder of
+turn's Stop hook). Claude Code keeps a conversation in the prompt cache for an
+hour and compacts a background session only when told to, so a session whose
+last request (its transcript's newest usage or compaction) sent more than 150,000
+tokens compacts before it stops, while its cache is warm: it starts again with
+`/compact` as its only prompt, without showing as working, and stops at its next
+rest. Otherwise its next message after the hour would write the whole
+conversation to the cache again. A fresh thread, one on a call, and one leaving
+never compact. A thread's session runs in the hex folder, or in a folder of
 its own that the client opened it in; `threads.json` keeps that folder, so the
 session resumes there and keeps it when it moves to another client. A failed
 start is reported before the thread goes idle, so a client still waiting on the
@@ -60,7 +67,8 @@ site, since chat apps only link web addresses.
 
 The main thread is always running: the hub starts it (or resumes it) when it
 starts, never stops it for being idle, and starts it again when its session
-has been gone for 30 seconds. A client whose main thread is hex's General
+has been gone for 30 seconds. After 54 minutes idle, just before its cache
+expires, a big main thread compacts the same way and keeps running. A client whose main thread is hex's General
 says so (`general`), and only that session's settings env says `HEX_MAIN`, so
 hex runs General's jobs in General alone, not in every client's main thread.
 A session can ask to `renew`: at its next rest, once Claude reports it idle,
@@ -90,8 +98,8 @@ instead (`fork`, `--fork-session`).
 
 ## Invariants
 
-1. The hub never stops the main thread unless it renews, and never moves or closes it.
-   Nothing renews a session or restarts the service while its thread is on a call.
+1. The hub never stops the main thread unless it renews or compacts, and never moves or closes it.
+   Nothing renews or compacts a session, or restarts the service, while its thread is on a call.
 2. A session that is still running is never relaunched. A stopped one has
    its job record cleared (`claude rm`) before `--resume`, which otherwise
    copies the conversation to a new id.
@@ -103,7 +111,8 @@ instead (`fork`, `--fork-session`).
    one conversation never runs in two places.
 6. No timer stands in for state: a start settles on the session's hello or
    its job's `failed` state. The only delays are how long a quiet session
-   stays warm before it's stopped, and how long the main thread may be gone
+   stays warm before it's stopped, how long the main thread rests before its
+   cache would expire, and how long the main thread may be gone
    (a reconnect, a respawn) before it's started again; Claude's own status
    decides whether a session is still working or running.
 7. Bad input fails alone: a malformed line on `hub.sock` is logged and
@@ -120,7 +129,7 @@ instead (`fork`, `--fork-session`).
 thread (started with the hub, kept running, revived, `HEX_MAIN` only for General, renewed at once, a
 fresh one left to reconnect after a hub restart), sessions older than the hub renewing at their
 next rest and never during a call, `free` waiting for calls to end, the launcher and its
-environment, failed starts, busy and idle, idle stops, fresh threads, stopping, closing, naming and
+environment, failed starts, busy and idle, idle stops, compacting big sessions before they rest, fresh threads, stopping, closing, naming and
 handoffs (release, adopt, fork), permission prompts and bad input against a fake `claude`. Run `scripts/verify`.
 
 ## Removal
