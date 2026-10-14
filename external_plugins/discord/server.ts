@@ -208,7 +208,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         type: 'object',
         properties: {
           title: titleProperty,
-          prompt: { type: 'string', description: 'Everything the new session needs to start the work: it shares none of your context.' },
+          prompt: { type: 'string', description: "The user's request and the context the new session can't find itself: it starts from this prompt alone." },
           about: { type: 'string', description: 'One line the user sees first in the new thread, saying what it is for and where it came from.' },
           channel: { type: 'string', description: 'Channel to open it in, by name. Defaults to this thread\'s channel.' },
         },

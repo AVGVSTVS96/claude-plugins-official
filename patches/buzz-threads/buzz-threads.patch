@@ -3918,7 +3918,7 @@ index 0000000000000000000000000000000000000000..44eff7405c67b2f404d4fa71ba85c228
 +}
 diff --git a/external_plugins/buzz/server.ts b/external_plugins/buzz/server.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..1347ae67f1a8922662dcbe909dcaef2efff659f0
+index 0000000000000000000000000000000000000000..59c3c8cc1d8c3488f27d8a1f9209759ecbba2a63
 --- /dev/null
 +++ b/external_plugins/buzz/server.ts
 @@ -0,0 +1,292 @@
@@ -4120,7 +4120,7 @@ index 0000000000000000000000000000000000000000..1347ae67f1a8922662dcbe909dcaef2e
 +        type: 'object',
 +        properties: {
 +          title: titleProperty,
-+          prompt: { type: 'string', description: 'Everything the new session needs to start the work: it shares none of your context.' },
++          prompt: { type: 'string', description: "The user's request and the context the new session can't find itself: it starts from this prompt alone." },
 +          about: { type: 'string', description: 'One line the user sees first in the new thread, saying what it is for and where it came from.' },
 +          channel: { type: 'string', description: 'Channel to open it in, by name. Defaults to this thread\'s channel.' },
 +        },

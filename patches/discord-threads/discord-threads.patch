@@ -1475,7 +1475,7 @@ index eac89c3befd8ebb90758a9acdf7f400de8c9f298..87aff60aefe5d5610abfa8d4e6e2b719
    "dependencies": {
      "@modelcontextprotocol/sdk": "^1.0.0",
 diff --git a/external_plugins/discord/server.ts b/external_plugins/discord/server.ts
-index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..ca1634d043a645ebd055f0d37aaa45013dba1637 100644
+index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..9fdce988b4df2091438153a5cd87f1291d3a56fb 100644
 --- a/external_plugins/discord/server.ts
 +++ b/external_plugins/discord/server.ts
 @@ -1,533 +1,43 @@
@@ -2208,7 +2208,7 @@ index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..ca1634d043a645ebd055f0d37aaa4501
 +        type: 'object',
 +        properties: {
 +          title: titleProperty,
-+          prompt: { type: 'string', description: 'Everything the new session needs to start the work: it shares none of your context.' },
++          prompt: { type: 'string', description: "The user's request and the context the new session can't find itself: it starts from this prompt alone." },
 +          about: { type: 'string', description: 'One line the user sees first in the new thread, saying what it is for and where it came from.' },
 +          channel: { type: 'string', description: 'Channel to open it in, by name. Defaults to this thread\'s channel.' },
 +        },

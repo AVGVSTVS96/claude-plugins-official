@@ -1690,7 +1690,7 @@ index b80fcea0f4f395012586cf5fac3682270e7fb14f..a8d061bfa3c603151ab2491dc06af4fa
    "dependencies": {
      "@modelcontextprotocol/sdk": "^1.0.0",
 diff --git a/external_plugins/telegram/server.ts b/external_plugins/telegram/server.ts
-index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..0a808ce0db359d6e4e398a1824a30bc03edd61a3 100644
+index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..bef1b109741df85fa8a5048bab41a9ce7613664c 100644
 --- a/external_plugins/telegram/server.ts
 +++ b/external_plugins/telegram/server.ts
 @@ -1,467 +1,50 @@
@@ -2323,7 +2323,7 @@ index 6bc0ebc6a545838789552ca6d8d6e38a43ba5314..0a808ce0db359d6e4e398a1824a30bc0
 +        type: 'object',
 +        properties: {
 +          title: titleProperty,
-+          prompt: { type: 'string', description: 'Everything the new session needs to start the work: it shares none of your context.' },
++          prompt: { type: 'string', description: "The user's request and the context the new session can't find itself: it starts from this prompt alone." },
 +          about: { type: 'string', description: 'One line the user sees first in the new thread, saying what it is for and where it came from.' },
 +          app: { type: 'string', enum: ['telegram', 'discord', 'buzz'], description: 'Where to open it. Default: telegram.' },
 +          channel: { type: 'string', description: 'Discord or Buzz only: the channel to open it in, by name. Default: the server\'s first channel.' },
