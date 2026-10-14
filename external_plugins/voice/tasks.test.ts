@@ -25,7 +25,7 @@ function job(session: string, record: object, timeline: object[] = []) {
   writeFileSync(join(dir, 'state.json'), JSON.stringify(record))
 }
 
-function running(session: string, status: 'busy' | 'idle', pid = process.pid, more: object = {}) {
+function running(session: string, status: 'busy' | 'idle' | 'shell', pid = process.pid, more: object = {}) {
   mkdirSync(join(claude, 'sessions'), { recursive: true })
   writeFileSync(join(claude, 'sessions', `${session.slice(0, 8)}.json`), JSON.stringify({ pid, sessionId: session, status, ...more }))
 }
@@ -152,7 +152,7 @@ test("a thread whose turn ended stays working while its workflow runs, each work
   await until(() => antibody()?.agents[0].line === 'Reading bills.ts')
 })
 
-test('a background session no thread holds is a task of its own while it works', async () => {
+test('a running session no thread holds is a task of its own while it works', async () => {
   job('12121212-review', { state: 'working', detail: 'reviewing autofork', updatedAt: ago(0) })
   job('34343434-probe', { state: 'done', detail: 'probe ran', updatedAt: ago(0) })
   running('12121212-review', 'busy', process.pid, { kind: 'bg', name: 'autofork-review', cwd: '/repo' })
@@ -160,9 +160,45 @@ test('a background session no thread holds is a task of its own while it works',
   running('56565656-terminal', 'busy', process.pid, { kind: 'interactive', name: 'bassim-1' })
   await until(() => tasks.get('claude:12121212')?.state === 'working')
   expect(tasks.get('claude:12121212')).toMatchObject({ name: 'autofork-review', where: 'Claude Code', line: 'reviewing autofork' })
-  expect(tasks.tasks.filter(task => task.app === 'claude').map(task => task.name)).toEqual(['autofork-review'])
+  expect(tasks.tasks.filter(task => task.app === 'claude').map(task => task.name)).toEqual(['autofork-review', 'bassim-1'])
   job('12121212-review', { state: 'done', detail: 'reviewed', updatedAt: ago(0) })
-  await until(() => !tasks.get('claude:12121212'))
+  running('12121212-review', 'idle', process.pid, { kind: 'bg', name: 'autofork-review', cwd: '/repo' })
+  rmSync(join(claude, 'sessions', '56565656.json'))
+  await until(() => !tasks.get('claude:12121212') && !tasks.get('claude:56565656'))
+})
+
+test("a thread stays working while a session it started runs, that session one of its agents, and while its own shells run", async () => {
+  const shell = Bun.spawn(['sh', '-c', 'sleep 30 >/dev/null & echo $!; wait'], { stdout: 'pipe' })
+  const { value } = await shell.stdout.getReader().read()
+  const build = Number(new TextDecoder().decode(value))
+  afterAll(() => {
+    process.kill(build)
+    shell.kill()
+  })
+  threads('telegram', { ...telegram, '-1004422245734:3275': { name: 'lab', session: '32753275-lab' } })
+  job('32753275-lab', { state: 'done', detail: 'started the build', updatedAt: ago(1) })
+  running('32753275-lab', 'idle', shell.pid)
+  const lab = () => tasks.get('telegram:-1004422245734:3275')
+  await until(() => lab()?.state === 'done')
+  running('78787878-build', 'busy', build, { kind: 'interactive', name: 'lab-build-c0', cwd: '/scratch/build', startedAt: Date.now() })
+  await until(() => lab()?.state === 'working')
+  expect(lab()!.agents.map(agent => [agent.id, agent.label, agent.state])).toEqual([['78787878-build', 'lab-build-c0', 'working']])
+  expect(tasks.get('claude:78787878')).toBeUndefined()
+  step(join(claude, 'projects', '-scratch-build', '78787878-build.jsonl'), 'Read', { file_path: '/scratch/build/plan.md' })
+  await until(() => lab()?.agents[0]?.line === 'Reading plan.md')
+  rmSync(join(claude, 'sessions', '78787878.json'))
+  await until(() => lab()?.state === 'done')
+  running('32753275-lab', 'shell', shell.pid)
+  await until(() => lab()?.state === 'working')
+})
+
+test("a renewed session's new job folder still wakes the list", async () => {
+  rmSync(join(claude, 'jobs', 'aaaaaaaa'), { recursive: true })
+  job('aaaaaaaa-general', { state: 'done', detail: 'renewed', updatedAt: ago(0) })
+  await until(() => tasks.get('telegram:-1004422245734')?.line === 'renewed')
+  await Bun.sleep(100)
+  job('aaaaaaaa-general', { state: 'done', detail: 'after the renew', updatedAt: ago(0) })
+  await until(() => tasks.get('telegram:-1004422245734')?.line === 'after the renew')
 })
 
 test('talking a task through tells the voice which thread it is and where it stands', () => {
