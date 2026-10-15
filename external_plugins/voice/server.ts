@@ -1010,12 +1010,16 @@ async function showTasks(url: URL, tasks: Tasks) {
   return Response.json({ version: tasks.version, tasks: tasks.rows() })
 }
 
-// The Tasks button's counts: threads that need you and are working, and how many things are yours.
+// The Tasks button's counts: threads that need you and are working, and how many things are yours,
+// as many as Tasks lists under Needs you: every ask, everything stuck, and every thread that needs
+// you without an ask.
 async function showSummary(url: URL, tasks: Tasks, asks: Asks) {
   const version = () => tasks.counts.version + asks.counts.version
   const after = Number(url.searchParams.get('after'))
   if (after === version()) await Promise.race([tasks.counts.changes(tasks.counts.version, 25_000), asks.counts.changes(asks.counts.version, 25_000)])
-  return Response.json({ version: version(), ...tasks.summary, yours: asks.view.asks.length })
+  const asked = new Set(asks.view.asks.map(ask => ask.task))
+  const unasked = tasks.rows().filter(row => row.state === 'needs' && !asked.has(row.id)).length
+  return Response.json({ version: version(), ...tasks.summary, yours: asks.view.asks.length + asks.view.stuck.length + unasked })
 }
 
 async function showAsks(url: URL, asks: Asks) {
