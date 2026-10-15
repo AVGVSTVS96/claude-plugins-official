@@ -20,7 +20,7 @@ export type Asks = {
   reopen: (thread: string, message: number, via: string) => void
 }
 type Thread = Settings & { name: string; session?: string; cwd?: string; launched?: string }
-type Agent = { sessionId: string; pid?: number; status?: string; state?: string; name?: string; cwd?: string; startedAt?: number }
+type Agent = { sessionId: string; pid?: number; status?: string; name?: string; cwd?: string; startedAt?: number }
 export type Hub = ReturnType<typeof startHub>
 
 // Every client running in this process, so a thread can move between them.
@@ -349,9 +349,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', general =
       try {
         agents = JSON.parse(stdout)
       } catch {}
-      // A finished background session keeps its pid on the spare process Claude Code
-      // hands it to, which never connects, so a 'done' session counts as gone.
-      then(agents.filter(agent => agent.pid && agent.state !== 'done'))
+      then(agents.filter(agent => agent.pid))
     })
   }
 
