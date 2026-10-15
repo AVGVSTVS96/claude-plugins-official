@@ -857,6 +857,130 @@ index 0000000000000000000000000000000000000000..9bca8dd83068258c6d31a46b33e256a3
 +}
 +
 +if (import.meta.main) await run(process.argv[2]!)
+diff --git a/external_plugins/voice/links.ts b/external_plugins/voice/links.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..749ff8622b328b52ff580d061d255f306397f952
+--- /dev/null
++++ b/external_plugins/voice/links.ts
+@@ -0,0 +1,118 @@
++import { Database } from 'bun:sqlite'
++import { existsSync, readFileSync, watch } from 'fs'
++import { homedir } from 'os'
++import { join } from 'path'
++
++const T3_HOME = join(homedir(), '.t3', 'userdata')
++const DATABASE = 'statev2.sqlite'
++const REFRESH = 500
++
++// Where a hex thread lives in its own app. Each bot leaves what its links need in its state folder
++// (Discord's server, Telegram's bot name, the channel of every Buzz thread), and T3 Code's own database,
++// read only, says which T3 thread a hex thread is. An app that can't say gives no link.
++// T3_APP_SCHEME is the T3 Code app's URL scheme: t3code, t3code-preview or t3code-dev.
++export class Links {
++  private guild?: string
++  private bot?: string
++  private channels: Record<string, string> = {}
++  private threads = new Map<string, string>()
++  private environment?: string
++  private db?: Database
++  private watcher?: ReturnType<typeof watch>
++  private pending?: ReturnType<typeof setTimeout>
++
++  constructor(
++    private state: string,
++    private changed: () => void,
++    private t3 = T3_HOME,
++    private scheme = process.env.T3_APP_SCHEME || 't3code',
++  ) {
++    const database = join(t3, DATABASE)
++    if (!existsSync(database)) return
++    this.environment = word(readFile(join(t3, 'environment-id'))?.trim())
++    this.db = new Database(database, { readonly: true })
++    this.watcher = watch(t3, (_, file) => file?.startsWith(DATABASE) && this.schedule())
++    this.read()
++  }
++
++  close() {
++    clearTimeout(this.pending)
++    this.watcher?.close()
++    this.db?.close()
++  }
++
++  // The small files the bots keep; read again whenever the threads are.
++  load() {
++    this.guild = word(readJson(join(this.state, 'discord', 'guild.json'))?.id)
++    this.bot = word(readJson(join(this.state, 'telegram', 'bot.json'))?.username)
++    this.channels = readJson(join(this.state, 'buzz', 'channels.json')) ?? {}
++  }
++
++  of(app: string, id: string): string | undefined {
++    switch (app) {
++      case 'telegram': {
++        if (!id.includes(':') && !id.startsWith('-')) return this.bot && `https://t.me/${this.bot}`
++        if (!id.startsWith('-100')) return
++        const [chat, topic = '1'] = id.slice(4).split(':')
++        return `https://t.me/c/${chat}/${topic}`
++      }
++      case 'discord':
++        return this.guild && `https://discord.com/channels/${this.guild}/${id}`
++      case 'buzz': {
++        if (id.includes('-')) return `buzz://channel/${id}`
++        const channel = word(this.channels[id])
++        return channel && `buzz://message?channel=${channel}&id=${id}`
++      }
++      case 't3': {
++        const thread = this.threads.get(id)
++        return thread && this.environment && `${this.scheme}://threads/${this.environment}/${encodeURIComponent(thread)}`
++      }
++    }
++  }
++
++  private schedule() {
++    if (this.pending) return
++    this.pending = setTimeout(() => {
++      this.pending = undefined
++      if (this.read()) this.changed()
++    }, REFRESH)
++  }
++
++  // A hex thread's key is the session id the T3 Code ACP agent holds as its native thread.
++  private read() {
++    try {
++      const rows = this.db!
++        .query<{ key: string; thread: string }, []>(
++          `select json_extract(p.payload_json, '$.nativeThreadRef.nativeId') key, json_extract(p.payload_json, '$.appThreadId') thread
++           from orchestration_v2_projection_provider_threads p
++           join orchestration_v2_projection_threads t on t.thread_id = json_extract(p.payload_json, '$.appThreadId')
++           where p.driver = 'acpRegistry' and t.deleted_at is null
++           order by p.updated_at`,
++        )
++        .all()
++      const threads = new Map(rows.map(row => [row.key, row.thread]))
++      if (JSON.stringify([...threads]) === JSON.stringify([...this.threads])) return false
++      this.threads = threads
++      return true
++    } catch (error) {
++      process.stderr.write(`voice: links: couldn't read T3 Code's threads: ${error}\n`)
++      return false
++    }
++  }
++}
++
++function word(value: unknown) {
++  return typeof value === 'string' && value ? value : undefined
++}
++
++function readFile(path: string) {
++  try {
++    return readFileSync(path, 'utf8')
++  } catch {}
++}
++
++function readJson(path: string) {
++  try {
++    return JSON.parse(readFile(path) ?? '')
++  } catch {}
++}
 diff --git a/external_plugins/voice/phone.test.ts b/external_plugins/voice/phone.test.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..baa2fd38fbd0dce08939bfb9af9a3805dff5591a
@@ -1177,14 +1301,16 @@ index 0000000000000000000000000000000000000000..e3b27c92e497fc5099b4bb8079fcf957
 +}
 diff --git a/external_plugins/voice/tasks.test.ts b/external_plugins/voice/tasks.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..c219076aa1bcd0acc1ee76b13c30b304aa9074ba
+index 0000000000000000000000000000000000000000..1996c748336c364f893b9b18172f9d24e53c584f
 --- /dev/null
 +++ b/external_plugins/voice/tasks.test.ts
-@@ -0,0 +1,172 @@
+@@ -0,0 +1,288 @@
++import { Database } from 'bun:sqlite'
 +import { afterAll, expect, test } from 'bun:test'
 +import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 +import { tmpdir } from 'os'
 +import { join } from 'path'
++import { Links } from './links.ts'
 +import { Tasks, opener } from './tasks.ts'
 +
 +const home = mkdtempSync(join(tmpdir(), 'voice-tasks-'))
@@ -1208,7 +1334,7 @@ index 0000000000000000000000000000000000000000..c219076aa1bcd0acc1ee76b13c30b304
 +  writeFileSync(join(dir, 'state.json'), JSON.stringify(record))
 +}
 +
-+function running(session: string, status: 'busy' | 'idle', pid = process.pid, more: object = {}) {
++function running(session: string, status: 'busy' | 'idle' | 'shell', pid = process.pid, more: object = {}) {
 +  mkdirSync(join(claude, 'sessions'), { recursive: true })
 +  writeFileSync(join(claude, 'sessions', `${session.slice(0, 8)}.json`), JSON.stringify({ pid, sessionId: session, status, ...more }))
 +}
@@ -1252,7 +1378,25 @@ index 0000000000000000000000000000000000000000..c219076aa1bcd0acc1ee76b13c30b304
 +running('cccccccc-voiceapp', 'busy')
 +running('eeeeeeee-leisure', 'busy', 2 ** 22 + 12345)
 +
-+const tasks = new Tasks(state, hex, claude)
++const t3 = join(home, 't3')
++mkdirSync(t3)
++writeFileSync(join(t3, 'environment-id'), 'env-1\n')
++const t3db = new Database(join(t3, 'statev2.sqlite'))
++t3db.run('create table orchestration_v2_projection_threads (thread_id text primary key, deleted_at text)')
++t3db.run('create table orchestration_v2_projection_provider_threads (provider_thread_id text primary key, driver text, updated_at text, payload_json text)')
++afterAll(() => t3db.close())
++
++function mapped(key: string, thread: string, { driver = 'acpRegistry', deleted = null as string | null } = {}) {
++  t3db.run('insert or replace into orchestration_v2_projection_threads values (?, ?)', [thread, deleted])
++  t3db.run('insert or replace into orchestration_v2_projection_provider_threads values (?, ?, ?, ?)', [
++    `${driver}:${key}`,
++    driver,
++    new Date().toISOString(),
++    JSON.stringify({ appThreadId: thread, nativeThreadRef: { driver, nativeId: key } }),
++  ])
++}
++
++const tasks = new Tasks(state, hex, claude, t3)
 +afterAll(() => tasks.close())
 +
 +test("each thread is a task from its session's own records, what needs you first, then what's working, then what finished", () => {
@@ -1314,12 +1458,72 @@ index 0000000000000000000000000000000000000000..c219076aa1bcd0acc1ee76b13c30b304
 +  expect(tasks.tasks[0].name).toBe('hex')
 +})
 +
-+test('a new thread shows up when its app writes threads.json, once its session has records', async () => {
++test('a new thread shows up when its app writes threads.json, once its session has records, and links once Discord has said which server it is in', async () => {
 +  threads('discord', { d1: { name: 'Latest Claude', session: '99999999-latest' } })
 +  job('99999999-latest', { state: 'failed', detail: "You've hit your weekly limit", updatedAt: ago(0) })
 +  await until(() => tasks.get('discord:d1')?.state === 'failed')
 +  expect(tasks.get('discord:d1')).toMatchObject({ where: 'Discord', line: "You've hit your weekly limit" })
 +  expect(tasks.get('discord:d1')!.link).toBeUndefined()
++  writeFileSync(join(state, 'discord', 'guild.json'), JSON.stringify({ id: '3000' }))
++  await until(() => tasks.get('discord:d1')?.link === 'https://discord.com/channels/3000/d1')
++})
++
++test("a Buzz thread links to its message in the channel the bot recorded, a DM to its channel, and a thread with no channel to nothing", async () => {
++  const [anchors, lost, dm, channel] = ['a'.repeat(64), 'b'.repeat(64), '5c0f9a6e-3b1d-4e7a-9c2f-7d8e1a4b6c30', '0d6f2c1e-5a4b-4c3d-8e9f-123456789abc']
++  threads('buzz', {
++    [anchors]: { name: 'Anchors', session: 'b0000001-anchors' },
++    [lost]: { name: 'Lost', session: 'b0000002-lost' },
++    [dm]: { name: 'bassim', session: 'b0000003-dm' },
++  })
++  for (const session of ['b0000001-anchors', 'b0000002-lost', 'b0000003-dm']) job(session, { state: 'done', detail: 'ok', updatedAt: ago(1) })
++  await until(() => [anchors, lost, dm].every(thread => tasks.get(`buzz:${thread}`)))
++  expect(tasks.get(`buzz:${anchors}`)!.link).toBeUndefined()
++  writeFileSync(join(state, 'buzz', 'channels.json'), JSON.stringify({ [anchors]: channel }))
++  await until(() => tasks.get(`buzz:${anchors}`)?.link === `buzz://message?channel=${channel}&id=${anchors}`)
++  expect(tasks.get(`buzz:${dm}`)!.link).toBe(`buzz://channel/${dm}`)
++  expect(tasks.get(`buzz:${lost}`)!.link).toBeUndefined()
++})
++
++test("a Telegram DM links to the bot once the bot has said its name", async () => {
++  threads('telegram', { ...telegram, '2000100': { name: 'DM', session: '20001000-dm' } })
++  job('20001000-dm', { state: 'done', detail: 'ok', updatedAt: ago(1) })
++  await until(() => !!tasks.get('telegram:2000100'))
++  expect(tasks.get('telegram:2000100')).toMatchObject({ where: 'DM' })
++  expect(tasks.get('telegram:2000100')!.link).toBeUndefined()
++  writeFileSync(join(state, 'telegram', 'bot.json'), JSON.stringify({ username: 'hex_bot' }))
++  await until(() => tasks.get('telegram:2000100')?.link === 'https://t.me/hex_bot')
++})
++
++test("a T3 Code thread links to T3's own thread for it, once T3 has one, and the app's environment; deleted threads and other drivers give no link", async () => {
++  threads('t3', {
++    mapped: { name: 'Voice app', session: 'd3000001-mapped' },
++    later: { name: 'Later', session: 'd3000002-later' },
++    gone: { name: 'Gone', session: 'd3000003-gone' },
++    other: { name: 'Other', session: 'd3000004-other' },
++    unmapped: { name: 'Unmapped', session: 'd3000005-unmapped' },
++  })
++  for (const session of ['d3000001-mapped', 'd3000002-later', 'd3000003-gone', 'd3000004-other', 'd3000005-unmapped']) job(session, { state: 'done', detail: 'ok', updatedAt: ago(1) })
++  mapped('mapped', '4a1e7c52-9b3d-4f60-8a2e-5d6c7b8e9f01')
++  mapped('gone', 'thread-gone', { deleted: ago(5) })
++  mapped('other', 'thread-other', { driver: 'claudeAgent' })
++  await until(() => !!tasks.get('t3:mapped')?.link)
++  expect(tasks.get('t3:mapped')!.link).toBe('t3code://threads/env-1/4a1e7c52-9b3d-4f60-8a2e-5d6c7b8e9f01')
++  for (const key of ['later', 'gone', 'other', 'unmapped']) expect(tasks.get(`t3:${key}`)!.link).toBeUndefined()
++  mapped('later', 'thread:delegated task')
++  await until(() => !!tasks.get('t3:later')?.link)
++  expect(tasks.get('t3:later')!.link).toBe('t3code://threads/env-1/thread%3Adelegated%20task')
++})
++
++test('the T3 Code app scheme is a setting, and without T3 Code there are no T3 links', () => {
++  process.env.T3_APP_SCHEME = 't3code-preview'
++  const links = new Links(state, () => {}, t3)
++  delete process.env.T3_APP_SCHEME
++  links.load()
++  expect(links.of('t3', 'mapped')).toBe('t3code-preview://threads/env-1/4a1e7c52-9b3d-4f60-8a2e-5d6c7b8e9f01')
++  links.close()
++  const without = new Links(state, () => {}, join(home, 'no-t3'))
++  expect(without.of('t3', 'mapped')).toBeUndefined()
++  without.close()
 +})
 +
 +test("a thread whose turn ended stays working while its workflow runs, each workflow agent with its own steps", async () => {
@@ -1335,7 +1539,7 @@ index 0000000000000000000000000000000000000000..c219076aa1bcd0acc1ee76b13c30b304
 +  await until(() => antibody()?.agents[0].line === 'Reading bills.ts')
 +})
 +
-+test('a background session no thread holds is a task of its own while it works', async () => {
++test('a running session no thread holds is a task of its own while it works', async () => {
 +  job('12121212-review', { state: 'working', detail: 'reviewing autofork', updatedAt: ago(0) })
 +  job('34343434-probe', { state: 'done', detail: 'probe ran', updatedAt: ago(0) })
 +  running('12121212-review', 'busy', process.pid, { kind: 'bg', name: 'autofork-review', cwd: '/repo' })
@@ -1343,9 +1547,45 @@ index 0000000000000000000000000000000000000000..c219076aa1bcd0acc1ee76b13c30b304
 +  running('56565656-terminal', 'busy', process.pid, { kind: 'interactive', name: 'bassim-1' })
 +  await until(() => tasks.get('claude:12121212')?.state === 'working')
 +  expect(tasks.get('claude:12121212')).toMatchObject({ name: 'autofork-review', where: 'Claude Code', line: 'reviewing autofork' })
-+  expect(tasks.tasks.filter(task => task.app === 'claude').map(task => task.name)).toEqual(['autofork-review'])
++  expect(tasks.tasks.filter(task => task.app === 'claude').map(task => task.name)).toEqual(['autofork-review', 'bassim-1'])
 +  job('12121212-review', { state: 'done', detail: 'reviewed', updatedAt: ago(0) })
-+  await until(() => !tasks.get('claude:12121212'))
++  running('12121212-review', 'idle', process.pid, { kind: 'bg', name: 'autofork-review', cwd: '/repo' })
++  rmSync(join(claude, 'sessions', '56565656.json'))
++  await until(() => !tasks.get('claude:12121212') && !tasks.get('claude:56565656'))
++})
++
++test("a thread stays working while a session it started runs, that session one of its agents, and while its own shells run", async () => {
++  const shell = Bun.spawn(['sh', '-c', 'sleep 30 >/dev/null & echo $!; wait'], { stdout: 'pipe' })
++  const { value } = await shell.stdout.getReader().read()
++  const build = Number(new TextDecoder().decode(value))
++  afterAll(() => {
++    process.kill(build)
++    shell.kill()
++  })
++  threads('telegram', { ...telegram, '-1004422245734:3275': { name: 'lab', session: '32753275-lab' } })
++  job('32753275-lab', { state: 'done', detail: 'started the build', updatedAt: ago(1) })
++  running('32753275-lab', 'idle', shell.pid)
++  const lab = () => tasks.get('telegram:-1004422245734:3275')
++  await until(() => lab()?.state === 'done')
++  running('78787878-build', 'busy', build, { kind: 'interactive', name: 'lab-build-c0', cwd: '/scratch/build', startedAt: Date.now() })
++  await until(() => lab()?.state === 'working')
++  expect(lab()!.agents.map(agent => [agent.id, agent.label, agent.state])).toEqual([['78787878-build', 'lab-build-c0', 'working']])
++  expect(tasks.get('claude:78787878')).toBeUndefined()
++  step(join(claude, 'projects', '-scratch-build', '78787878-build.jsonl'), 'Read', { file_path: '/scratch/build/plan.md' })
++  await until(() => lab()?.agents[0]?.line === 'Reading plan.md')
++  rmSync(join(claude, 'sessions', '78787878.json'))
++  await until(() => lab()?.state === 'done')
++  running('32753275-lab', 'shell', shell.pid)
++  await until(() => lab()?.state === 'working')
++})
++
++test("a renewed session's new job folder still wakes the list", async () => {
++  rmSync(join(claude, 'jobs', 'aaaaaaaa'), { recursive: true })
++  job('aaaaaaaa-general', { state: 'done', detail: 'renewed', updatedAt: ago(0) })
++  await until(() => tasks.get('telegram:-1004422245734')?.line === 'renewed')
++  await Bun.sleep(100)
++  job('aaaaaaaa-general', { state: 'done', detail: 'after the renew', updatedAt: ago(0) })
++  await until(() => tasks.get('telegram:-1004422245734')?.line === 'after the renew')
 +})
 +
 +test('talking a task through tells the voice which thread it is and where it stands', () => {
@@ -1355,15 +1595,16 @@ index 0000000000000000000000000000000000000000..c219076aa1bcd0acc1ee76b13c30b304
 +})
 diff --git a/external_plugins/voice/tasks.ts b/external_plugins/voice/tasks.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..49b58af35d498738ac640d21f8f66468fe97aaa9
+index 0000000000000000000000000000000000000000..f5662d098f17b8598e938d70309984b1e64ae312
 --- /dev/null
 +++ b/external_plugins/voice/tasks.ts
-@@ -0,0 +1,418 @@
+@@ -0,0 +1,476 @@
 +import { closeSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, watch, type FSWatcher } from 'fs'
 +import { homedir } from 'os'
 +import { join } from 'path'
 +import { followTranscript, headline, sizeOf } from './activity.ts'
 +import { Changes } from './changes.ts'
++import { Links } from './links.ts'
 +
 +export type State = 'working' | 'needs' | 'done' | 'failed' | 'idle'
 +export type Step = { at: string; text: string }
@@ -1388,8 +1629,8 @@ index 0000000000000000000000000000000000000000..49b58af35d498738ac640d21f8f66468
 +  link?: string
 +}
 +
-+type Thread = { app: string; id: string; name: string; session?: string; cwd?: string }
-+type Session = { status: string; kind?: string; name?: string; cwd?: string }
++type Thread = { app: string; id: string; name: string; session?: string; cwd?: string; link?: string }
++type Session = { id: string; pid: number; status: string; name?: string; cwd?: string; started: number; at: number; parent?: string }
 +type Job = {
 +  state?: string
 +  detail?: string
@@ -1407,21 +1648,26 @@ index 0000000000000000000000000000000000000000..49b58af35d498738ac640d21f8f66468
 +const STEPS = 12
 +const KEEP = 7 * 24 * 60 * 60_000
 +const ORDER: State[] = ['needs', 'working', 'done', 'failed', 'idle']
++const RECORDS = new Set(['threads.json', 'guild.json', 'bot.json', 'channels.json'])
 +const STATES: Record<string, State> = { working: 'working', blocked: 'needs', done: 'done', failed: 'failed' }
 +const APPS: Record<string, string> = { telegram: 'Telegram', discord: 'Discord', buzz: 'Buzz', t3: 'T3 Code', voice: 'Voice', claude: 'Claude Code' }
 +const WORK = new Set(['agent', 'workflow'])
++const BUSY = new Set(['busy', 'shell'])
 +
 +// Every hex thread as a task, from the records Claude Code already keeps (the same ones
 +// `claude agents --json` prints): each session's job state and timeline, which sessions are
-+// running, and each app's threads.json for its name. A background session no thread holds is a
-+// task of its own while it works. It wakes when one of those files changes,
-+// follows a working thread's transcript for its newest step, and bumps a version on any change.
++// running, and each app's threads.json for its name and `links.ts` for where its app opens it.
++// A session another one started (a topic's `claude -p` build) counts toward it as one of its
++// agents; a running session nothing holds is a task of its own while it works. It wakes when one
++// of those files changes, follows a working thread's transcript for its newest step, and bumps a
++// version on any change.
 +// The counts behind the app's Tasks button keep their own version, so it hears only when one moves.
 +export class Tasks extends Changes {
 +  tasks: HexTask[] = []
 +  summary: Summary = { needs: 0, working: 0 }
 +  counts = new Changes()
 +  private threads: Thread[] = []
++  private links: Links
 +  private jobs = new Map<string, { job?: Job; timeline: Entry[] }>()
 +  private sessions = new Map<string, Session>()
 +  private watchers = new Map<string, FSWatcher>()
@@ -1435,11 +1681,13 @@ index 0000000000000000000000000000000000000000..49b58af35d498738ac640d21f8f66468
 +    private state: string,
 +    private hexDir: string,
 +    private claude = CLAUDE,
++    t3?: string,
 +  ) {
 +    super()
++    this.links = new Links(state, () => this.mark('threads'), t3)
 +    this.stops.push(watchDir(state, file => file && APPS[file] && this.mark('threads')))
 +    this.stops.push(watchDir(join(claude, 'sessions'), () => this.mark('sessions')))
-+    this.stops.push(watchDir(join(claude, 'jobs'), file => this.jobChanged(file)))
++    this.stops.push(watchDir(join(claude, 'jobs'), file => this.jobChanged(file, true)))
 +    this.build()
 +  }
 +
@@ -1453,6 +1701,7 @@ index 0000000000000000000000000000000000000000..49b58af35d498738ac640d21f8f66468
 +
 +  close() {
 +    clearTimeout(this.pending)
++    this.links.close()
 +    for (const stop of [...this.stops, ...this.appWatchers.values()]) stop()
 +    for (const watcher of this.watchers.values()) watcher.close()
 +    for (const follower of this.followers.values()) follower.stop()
@@ -1463,8 +1712,10 @@ index 0000000000000000000000000000000000000000..49b58af35d498738ac640d21f8f66468
 +    this.schedule()
 +  }
 +
-+  private jobChanged(short: string | null) {
++  // A renewed session gets a new job folder, and a watch on the old one hears nothing more.
++  private jobChanged(short: string | null, folder = false) {
 +    if (!short || !this.wanted().has(short)) return
++    if (folder) this.unwatchJob(short)
 +    this.jobs.delete(short)
 +    this.watchJob(short)
 +    this.schedule()
@@ -1497,7 +1748,8 @@ index 0000000000000000000000000000000000000000..49b58af35d498738ac640d21f8f66468
 +
 +  private readThreads() {
 +    for (const app of apps(this.state))
-+      if (!this.appWatchers.has(app)) this.appWatchers.set(app, watchDir(join(this.state, app), file => file === 'threads.json' && this.mark('threads')))
++      if (!this.appWatchers.has(app)) this.appWatchers.set(app, watchDir(join(this.state, app), file => !!file && RECORDS.has(file) && this.mark('threads')))
++    this.links.load()
 +    this.threads = apps(this.state).flatMap(app =>
 +      Object.entries(readJson(join(this.state, app, 'threads.json')) ?? {}).map(([id, thread]: [string, any]) => ({
 +        app,
@@ -1505,16 +1757,28 @@ index 0000000000000000000000000000000000000000..49b58af35d498738ac640d21f8f66468
 +        name: thread.name ?? id,
 +        session: typeof thread.session === 'string' ? thread.session : undefined,
 +        cwd: thread.cwd,
++        link: this.links.of(app, id),
 +      })),
 +    )
 +  }
 +
-+  // Background sessions that are running but aren't any thread's session, named as Claude Code named them.
++  private held() {
++    return new Set(this.threads.map(thread => thread.session))
++  }
++
++  // Running sessions no thread holds and no other session started, named as Claude Code named them.
 +  private loose(): Thread[] {
-+    const held = new Set(this.threads.map(thread => thread.session))
-+    return [...this.sessions]
-+      .filter(([id, session]) => session.kind === 'bg' && !held.has(id))
-+      .map(([id, session]) => ({ app: 'claude', id: short(id), name: session.name ?? short(id), session: id, cwd: session.cwd }))
++    const held = this.held()
++    return [...this.sessions.values()]
++      .filter(session => !session.parent && !held.has(session.id))
++      .map(session => ({ app: 'claude', id: short(session.id), name: session.name ?? short(session.id), session: session.id, cwd: session.cwd }))
++  }
++
++  // The busy sessions whose work counts toward this one: started below it, and not a thread's own.
++  private started(id: string) {
++    const held = this.held()
++    const owner = (session?: Session): string | undefined => (session?.parent && !held.has(session.id) ? owner(this.sessions.get(session.parent)) : session?.id)
++    return [...this.sessions.values()].filter(session => session.id !== id && busy(session) && owner(session) === id)
 +  }
 +
 +  private wanted() {
@@ -1523,11 +1787,7 @@ index 0000000000000000000000000000000000000000..49b58af35d498738ac640d21f8f66468
 +
 +  private watchJobs() {
 +    const wanted = this.wanted()
-+    for (const [id, watcher] of this.watchers) {
-+      if (wanted.has(id)) continue
-+      watcher.close()
-+      this.watchers.delete(id)
-+    }
++    for (const id of this.watchers.keys()) if (!wanted.has(id)) this.unwatchJob(id)
 +    for (const id of this.jobs.keys()) if (!wanted.has(id)) this.jobs.delete(id)
 +    for (const id of wanted) this.watchJob(id)
 +  }
@@ -1539,16 +1799,27 @@ index 0000000000000000000000000000000000000000..49b58af35d498738ac640d21f8f66468
 +    } catch {}
 +  }
 +
-+  // Running sessions by id, with Claude Code's busy or idle; a file whose process is gone doesn't count.
++  private unwatchJob(id: string) {
++    this.watchers.get(id)?.close()
++    this.watchers.delete(id)
++  }
++
++  // Running sessions by id, with Claude Code's status; a file whose process is gone doesn't count.
++  // A session's parent is the nearest session above it in the process tree.
 +  private readSessions() {
 +    this.sessions.clear()
 +    const dir = join(this.claude, 'sessions')
 +    for (const name of list(dir)) {
 +      if (!name.endsWith('.json')) continue
-+      const session = readJson(join(dir, name))
-+      if (session?.sessionId && alive(session.pid))
-+        this.sessions.set(session.sessionId, { status: session.status ?? 'idle', kind: session.kind, name: session.name, cwd: session.cwd })
++      const record = readJson(join(dir, name))
++      if (!record?.sessionId || !alive(record.pid) || busy(this.sessions.get(record.sessionId))) continue
++      const { sessionId: id, pid, status = 'idle', name: title, cwd, startedAt = 0 } = record
++      this.sessions.set(id, { id, pid, status, name: title, cwd, started: startedAt, at: record.statusUpdatedAt ?? startedAt })
 +    }
++    const byPid = new Map([...this.sessions.values()].map(session => [session.pid, session.id]))
++    const parents = processParents()
++    for (const session of this.sessions.values())
++      for (let pid = parents.get(session.pid); pid && pid > 1 && !session.parent; pid = parents.get(pid)) session.parent = byPid.get(pid)
 +  }
 +
 +  private job(session: string) {
@@ -1564,10 +1835,12 @@ index 0000000000000000000000000000000000000000..49b58af35d498738ac640d21f8f66468
 +
 +  private task(thread: Thread): HexTask {
 +    const { job, timeline } = thread.session ? this.job(thread.session) : { job: undefined, timeline: [] }
-+    const status = thread.session && this.sessions.get(thread.session)?.status
-+    const running = !!status
-+    let state: State = (job?.state && STATES[job.state]) ?? (status === 'busy' ? 'working' : 'idle')
-+    if ((state === 'working' && !running) || job?.detail?.startsWith('(idle')) state = 'idle'
++    const session = thread.session ? this.sessions.get(thread.session) : undefined
++    const started = thread.session ? this.started(thread.session) : []
++    const known = job?.state ? STATES[job.state] : undefined
++    const live = busy(session) || started.length > 0
++    let state: State = live ? 'working' : (known ?? 'idle')
++    if (!live && ((state === 'working' && !session) || job?.detail?.startsWith('(idle'))) state = 'idle'
 +    const lately = timeline
 +      .filter(entry => entry.text && entry.detail)
 +      .slice(-LATELY)
@@ -1576,16 +1849,21 @@ index 0000000000000000000000000000000000000000..49b58af35d498738ac640d21f8f66468
 +    const at = job?.updatedAt ?? timeline.at(-1)?.at ?? new Date(0).toISOString()
 +    const needs = state === 'needs' ? plain(job?.needs ?? job?.detail ?? '') || undefined : undefined
 +    const detail = job?.state === 'stopped' ? undefined : job?.detail && plain(job.detail)
-+    const since = state === 'working' || state === 'needs' ? (streak(timeline, job?.state) ?? at) : at
++    const began = Math.min(...started.map(one => one.started), busy(session) ? session!.at : Infinity)
++    const since =
++      state === 'working' && known !== 'working' ? new Date(began).toISOString() : state === 'working' || state === 'needs' ? (streak(timeline, job?.state) ?? at) : at
 +    const steps = state === 'working' ? this.steps(thread.session!) : []
 +    const line = steps[0]?.text ?? needs ?? detail ?? lately[0]?.text ?? ''
-+    const agents = (state === 'working' ? (job?.fan ?? []) : [])
-+      .filter(fan => WORK.has(fan.kind) && (!fan.doneAt || fan.doneAt >= Date.parse(since)))
-+      .map(({ id, label, doneAt }): Agent => {
-+        const steps = this.steps(`${thread.session} ${id}`)
-+        return { id, label, state: doneAt ? 'done' : 'working', ...(steps[0] && { line: steps[0].text }), steps }
-+      })
-+      .sort((a, b) => Number(a.state === 'done') - Number(b.state === 'done'))
++    const agents = (
++      state === 'working'
++        ? [
++            ...(job?.fan ?? [])
++              .filter(fan => WORK.has(fan.kind) && (!fan.doneAt || fan.doneAt >= Date.parse(since)))
++              .map(({ id, label, doneAt }) => this.agent(thread.session!, id, label, doneAt)),
++            ...started.map(one => this.agent(thread.session!, one.id, one.name ?? short(one.id))),
++          ]
++        : []
++    ).sort((a, b) => Number(a.state === 'done') - Number(b.state === 'done'))
 +    return {
 +      id: `${thread.app}:${thread.id}`,
 +      app: thread.app,
@@ -1600,8 +1878,17 @@ index 0000000000000000000000000000000000000000..49b58af35d498738ac640d21f8f66468
 +      agents,
 +      steps,
 +      lately: state === 'idle' ? [] : lately,
-+      ...(link(thread) && { link: link(thread) }),
++      ...(thread.link && { link: thread.link }),
 +    }
++  }
++
++  private agent(session: string, id: string, label: string, doneAt?: number): Agent {
++    const steps = this.steps(`${session} ${id}`)
++    return { id, label, state: doneAt ? 'done' : 'working', ...(steps[0] && { line: steps[0].text }), steps }
++  }
++
++  private project(cwd = this.hexDir) {
++    return join(this.claude, 'projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'))
 +  }
 +
 +  // A followed transcript's newest steps, newest first.
@@ -1609,8 +1896,8 @@ index 0000000000000000000000000000000000000000..49b58af35d498738ac640d21f8f66468
 +    return [...(this.followers.get(key)?.steps ?? [])].reverse()
 +  }
 +
-+  // A working thread's transcript, and its subagents' and workflow agents' from this stretch of
-+  // work, give its steps.
++  // A working thread's transcript, and those of its subagents, workflow agents and the sessions it
++  // started from this stretch of work, give its steps.
 +  private follow(tasks: HexTask[]) {
 +    const wanted = new Map<string, (path: (found: string) => () => void) => () => void>()
 +    const threads = [...this.threads, ...this.loose()]
@@ -1619,15 +1906,19 @@ index 0000000000000000000000000000000000000000..49b58af35d498738ac640d21f8f66468
 +      const thread = threads.find(thread => `${thread.app}:${thread.id}` === task.id)!
 +      const session = thread.session!
 +      const job = this.job(session).job
-+      const project = join(this.claude, 'projects', (job?.cwd ?? thread.cwd ?? this.hexDir).replace(/[^a-zA-Z0-9]/g, '-'))
++      const project = this.project(job?.cwd ?? thread.cwd)
 +      const subagents = join(project, session, 'subagents')
 +      wanted.set(session, follow => follow(join(project, `${session}.jsonl`)))
-+      for (const agent of task.agents)
++      for (const agent of task.agents) {
++        const started = this.sessions.get(agent.id)
 +        wanted.set(`${session} ${agent.id}`, follow =>
-+          job?.fan?.find(one => one.id === agent.id)?.kind === 'workflow'
-+            ? inRun(join(subagents, 'workflows'), `agent-${agent.id}.jsonl`, follow)
-+            : follow(join(subagents, `agent-${agent.id}.jsonl`)),
++          started
++            ? follow(join(this.project(started.cwd), `${agent.id}.jsonl`))
++            : job?.fan?.find(one => one.id === agent.id)?.kind === 'workflow'
++              ? inRun(join(subagents, 'workflows'), `agent-${agent.id}.jsonl`, follow)
++              : follow(join(subagents, `agent-${agent.id}.jsonl`)),
 +        )
++      }
 +    }
 +    for (const [key, follower] of this.followers) {
 +      if (wanted.has(key)) continue
@@ -1678,12 +1969,6 @@ index 0000000000000000000000000000000000000000..49b58af35d498738ac640d21f8f66468
 +  return APPS[thread.app]
 +}
 +
-+function link(thread: Thread) {
-+  if (thread.app !== 'telegram' || !thread.id.startsWith('-100')) return
-+  const [chat, topic = '1'] = thread.id.slice(4).split(':')
-+  return `https://t.me/c/${chat}/${topic}`
-+}
-+
 +// When the job's current state began: the oldest of the newest run of timeline entries in it.
 +function streak(timeline: Entry[], state?: string) {
 +  let since: string | undefined
@@ -1707,6 +1992,19 @@ index 0000000000000000000000000000000000000000..49b58af35d498738ac640d21f8f66468
 +    if (!path) return
 +    watcher.close()
 +    stop = follow(path)
++  }
++}
++
++function busy(session?: Session) {
++  return !!session && BUSY.has(session.status)
++}
++
++function processParents() {
++  try {
++    const out = Bun.spawnSync(['ps', '-A', '-o', 'pid=,ppid=']).stdout.toString()
++    return new Map(out.trim().split('\n').map(line => line.trim().split(/\s+/).map(Number) as [number, number]))
++  } catch {
++    return new Map<number, number>()
 +  }
 +}
 +

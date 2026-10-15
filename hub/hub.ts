@@ -616,6 +616,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', general =
     main,
     renewal,
     session: current,
+    threads: () => Object.keys(threads),
     name: (thread: string) => threads[thread]?.name,
     cwd: (thread: string) => threads[thread]?.cwd,
     stop,

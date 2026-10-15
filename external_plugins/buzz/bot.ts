@@ -16,6 +16,7 @@ const ACCESS_FILE = join(STATE_DIR, 'access.json')
 const ENV_FILE = join(STATE_DIR, '.env')
 const CURSOR_FILE = join(STATE_DIR, 'cursor.json')
 const BUTTONS_FILE = join(STATE_DIR, 'buttons.json')
+const CHANNELS_FILE = join(STATE_DIR, 'channels.json')
 const INBOX_DIR = join(STATE_DIR, 'inbox')
 
 try {
@@ -191,7 +192,8 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
   const start = now()
   const http = url.replace(/^ws/, 'http').replace(/\/$/, '')
   const channels = new Map<string, { name: string; dm: boolean; forum: boolean }>()
-  const homes = new Map<string, string>()
+  // The channel of every thread, kept for the voice app, which links a task to its thread with it.
+  const homes = new Map(Object.entries(load<Record<string, string>>(CHANNELS_FILE, {})))
   const names = new Map<string, Promise<string>>()
   const triggers = new Map<string, string[]>()
   const acks = new Map<string, string[]>()
@@ -229,13 +231,19 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
     return names.get(pubkey)!
   }
 
+  function home(thread: string, channel: string) {
+    if (homes.get(thread) === channel) return
+    homes.set(thread, channel)
+    keep(CHANNELS_FILE, Object.fromEntries(homes))
+  }
+
   async function channelOf(thread: string): Promise<string> {
     if (isChannel(thread)) return thread
     if (!homes.has(thread)) {
       const [root] = await relay.query([{ kinds: MESSAGES, ids: [thread] }])
       const channel = root && tag(root, 'h')
       if (!channel) throw new Error(`can't find the channel of thread ${thread}`)
-      homes.set(thread, channel)
+      home(thread, channel)
     }
     return homes.get(thread)!
   }
@@ -276,7 +284,7 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
   async function place(name: string, where?: string, about?: string) {
     const channel = channelNamed(where ?? loadAccess().channel)
     const root = await relay.publish({ kind: channels.get(channel)!.forum ? POST : 9, content: [`**${name}**`, about].filter(Boolean).join('\n'), tags: [['h', channel], ['p', owner]] })
-    homes.set(root.id, channel)
+    home(root.id, channel)
     return { thread: root.id, link: tappable(link(channel, root.id)) }
   }
 
@@ -757,7 +765,7 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
     if (!thread) return
     const channel = tag(original, 'h')!
     const joined = !edited && !isChannel(thread) && hub.name(thread) === undefined
-    if (!isChannel(thread)) homes.set(thread, channel)
+    if (!isChannel(thread)) home(thread, channel)
     const text = await unmention(event.content)
 
     if (!edited && event.pubkey === owner && tagged && text === '!shutdown') return shutdown()
@@ -848,7 +856,11 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
   const presence = () => relay.publish({ kind: 20001, content: 'online', tags: [] }).catch(() => {})
   const heartbeat = setInterval(presence, 60_000)
   void presence()
-  discover().catch(e => log(`channel discovery failed: ${e}`))
+  async function locate() {
+    for (const thread of hub.threads()) if (!isChannel(thread) && !homes.has(thread)) await channelOf(thread).catch(() => {})
+  }
+
+  discover().then(locate).catch(e => log(`channel discovery failed: ${e}`))
 
   // !shutdown from the owner (Buzz Desktop's Shutdown button) takes Hex off
   // Buzz until the service restarts; the rest of the hub keeps running.

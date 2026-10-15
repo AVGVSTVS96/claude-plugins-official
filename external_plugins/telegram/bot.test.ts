@@ -397,3 +397,7 @@ test('a pinned post keeps its latest text in the ledger', async () => {
   await call('edit_message', { message_id: String(id), text: 'Status: shipped' })
   expect(ledger().pins[DESK]).toMatchObject({ message: id, text: 'Status: shipped' })
 })
+
+test('once polling the bot leaves its name in bot.json, so the voice app can link a DM', () => {
+  expect(JSON.parse(readFileSync(join(state, 'bot.json'), 'utf8'))).toEqual({ username: 'hex_bot' })
+})

@@ -963,6 +963,7 @@ for (let attempt = 1; ; attempt++) {
       onStart: info => {
         attempt = 0
         process.stderr.write(`telegram hub: polling as @${info.username}\n`)
+        writeFileSync(join(STATE_DIR, 'bot.json'), JSON.stringify({ username: info.username }) + '\n')
       },
     })
     break

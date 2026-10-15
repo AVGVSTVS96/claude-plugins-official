@@ -3,6 +3,7 @@ import { homedir } from 'os'
 import { join } from 'path'
 import { followTranscript, headline, sizeOf } from './activity.ts'
 import { Changes } from './changes.ts'
+import { Links } from './links.ts'
 
 export type State = 'working' | 'needs' | 'done' | 'failed' | 'idle'
 export type Step = { at: string; text: string }
@@ -27,7 +28,7 @@ export type HexTask = {
   link?: string
 }
 
-type Thread = { app: string; id: string; name: string; session?: string; cwd?: string }
+type Thread = { app: string; id: string; name: string; session?: string; cwd?: string; link?: string }
 type Session = { id: string; pid: number; status: string; name?: string; cwd?: string; started: number; at: number; parent?: string }
 type Job = {
   state?: string
@@ -46,6 +47,7 @@ const LATELY = 5
 const STEPS = 12
 const KEEP = 7 * 24 * 60 * 60_000
 const ORDER: State[] = ['needs', 'working', 'done', 'failed', 'idle']
+const RECORDS = new Set(['threads.json', 'guild.json', 'bot.json', 'channels.json'])
 const STATES: Record<string, State> = { working: 'working', blocked: 'needs', done: 'done', failed: 'failed' }
 const APPS: Record<string, string> = { telegram: 'Telegram', discord: 'Discord', buzz: 'Buzz', t3: 'T3 Code', voice: 'Voice', claude: 'Claude Code' }
 const WORK = new Set(['agent', 'workflow'])
@@ -53,16 +55,18 @@ const BUSY = new Set(['busy', 'shell'])
 
 // Every hex thread as a task, from the records Claude Code already keeps (the same ones
 // `claude agents --json` prints): each session's job state and timeline, which sessions are
-// running, and each app's threads.json for its name. A session another one started (a topic's
-// `claude -p` build) counts toward it as one of its agents; a running session nothing holds is a
-// task of its own while it works. It wakes when one of those files changes,
-// follows a working thread's transcript for its newest step, and bumps a version on any change.
+// running, and each app's threads.json for its name and `links.ts` for where its app opens it.
+// A session another one started (a topic's `claude -p` build) counts toward it as one of its
+// agents; a running session nothing holds is a task of its own while it works. It wakes when one
+// of those files changes, follows a working thread's transcript for its newest step, and bumps a
+// version on any change.
 // The counts behind the app's Tasks button keep their own version, so it hears only when one moves.
 export class Tasks extends Changes {
   tasks: HexTask[] = []
   summary: Summary = { needs: 0, working: 0 }
   counts = new Changes()
   private threads: Thread[] = []
+  private links: Links
   private jobs = new Map<string, { job?: Job; timeline: Entry[] }>()
   private sessions = new Map<string, Session>()
   private watchers = new Map<string, FSWatcher>()
@@ -76,8 +80,10 @@ export class Tasks extends Changes {
     private state: string,
     private hexDir: string,
     private claude = CLAUDE,
+    t3?: string,
   ) {
     super()
+    this.links = new Links(state, () => this.mark('threads'), t3)
     this.stops.push(watchDir(state, file => file && APPS[file] && this.mark('threads')))
     this.stops.push(watchDir(join(claude, 'sessions'), () => this.mark('sessions')))
     this.stops.push(watchDir(join(claude, 'jobs'), file => this.jobChanged(file, true)))
@@ -94,6 +100,7 @@ export class Tasks extends Changes {
 
   close() {
     clearTimeout(this.pending)
+    this.links.close()
     for (const stop of [...this.stops, ...this.appWatchers.values()]) stop()
     for (const watcher of this.watchers.values()) watcher.close()
     for (const follower of this.followers.values()) follower.stop()
@@ -140,7 +147,8 @@ export class Tasks extends Changes {
 
   private readThreads() {
     for (const app of apps(this.state))
-      if (!this.appWatchers.has(app)) this.appWatchers.set(app, watchDir(join(this.state, app), file => file === 'threads.json' && this.mark('threads')))
+      if (!this.appWatchers.has(app)) this.appWatchers.set(app, watchDir(join(this.state, app), file => !!file && RECORDS.has(file) && this.mark('threads')))
+    this.links.load()
     this.threads = apps(this.state).flatMap(app =>
       Object.entries(readJson(join(this.state, app, 'threads.json')) ?? {}).map(([id, thread]: [string, any]) => ({
         app,
@@ -148,6 +156,7 @@ export class Tasks extends Changes {
         name: thread.name ?? id,
         session: typeof thread.session === 'string' ? thread.session : undefined,
         cwd: thread.cwd,
+        link: this.links.of(app, id),
       })),
     )
   }
@@ -268,7 +277,7 @@ export class Tasks extends Changes {
       agents,
       steps,
       lately: state === 'idle' ? [] : lately,
-      ...(link(thread) && { link: link(thread) }),
+      ...(thread.link && { link: thread.link }),
     }
   }
 
@@ -357,12 +366,6 @@ function apps(state: string) {
 function where(thread: Thread) {
   if (thread.app === 'telegram' && !thread.id.includes(':')) return thread.id.startsWith('-') ? 'General' : 'DM'
   return APPS[thread.app]
-}
-
-function link(thread: Thread) {
-  if (thread.app !== 'telegram' || !thread.id.startsWith('-100')) return
-  const [chat, topic = '1'] = thread.id.slice(4).split(':')
-  return `https://t.me/c/${chat}/${topic}`
 }
 
 // When the job's current state began: the oldest of the newest run of timeline entries in it.

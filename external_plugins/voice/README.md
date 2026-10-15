@@ -172,11 +172,22 @@ same ones `claude agents --json` prints) and wakes when one of them changes.
  ~/.claude/jobs/<id>/timeline.jsonl  each change, with its time
  ~/.claude/sessions/<pid>.json       which sessions are running
  state/<app>/threads.json            each thread's name and current session
+ state/<app>/{guild,bot,channels}.json  what each bot knows of where its threads live
+ ~/.t3/userdata/statev2.sqlite       which T3 Code thread a hex thread is
  <session>.jsonl transcripts         a working thread's newest step, its agents' too
                     │
                     ▼
         GET /tasks?after=<version> ── the app's Tasks sheet
 ```
+
+A task's `link` is `https://t.me/...` (a topic, General, or the bot for the
+DM), `https://discord.com/channels/<server>/<thread>`, `buzz://message?channel=...&id=...`
+(`buzz://channel/...` for the DM) or `<scheme>://threads/<environment>/<thread>` for T3 Code,
+the app's URL scheme being `t3code` unless `T3_APP_SCHEME` says otherwise
+(`t3code-preview`, `t3code-dev`). The bots leave what these need next to their
+`threads.json` when they start (Discord's `guild.json`, Telegram's `bot.json`) and as
+they see threads (Buzz's `channels.json`); a thread whose app can't say where it
+lives has no `link`.
 
 A blocked thread needs you; a working one whose session stopped counts as idle;
 anything that finished more than a week ago is left out. Rows come in that
@@ -184,7 +195,7 @@ order (needs you, working, done, failed, idle), newest change first in each.
 
 | Request | Answers |
 | --- | --- |
-| `GET /tasks` | `{ version, tasks }`: each thread's `id`, `name`, `where` (Telegram, General, Discord...), `state` (`needs`, `working`, `done`, `failed`, `idle`), one `line`, `since` its state began, `at` its last change, its running `agents` with their own lines, and a Telegram `link` |
+| `GET /tasks` | `{ version, tasks }`: each thread's `id`, `name`, `where` (Telegram, General, Discord...), `state` (`needs`, `working`, `done`, `failed`, `idle`), one `line`, `since` its state began, `at` its last change, its running `agents` with their own lines, and a `link` that opens the thread in its own app (Telegram, Discord, Buzz or T3 Code) |
 | `GET /tasks?after=<version>` | the same, once anything has changed (or after 25 seconds) |
 | `GET /tasks/summary?after=<version>` | `{ version, needs, working }`, once a count changes |
 | `GET /tasks/<id>` | one task, with what it `needs` from you in full and what it did `lately` |
@@ -268,6 +279,7 @@ them with hex) gets Claude walking the list in order.
    VOICE=marin        # one of OpenAI's built-in voices; OpenAI's default if unset
    VOICE_PORT=8790    # the call page's local port
    VOICE_TOKEN=...    # if set, /session, /calls and /phone need "Authorization: Bearer <token>"
+   T3_APP_SCHEME=...  # the T3 Code app's URL scheme for task links; t3code if unset
    OPENAI_BASE_URL=... # another endpoint that speaks OpenAI's live API; https://api.openai.com/v1 if unset
    ```
 

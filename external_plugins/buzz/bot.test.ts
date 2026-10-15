@@ -281,6 +281,7 @@ exit 0
     me,
     key,
     auth,
+    state,
     channel,
     openSource,
     secret,
@@ -724,4 +725,21 @@ test('create_channel makes a channel Hex owns, adds the owner, and new_thread ca
   expect((await session.call('list_channels', {})).text).toContain(`#research  (id: ${id})`)
   await session.call('new_thread', { title: 'Reading', prompt: 'gather them', channel: 'research' })
   expect(await until(() => bot.relay.events.find(event => event.content === '**Reading**'))).toMatchObject({ kind: 45001, tags: [['h', id], ['p', owner], bot.auth] })
+})
+
+test('the channel of every thread is kept in channels.json for the voice app: threads it starts, threads it joins, and threads it already had', async () => {
+  let known!: Event
+  const bot = await startBot(({ state, relay, channel }) => {
+    known = signed(ownerKey, 9, 'an old thread', [['h', channel]], Math.floor(Date.now() / 1000) - 3600)
+    relay.inject(known)
+    writeFileSync(join(state, 'threads.json'), JSON.stringify({ [known.id]: { name: 'Old' }, [crypto.randomUUID()]: { name: 'bassim' } }))
+  })
+  const channels = () => JSON.parse(existsSync(join(bot.state, 'channels.json')) ? readFileSync(join(bot.state, 'channels.json'), 'utf8') : '{}')
+  await until(() => channels()[known.id] === bot.channel)
+  const { root, session } = await threadStarted(bot)
+  await until(() => channels()[root.id] === bot.channel)
+  await session.call('new_thread', { title: 'Anchors', prompt: 'find better anchors' })
+  const opened = await until(() => bot.published(9).find(event => event.content === '**Anchors**'))
+  await until(() => channels()[opened.id] === bot.channel)
+  expect(Object.keys(channels()).sort()).toEqual([known.id, root.id, opened.id].sort())
 })

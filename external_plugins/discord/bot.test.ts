@@ -1,6 +1,6 @@
 import { beforeAll, expect, mock, test } from 'bun:test'
 import { connect } from 'net'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'fs'
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import * as discord from 'discord.js'
@@ -449,4 +449,9 @@ test('a DM is its own session named DM, a message reaches it while it works, and
   await mine.call('reply', { text: 'on it, from the DM' })
   expect(done).toContainEqual({ send: expect.objectContaining({ content: 'on it, from the DM' }), in: dm.id })
   expect((await mine.call('close_thread', {})).error).toBe('a DM is not a thread')
+})
+
+test('once connected the bot leaves the id of its server in guild.json, so the voice app can link a thread', () => {
+  handlers.get('clientReady')!({ user: { tag: 'hex#0000' } })
+  expect(JSON.parse(readFileSync(join(state, 'guild.json'), 'utf8'))).toEqual({ id: GUILD })
 })

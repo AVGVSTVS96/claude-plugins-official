@@ -390,6 +390,7 @@ test('an unreadable threads.json is moved aside instead of overwritten, and a ma
   hub.close()
   start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION }, 'chat:8': null, 'chat:9': { session: SESSION } } })
   expect(hub.find('chat:7')).toBe('chat:7')
+  expect(hub.threads()).toEqual(['chat:7'])
   expect(() => hub.find('chat:8')).toThrow()
   expect(() => hub.find('chat:9')).toThrow()
 })

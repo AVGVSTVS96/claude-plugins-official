@@ -4,7 +4,7 @@ id: hub
 summary: Add a client-agnostic hub that gives every chat thread its own Claude Code session and moves threads between clients.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: hub.patch
-patch_sha256: b384479d789bbb17b0ed67cfc7501729853a345a726b8def887a816e4ba33afc
+patch_sha256: 1aae09df2cca0296d57041b7b7c244c3a88723b885ef56aa1e565401deeeaf73
 ---
 
 ## Intent
@@ -41,7 +41,7 @@ session resumes there and keeps it when it moves to another client. A failed
 start is reported before the thread goes idle, so a client still waiting on the
 start sees why. A client can open a thread with a prompt, close one (its
 session stops once idle and the thread is forgotten), stop a thread's session
-now (its next message resumes it), find threads by name and rename them. `title` is the one rule
+now (its next message resumes it), find threads by name, list them and rename them. `title` is the one rule
 for thread names every client enforces: one word. `transcribe` turns a
 recording into text through any OpenAI-compatible transcriptions endpoint set by
 `TRANSCRIBE_URL` and `TRANSCRIBE_MODEL` (and `TRANSCRIBE_API_KEY` if it needs one),

@@ -290,13 +290,13 @@ index ad04f6fa437bfa013f72f71de2b460f3eedeeeee..ba2d961c0f87a99cc5f532545276a240
 +The bot token lives in `~/.claude/channels/hex/discord/.env` as `DISCORD_BOT_TOKEN=…`, and `access.json` there holds `allowFrom`, the Discord user ids allowed to talk to it. The bot needs the Message Content intent, and in its server: View Channels, Send Messages, Send Messages in Threads, Create Public Threads, Manage Threads, Read Message History, Attach Files and Add Reactions.
 diff --git a/external_plugins/discord/bot.test.ts b/external_plugins/discord/bot.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..f62b03d681eae223df3da6d8652c73b95ea76344
+index 0000000000000000000000000000000000000000..bf729531be42a2ed97d5a70a88762b6841779dff
 --- /dev/null
 +++ b/external_plugins/discord/bot.test.ts
-@@ -0,0 +1,452 @@
+@@ -0,0 +1,457 @@
 +import { beforeAll, expect, mock, test } from 'bun:test'
 +import { connect } from 'net'
-+import { mkdirSync, mkdtempSync, writeFileSync } from 'fs'
++import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'fs'
 +import { tmpdir } from 'os'
 +import { join } from 'path'
 +import * as discord from 'discord.js'
@@ -746,12 +746,17 @@ index 0000000000000000000000000000000000000000..f62b03d681eae223df3da6d8652c73b9
 +  expect(done).toContainEqual({ send: expect.objectContaining({ content: 'on it, from the DM' }), in: dm.id })
 +  expect((await mine.call('close_thread', {})).error).toBe('a DM is not a thread')
 +})
++
++test('once connected the bot leaves the id of its server in guild.json, so the voice app can link a thread', () => {
++  handlers.get('clientReady')!({ user: { tag: 'hex#0000' } })
++  expect(JSON.parse(readFileSync(join(state, 'guild.json'), 'utf8'))).toEqual({ id: GUILD })
++})
 diff --git a/external_plugins/discord/bot.ts b/external_plugins/discord/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..957d124ba39b25a0d4a80378b4ceb425ca04f16c
+index 0000000000000000000000000000000000000000..e0e505bb373dc8b351e02b2fc2bb191e36b1dec7
 --- /dev/null
 +++ b/external_plugins/discord/bot.ts
-@@ -0,0 +1,703 @@
+@@ -0,0 +1,706 @@
 +#!/usr/bin/env bun
 +import {
 +  Client,
@@ -794,6 +799,7 @@ index 0000000000000000000000000000000000000000..957d124ba39b25a0d4a80378b4ceb425
 +
 +const STATE_DIR = process.env.DISCORD_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'hex', 'discord')
 +const ACCESS_FILE = join(STATE_DIR, 'access.json')
++const GUILD_FILE = join(STATE_DIR, 'guild.json')
 +const ENV_FILE = join(STATE_DIR, '.env')
 +const INBOX_DIR = join(STATE_DIR, 'inbox')
 +
@@ -1449,6 +1455,8 @@ index 0000000000000000000000000000000000000000..957d124ba39b25a0d4a80378b4ceb425
 +
 +  client.once('clientReady', c => {
 +    process.stderr.write(`discord hub: gateway connected as ${c.user.tag}\n`)
++    const id = client.guilds.cache.first()?.id
++    if (id) writeFileSync(GUILD_FILE, JSON.stringify({ id }) + '\n')
 +  })
 +
 +  client.login(token).catch(err => {

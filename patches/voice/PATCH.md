@@ -4,7 +4,7 @@ id: voice
 summary: Add a voice channel where OpenAI's gpt-live-1 holds a live call and hands every real request to the Claude Code session.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: voice.patch
-patch_sha256: 99f8d89fb80937422a0c478f6ad469a2ba807f06d2a423a85453d485a9b5676c
+patch_sha256: bdbb64b5717657be2a5e5856f619ec3d08403652a53138b14c8c875f5f1e1108
 ---
 
 ## Intent
@@ -82,6 +82,14 @@ plugin with no hub code.
   session starts its own plugin, so on start the plugin resumes the last
   day's unfinished sends from their records, reading each thread from the
   start of its session to find the tagged message.
+- `GET /tasks` shows every hex thread as a task with a `link` that opens the
+  thread in its own app (`links.ts`): a Telegram topic, General, or the bot for
+  the DM; a Discord thread in the server named in the bot's `guild.json`; a
+  Buzz message in the channel in the bot's `channels.json`, or the DM's channel;
+  a T3 Code thread, found in T3's own database (`statev2.sqlite`, read only and
+  read again when it changes) from the hex thread's key and opened by the app's URL scheme
+  (`T3_APP_SCHEME`, `t3code` unless set). An app that can't say where a thread
+  lives gives it no link.
 - `GET /activity?after=<version>` long-polls the live call's tasks, most
   recently changed first, each with its latest `line`, for the app's live
   line.

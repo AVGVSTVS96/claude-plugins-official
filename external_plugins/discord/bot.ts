@@ -40,6 +40,7 @@ import { startHub, clients, move, tappable, title, transcribe, type Message } fr
 
 const STATE_DIR = process.env.DISCORD_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'hex', 'discord')
 const ACCESS_FILE = join(STATE_DIR, 'access.json')
+const GUILD_FILE = join(STATE_DIR, 'guild.json')
 const ENV_FILE = join(STATE_DIR, '.env')
 const INBOX_DIR = join(STATE_DIR, 'inbox')
 
@@ -695,6 +696,8 @@ function serve(token: string) {
 
   client.once('clientReady', c => {
     process.stderr.write(`discord hub: gateway connected as ${c.user.tag}\n`)
+    const id = client.guilds.cache.first()?.id
+    if (id) writeFileSync(GUILD_FILE, JSON.stringify({ id }) + '\n')
   })
 
   client.login(token).catch(err => {

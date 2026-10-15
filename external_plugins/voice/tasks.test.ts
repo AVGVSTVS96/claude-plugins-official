@@ -1,7 +1,9 @@
+import { Database } from 'bun:sqlite'
 import { afterAll, expect, test } from 'bun:test'
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import { Links } from './links.ts'
 import { Tasks, opener } from './tasks.ts'
 
 const home = mkdtempSync(join(tmpdir(), 'voice-tasks-'))
@@ -69,7 +71,25 @@ running('aaaaaaaa-general', 'idle')
 running('cccccccc-voiceapp', 'busy')
 running('eeeeeeee-leisure', 'busy', 2 ** 22 + 12345)
 
-const tasks = new Tasks(state, hex, claude)
+const t3 = join(home, 't3')
+mkdirSync(t3)
+writeFileSync(join(t3, 'environment-id'), 'env-1\n')
+const t3db = new Database(join(t3, 'statev2.sqlite'))
+t3db.run('create table orchestration_v2_projection_threads (thread_id text primary key, deleted_at text)')
+t3db.run('create table orchestration_v2_projection_provider_threads (provider_thread_id text primary key, driver text, updated_at text, payload_json text)')
+afterAll(() => t3db.close())
+
+function mapped(key: string, thread: string, { driver = 'acpRegistry', deleted = null as string | null } = {}) {
+  t3db.run('insert or replace into orchestration_v2_projection_threads values (?, ?)', [thread, deleted])
+  t3db.run('insert or replace into orchestration_v2_projection_provider_threads values (?, ?, ?, ?)', [
+    `${driver}:${key}`,
+    driver,
+    new Date().toISOString(),
+    JSON.stringify({ appThreadId: thread, nativeThreadRef: { driver, nativeId: key } }),
+  ])
+}
+
+const tasks = new Tasks(state, hex, claude, t3)
 afterAll(() => tasks.close())
 
 test("each thread is a task from its session's own records, what needs you first, then what's working, then what finished", () => {
@@ -131,12 +151,72 @@ test('a change to a session wakes the list, and the counts move only when a coun
   expect(tasks.tasks[0].name).toBe('hex')
 })
 
-test('a new thread shows up when its app writes threads.json, once its session has records', async () => {
+test('a new thread shows up when its app writes threads.json, once its session has records, and links once Discord has said which server it is in', async () => {
   threads('discord', { d1: { name: 'Latest Claude', session: '99999999-latest' } })
   job('99999999-latest', { state: 'failed', detail: "You've hit your weekly limit", updatedAt: ago(0) })
   await until(() => tasks.get('discord:d1')?.state === 'failed')
   expect(tasks.get('discord:d1')).toMatchObject({ where: 'Discord', line: "You've hit your weekly limit" })
   expect(tasks.get('discord:d1')!.link).toBeUndefined()
+  writeFileSync(join(state, 'discord', 'guild.json'), JSON.stringify({ id: '3000' }))
+  await until(() => tasks.get('discord:d1')?.link === 'https://discord.com/channels/3000/d1')
+})
+
+test("a Buzz thread links to its message in the channel the bot recorded, a DM to its channel, and a thread with no channel to nothing", async () => {
+  const [anchors, lost, dm, channel] = ['a'.repeat(64), 'b'.repeat(64), '5c0f9a6e-3b1d-4e7a-9c2f-7d8e1a4b6c30', '0d6f2c1e-5a4b-4c3d-8e9f-123456789abc']
+  threads('buzz', {
+    [anchors]: { name: 'Anchors', session: 'b0000001-anchors' },
+    [lost]: { name: 'Lost', session: 'b0000002-lost' },
+    [dm]: { name: 'bassim', session: 'b0000003-dm' },
+  })
+  for (const session of ['b0000001-anchors', 'b0000002-lost', 'b0000003-dm']) job(session, { state: 'done', detail: 'ok', updatedAt: ago(1) })
+  await until(() => [anchors, lost, dm].every(thread => tasks.get(`buzz:${thread}`)))
+  expect(tasks.get(`buzz:${anchors}`)!.link).toBeUndefined()
+  writeFileSync(join(state, 'buzz', 'channels.json'), JSON.stringify({ [anchors]: channel }))
+  await until(() => tasks.get(`buzz:${anchors}`)?.link === `buzz://message?channel=${channel}&id=${anchors}`)
+  expect(tasks.get(`buzz:${dm}`)!.link).toBe(`buzz://channel/${dm}`)
+  expect(tasks.get(`buzz:${lost}`)!.link).toBeUndefined()
+})
+
+test("a Telegram DM links to the bot once the bot has said its name", async () => {
+  threads('telegram', { ...telegram, '2000100': { name: 'DM', session: '20001000-dm' } })
+  job('20001000-dm', { state: 'done', detail: 'ok', updatedAt: ago(1) })
+  await until(() => !!tasks.get('telegram:2000100'))
+  expect(tasks.get('telegram:2000100')).toMatchObject({ where: 'DM' })
+  expect(tasks.get('telegram:2000100')!.link).toBeUndefined()
+  writeFileSync(join(state, 'telegram', 'bot.json'), JSON.stringify({ username: 'hex_bot' }))
+  await until(() => tasks.get('telegram:2000100')?.link === 'https://t.me/hex_bot')
+})
+
+test("a T3 Code thread links to T3's own thread for it, once T3 has one, and the app's environment; deleted threads and other drivers give no link", async () => {
+  threads('t3', {
+    mapped: { name: 'Voice app', session: 'd3000001-mapped' },
+    later: { name: 'Later', session: 'd3000002-later' },
+    gone: { name: 'Gone', session: 'd3000003-gone' },
+    other: { name: 'Other', session: 'd3000004-other' },
+    unmapped: { name: 'Unmapped', session: 'd3000005-unmapped' },
+  })
+  for (const session of ['d3000001-mapped', 'd3000002-later', 'd3000003-gone', 'd3000004-other', 'd3000005-unmapped']) job(session, { state: 'done', detail: 'ok', updatedAt: ago(1) })
+  mapped('mapped', '4a1e7c52-9b3d-4f60-8a2e-5d6c7b8e9f01')
+  mapped('gone', 'thread-gone', { deleted: ago(5) })
+  mapped('other', 'thread-other', { driver: 'claudeAgent' })
+  await until(() => !!tasks.get('t3:mapped')?.link)
+  expect(tasks.get('t3:mapped')!.link).toBe('t3code://threads/env-1/4a1e7c52-9b3d-4f60-8a2e-5d6c7b8e9f01')
+  for (const key of ['later', 'gone', 'other', 'unmapped']) expect(tasks.get(`t3:${key}`)!.link).toBeUndefined()
+  mapped('later', 'thread:delegated task')
+  await until(() => !!tasks.get('t3:later')?.link)
+  expect(tasks.get('t3:later')!.link).toBe('t3code://threads/env-1/thread%3Adelegated%20task')
+})
+
+test('the T3 Code app scheme is a setting, and without T3 Code there are no T3 links', () => {
+  process.env.T3_APP_SCHEME = 't3code-preview'
+  const links = new Links(state, () => {}, t3)
+  delete process.env.T3_APP_SCHEME
+  links.load()
+  expect(links.of('t3', 'mapped')).toBe('t3code-preview://threads/env-1/4a1e7c52-9b3d-4f60-8a2e-5d6c7b8e9f01')
+  links.close()
+  const without = new Links(state, () => {}, join(home, 'no-t3'))
+  expect(without.of('t3', 'mapped')).toBeUndefined()
+  without.close()
 })
 
 test("a thread whose turn ended stays working while its workflow runs, each workflow agent with its own steps", async () => {

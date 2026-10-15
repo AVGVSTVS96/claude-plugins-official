@@ -286,10 +286,10 @@ index d72dbc1a759e601dd0188cc7a8c3b58edc04373c..3ecbd0bfb8cc26bae0b85f8a1a1c44e8
 +The bot token lives in `~/.claude/channels/hex/telegram/.env` as `TELEGRAM_BOT_TOKEN=…`, and `access.json` there holds `allowFrom`, the Telegram user ids allowed to talk to it.
 diff --git a/external_plugins/telegram/bot.test.ts b/external_plugins/telegram/bot.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..62cd8bcb25e870899a71a19c171304e39b63ed06
+index 0000000000000000000000000000000000000000..726f9bd044ba783f4bb2bb1e57e006c422a3a54c
 --- /dev/null
 +++ b/external_plugins/telegram/bot.test.ts
-@@ -0,0 +1,399 @@
+@@ -0,0 +1,403 @@
 +import { beforeAll, expect, mock, test } from 'bun:test'
 +import { connect } from 'net'
 +import { mkdtempSync, readFileSync, writeFileSync } from 'fs'
@@ -689,12 +689,16 @@ index 0000000000000000000000000000000000000000..62cd8bcb25e870899a71a19c171304e3
 +  await call('edit_message', { message_id: String(id), text: 'Status: shipped' })
 +  expect(ledger().pins[DESK]).toMatchObject({ message: id, text: 'Status: shipped' })
 +})
++
++test('once polling the bot leaves its name in bot.json, so the voice app can link a DM', () => {
++  expect(JSON.parse(readFileSync(join(state, 'bot.json'), 'utf8'))).toEqual({ username: 'hex_bot' })
++})
 diff --git a/external_plugins/telegram/bot.ts b/external_plugins/telegram/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..856cd6e1f5a261d59183a566c4c9d791e4db9d1e
+index 0000000000000000000000000000000000000000..603aeedc3a6ecd7ecb4fa8b09cf5d4f39d140c87
 --- /dev/null
 +++ b/external_plugins/telegram/bot.ts
-@@ -0,0 +1,975 @@
+@@ -0,0 +1,976 @@
 +#!/usr/bin/env bun
 +import { Bot, GrammyError, InputFile, type Context } from 'grammy'
 +import type { Chat, MessageEntity, MessageOrigin, ReactionTypeEmoji } from 'grammy/types'
@@ -1660,6 +1664,7 @@ index 0000000000000000000000000000000000000000..856cd6e1f5a261d59183a566c4c9d791
 +      onStart: info => {
 +        attempt = 0
 +        process.stderr.write(`telegram hub: polling as @${info.username}\n`)
++        writeFileSync(join(STATE_DIR, 'bot.json'), JSON.stringify({ username: info.username }) + '\n')
 +      },
 +    })
 +    break

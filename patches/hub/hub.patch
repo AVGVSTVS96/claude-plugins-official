@@ -1,9 +1,9 @@
 diff --git a/hub/hub.test.ts b/hub/hub.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..4fa7c082c58b2bf08ff97b36e732e41033c622e9
+index 0000000000000000000000000000000000000000..44722ca2c11302defbd3132a852006ad10154d22
 --- /dev/null
 +++ b/hub/hub.test.ts
-@@ -0,0 +1,929 @@
+@@ -0,0 +1,930 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { connect, createServer, type Socket } from 'net'
 +import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, chmodSync, existsSync } from 'fs'
@@ -396,6 +396,7 @@ index 0000000000000000000000000000000000000000..4fa7c082c58b2bf08ff97b36e732e410
 +  hub.close()
 +  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION }, 'chat:8': null, 'chat:9': { session: SESSION } } })
 +  expect(hub.find('chat:7')).toBe('chat:7')
++  expect(hub.threads()).toEqual(['chat:7'])
 +  expect(() => hub.find('chat:8')).toThrow()
 +  expect(() => hub.find('chat:9')).toThrow()
 +})
@@ -935,10 +936,10 @@ index 0000000000000000000000000000000000000000..4fa7c082c58b2bf08ff97b36e732e410
 +})
 diff --git a/hub/hub.ts b/hub/hub.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..b1f1cf88baf4c824acee4bddb1f1539cae8fb18c
+index 0000000000000000000000000000000000000000..0ec5aadcf3025132b441187b977da25fe33d7398
 --- /dev/null
 +++ b/hub/hub.ts
-@@ -0,0 +1,651 @@
+@@ -0,0 +1,652 @@
 +import { createServer, type Socket } from 'net'
 +import { execFile, spawn } from 'child_process'
 +import { createHash } from 'crypto'
@@ -1557,6 +1558,7 @@ index 0000000000000000000000000000000000000000..b1f1cf88baf4c824acee4bddb1f1539c
 +    main,
 +    renewal,
 +    session: current,
++    threads: () => Object.keys(threads),
 +    name: (thread: string) => threads[thread]?.name,
 +    cwd: (thread: string) => threads[thread]?.cwd,
 +    stop,

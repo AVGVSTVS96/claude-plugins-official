@@ -4,7 +4,7 @@ id: discord-threads
 summary: Rework the Discord channel so every thread in a server is its own Claude Code session, Claude-tag style, through the thread hub.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: discord-threads.patch
-patch_sha256: f550c81f832492ccaac6458cc1777231918b7d349b832162231366207aa76b4f
+patch_sha256: f1a181edba4ba2b49cbf6785e9a3edc86b7319722b71675c7f7db6c8dd83522f
 ---
 
 ## Intent
@@ -54,6 +54,8 @@ Discord is the place for deeper work, Claude-tag style:
 - Forum posts get sessions like any thread. A new post carries its title as
   `post_title` instead of asking for a rename.
 - The typing indicator follows the session's real busy state.
+- Once connected, the bot leaves its server's id in `guild.json` in its state
+  folder, so the voice app can link a thread to Discord.
 - A session that fails to start says why, in its thread.
 - `reply` refuses to attach channel state or any `.env` file.
 - `reply` and `react` are always loaded (`_meta` `anthropic/alwaysLoad`),

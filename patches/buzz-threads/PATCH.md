@@ -4,7 +4,7 @@ id: buzz-threads
 summary: Add a Buzz channel where every Buzz thread is its own Claude Code session through the thread hub, with Buzz's activity, memory and files panels.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: buzz-threads.patch
-patch_sha256: ddbfceec9dfff2ed8e8de488d36d5a3f67c4e8ef5777eda21cd463d9869d4eac
+patch_sha256: 346c49d591da2fefcc14d7168a30e58aa8ca6fac7fab9c9b10e47e6238aca3aa
 ---
 
 ## Intent
@@ -90,6 +90,11 @@ Buzz works like Discord:
   Desktop's `expected-revision` check and a timestamp past the head it read);
   `presence` reads the owner's online, away or offline status from the
   relay's `/query`.
+- The channel of every thread is kept in `channels.json` in the state folder
+  (a direct message is its own channel and needs no entry), so the voice app
+  can link a thread to its message in Buzz. A thread's channel is recorded when it
+  is opened or first seen, and on start the bot looks up the channel of every
+  thread in `threads.json` that has none.
 - `place()` opens a thread for a handoff in `access.json`'s `channel`, else
   `general`, and links to it as `buzz://message?channel=…&id=…`.
 
