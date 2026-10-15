@@ -183,6 +183,16 @@ test('a thread whose session is still running is never relaunched', async () => 
   expect(received[0].content).toBe('hi')
 })
 
+test('a thread whose session Claude reports done is resumed, though its pid lives on in a spare process', async () => {
+  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'idle', state: 'done' }] })
+  hub.deliver('chat:7', 'Desk anchors', message)
+  await until(() => calls().some(args => args[0] === 'rm'))
+  await launched()
+  const { received } = await session('chat:7')
+  await until(() => received.length)
+  expect(received[0].content).toBe('hi')
+})
+
 test('the main thread starts with the hub, under its name, with no prompt and no typing', async () => {
   start({ main: 'chat', general: true })
   const args = await launched()
