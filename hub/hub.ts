@@ -1,10 +1,9 @@
 import { createServer } from 'net'
-import { execFile, spawn } from 'child_process'
-import { createHash } from 'crypto'
-import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, writeFileSync, renameSync, rmSync, watch, type FSWatcher } from 'fs'
-import { homedir } from 'os'
+import { createHash, randomBytes } from 'crypto'
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync, type FSWatcher } from 'fs'
 import { basename, join } from 'path'
-import { endpoint, serve, type ChannelServer, type Line } from './mcp.ts'
+import * as claude from './claude.ts'
+import { endpoint, type ChannelServer, type Line } from './mcp.ts'
 
 export type { ChannelServer, Tool } from './mcp.ts'
 
@@ -22,13 +21,55 @@ export type Asks = {
   settle: (thread: string, message: number, note: string) => void
   reopen: (thread: string, message: number, via: string) => void
 }
-type Thread = Settings & { name: string; session?: string; cwd?: string; launched?: string }
-type Agent = { sessionId: string; id?: string; pid?: number; status?: string; name?: string; cwd?: string; startedAt?: number }
 export type Hub = ReturnType<typeof startHub>
+
+// idleStop: how long a quiet session stays warm before it stops. cacheWarm: how long the main
+// thread rests before it compacts, while its cache is still warm. compactAbove: the context above
+// which a session compacts before it rests. reconnect: how long a running session's channel may be
+// gone before the session restarts to get it back. capacity: how much context a fresh thread's
+// session holds before a new one takes over; with 0, every message that finds it done goes to a new one.
+export type Limits = { idleStop: number; cacheWarm: number; compactAbove: number; reconnect: number; capacity: number }
+
+type Saved = Settings & { name: string; session?: string; cwd?: string; launched?: string }
+type Timer = ReturnType<typeof setTimeout>
+
+// Where a thread's session stands. launching: the hub started or restarted it and waits for its
+// channel, so one that ends first failed to start. recovering: it runs without its channel, which
+// Claude Code may still bring back. Either wait ends at its deadline.
+type Phase =
+  | { is: 'stopped' }
+  | { is: 'launching'; job?: string; watch?: FSWatcher; deadline?: Timer; respawned?: boolean }
+  | { is: 'recovering'; deadline?: Timer }
+  | { is: 'live'; line: Line }
+
+// Everything the hub keeps on a thread while it runs; threads.json keeps what outlives the hub.
+type Run = {
+  phase: Phase
+  queue: Message[]
+  // From the session's hooks; background: its turn ended with agents still working.
+  turn: 'busy' | 'background' | 'done'
+  // asked: the session asked to start over (a call ended). stale: it started with what the hub no
+  // longer gives a session. underway: it's starting over, and its renewal waits for the new session.
+  renew?: 'asked' | 'stale' | 'underway'
+  rest?: Timer
+  leaving?: (session: string) => void
+  // A new session whose conversation Claude hasn't saved yet.
+  unsaved?: string
+  held: (() => void)[]
+}
 
 // Every client running in this process, so a thread can move between them.
 // place() opens a thread on the client, led by its about line if given, and returns its id and a link to it.
 export const clients = new Map<string, { hub: Hub; place: (name: string, where?: string, about?: string) => Promise<{ thread: string; link: string }> }>()
+
+export const PORT = Number(process.env.HEX_PORT ?? 8789)
+
+// Each hub's channel under its plugin's name, behind the one HTTP listener serve.ts opens.
+const channels = new Map<string, (request: Request) => Promise<Response>>()
+
+export function route(request: Request): Promise<Response> {
+  return channels.get(new URL(request.url).pathname)?.(request) ?? Promise.resolve(new Response('Not Found', { status: 404 }))
+}
 
 // Chat apps only link web addresses, so a buzz:// link goes through a page on hex's site that opens it.
 export function tappable(text: string): string {
@@ -48,32 +89,36 @@ export async function transcribe(recording: () => Promise<string>): Promise<stri
   return ((await res.json()) as { text?: string }).text?.trim() || undefined
 }
 
-const CLAUDE = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude')
-const JOBS = join(CLAUDE, 'jobs')
-const IDLE_STOP = 30 * 60_000
-// Claude Code retries a dropped HTTP server at about 0, 1, 3, 7 and 15 seconds, then gives up for
-// good, and never restarts a stdio one (anthropics/claude-code#43177): a session still running
-// without its channel after this long has lost it.
-const RECONNECT = 20_000
-const PORT = Number(process.env.HEX_PORT ?? 8789)
-// Claude Code keeps a conversation in the prompt cache for an hour after its last request,
-// and compacts a background session only when told to.
-const CACHE_WARM = 54 * 60_000
-const COMPACT_ABOVE = 150_000
-const CAPACITY = 350_000
+// Claude Code keeps a conversation in the prompt cache for an hour after its last request, and
+// compacts a background session only when told to. It retries a dropped HTTP server at about 0, 1,
+// 3, 7 and 15 seconds, then gives up for good, and never restarts a stdio one
+// (anthropics/claude-code#43177).
+const LIMITS: Limits = { idleStop: 30 * 60_000, cacheWarm: 54 * 60_000, compactAbove: 150_000, reconnect: 20_000, capacity: capacity(process.env.HEX_CHAT_CAPACITY) }
 const PRIVATE = /_BOT_TOKEN$|^HEX_|^BUZZ_/
+
+function capacity(tokens?: string) {
+  if (!tokens) return 350_000
+  if (!/^\d+$/.test(tokens)) throw new Error(`HEX_CHAT_CAPACITY must be a number of tokens, got "${tokens}"`)
+  return Number(tokens)
+}
+
+// What a session reads only as it starts: its launch arguments and its channel's instructions and
+// tools. threads.json keeps a digest of what each thread's session started with.
+export function stamp(args: string[], server?: ChannelServer) {
+  return createHash('sha256').update(JSON.stringify([args, server ?? null])).digest('hex').slice(0, 16)
+}
 
 // A voice call passes through this process (its page and phone line go through the hub's
 // door), so a restart waits for every thread on a call to hang up.
-const onCall = new Set<string>()
+const onCall = new Set<Run>()
 const hungUp: (() => void)[] = []
 
 export function free(): Promise<void> {
   return new Promise(resolve => (onCall.size ? hungUp.push(resolve) : resolve()))
 }
 
-function hangUp(call: string) {
-  if (onCall.delete(call) && !onCall.size) for (const resolve of hungUp.splice(0)) resolve()
+function hangUp(run: Run) {
+  if (onCall.delete(run) && !onCall.size) for (const resolve of hungUp.splice(0)) resolve()
 }
 
 export function title(text: string): string {
@@ -82,12 +127,20 @@ export function title(text: string): string {
   return title
 }
 
-export function startHub({ stateDir, channel, server, port = PORT, main, mainName = 'main', general = false, call, state, failed, permission, asks, args = () => [], bind = () => ({}), fresh = () => false, capacity = Number(process.env.HEX_CHAT_CAPACITY) || CAPACITY, idleStop = IDLE_STOP, cacheWarm = CACHE_WARM, compactAbove = COMPACT_ABOVE, reconnect = RECONNECT, listening, jobsDir = JOBS, hexDir = process.cwd(), projectsDir = join(CLAUDE, 'projects'), launcher = 'claude' }: {
+// A hub's sessions show it this in a header, since any local user can reach its port.
+function tokenOf(stateDir: string) {
+  const file = join(stateDir, 'token')
+  if (!existsSync(file)) writeFileSync(file, randomBytes(32).toString('hex'), { mode: 0o600 })
+  return readFileSync(file, 'utf8').trim()
+}
+
+export function startHub({ stateDir, channel, server, port = PORT, main, mainName = 'main', general = false, call, state, failed, permission, asks, args = () => [], bind = () => ({}), fresh = () => false, limits, hexDir = process.cwd(), launcher = 'claude' }: {
   stateDir: string
   channel: string
   // What the channel serves its sessions over HTTP; a client without one serves them through its
   // plugin's own process, on hub.sock.
   server?: ChannelServer
+  // Where serve.ts listens for every hub's sessions.
   port?: number
   main?: string
   mainName?: string
@@ -104,50 +157,26 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
   // A fresh thread's session is never compacted: its launcher builds what a new session knows
   // of the chat, and a new one takes over once the old one's context or cache is spent.
   fresh?: (thread: string) => boolean
-  // How much context a fresh thread's session holds before a new one takes over; with 0, every
-  // message that finds its session done goes to a new one.
-  capacity?: number
-  idleStop?: number
-  // How long the main thread rests before it compacts, while its cache is still warm.
-  cacheWarm?: number
-  // A session whose context is bigger than this compacts before it rests.
-  compactAbove?: number
-  // How long a running session's channel may be gone before the session restarts to get it back.
-  reconnect?: number
-  listening?: number
-  jobsDir?: string
+  limits?: Partial<Limits>
   hexDir?: string
-  projectsDir?: string
   launcher?: string
 }) {
+  const { idleStop, cacheWarm, compactAbove, reconnect, capacity } = { ...LIMITS, ...limits }
   const registry = join(stateDir, 'threads.json')
   const socketPath = join(stateDir, 'hub.sock')
-  const threads: Record<string, Thread> = read()
-  const live = new Map<string, Line>()
-  const queued = new Map<string, Message[]>()
-  const launching = new Map<string, FSWatcher | undefined>()
-  const idle = new Map<string, ReturnType<typeof setTimeout>>()
-  const busy = new Set<string>()
-  const renewing = new Set<string>()
-  const asked = new Set<string>()
-  const renewed = new Set<string>()
-  const waiting = new Set<string>()
-  const held = new Map<string, (() => void)[]>()
-  const retiring = new Set<string>()
-  const compacting = new Set<string>()
-  const leaving = new Map<string, (session: string) => void>()
-  const unsaved = new Map<string, string>()
-  const jobs = new Map<string, string>()
-  const recovering = new Map<string, ReturnType<typeof setTimeout>>()
-  const awaited = new Set<string>()
-  const respawned = new Set<string>()
-  const born = Date.now()
-  const callOf = (thread: string) => `${socketPath}:${thread}`
+  // Each thread's session reads its settings, binding and token from here, so none of it shows in
+  // a process's arguments, and a respawn reads the thread's current ones.
+  const sessionsDir = join(stateDir, 'sessions')
+  const threads: Record<string, Saved> = read()
+  const runs = new Map<string, Run>()
   const plugin = channel.replace(/^plugin:/, '')
-  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !PRIVATE.test(name)))
+  const path = `/${plugin.split('@')[0]}`
+  const token = server && tokenOf(stateDir)
+  const inherited = Object.fromEntries(Object.entries(process.env).filter(([name]) => !PRIVATE.test(name)))
   let closed = false
+  mkdirSync(sessionsDir, { recursive: true, mode: 0o700 })
 
-  function read(): Record<string, Thread> {
+  function read(): Record<string, Saved> {
     let text: string
     try {
       text = readFileSync(registry, 'utf8')
@@ -158,7 +187,7 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
       const entries = Object.entries(JSON.parse(text) ?? {})
       const kept = entries.filter(([, known]: [string, any]) => typeof known?.name === 'string')
       for (const [thread] of entries.filter(entry => !kept.includes(entry))) process.stderr.write(`hub: dropped malformed thread ${thread} from ${registry}\n`)
-      return Object.fromEntries(kept)
+      return Object.fromEntries(kept) as Record<string, Saved>
     } catch (error) {
       const aside = `${registry}.corrupt-${Date.now()}`
       renameSync(registry, aside)
@@ -172,71 +201,85 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
     renameSync(`${registry}.tmp`, registry)
   }
 
+  function runOf(thread: string): Run {
+    let run = runs.get(thread)
+    if (!run) runs.set(thread, (run = { phase: { is: 'stopped' }, queue: [], turn: 'done', held: [] }))
+    return run
+  }
+
+  function become(run: Run, phase: Phase) {
+    const was = run.phase
+    if (was.is === 'launching') was.watch?.close()
+    if (was.is === 'launching' || was.is === 'recovering') clearTimeout(was.deadline)
+    run.phase = phase
+  }
+
+  function underway(run: Run) {
+    return run.phase.is === 'launching' || run.phase.is === 'live'
+  }
+
   function setState(thread: string, working: boolean, background = false) {
+    const run = runOf(thread)
     state(thread, working, background)
     claim(thread)
-    if (working) busy.add(thread)
-    else busy.delete(thread)
-    if (!working) background ? waiting.add(thread) : waiting.delete(thread)
-    if (!working && !background && renewing.has(thread)) renew(thread, asked.has(thread))
-    rest(thread, !working && !background)
+    run.turn = working ? 'busy' : background ? 'background' : 'done'
+    if (run.turn === 'done' && (run.renew === 'asked' || run.renew === 'stale')) void renew(thread, run.renew === 'asked')
+    rest(thread, run.turn === 'done')
     letGo(thread)
   }
 
-  // A thread that asked to renew (a voice call ended), or whose session is older than this hub and so
-  // may run older code (an update restarts the hub), starts over at its next rest: the main thread as
-  // soon as its process exits, any other when its next message resumes it. A keep (a call started)
-  // cancels it. When the session asked for it, a rest the Stop hook reported with no agents working is
-  // taken as it is: Claude's own status lags the hook and counts a running shell as busy, so checking
-  // it could put the renew off for good, and a session that asked is done with what its shells were
-  // for.
-  function renew(thread: string, rested = false) {
+  // A thread renews at its next rest: the main thread and a fresh thread start over as soon as
+  // the process exits, any other when its next message resumes it. A keep (a call started) cancels
+  // it. When the session asked for it, a rest the Stop hook reported with no agents working is
+  // taken as it is: Claude's own status lags the hook and counts a running shell as busy, so
+  // checking it could put the renew off for good, and a session that asked is done with what its
+  // shells were for.
+  async function renew(thread: string, rested = false) {
+    const run = runOf(thread)
     const session = current(thread)
     if (!session) return
-    agent(session, running => {
-      if (!renewing.has(thread) || busy.has(thread) || onCall.has(callOf(thread)) || (!rested && running?.status === 'busy')) return
-      renewing.delete(thread)
-      asked.delete(thread)
-      if (running && (thread === main || fresh(thread))) {
-        renewed.add(thread)
-        cycle(thread, running)
-      } else stop(thread)
-      letGo(thread)
-    })
+    const running = await claude.agent(session)
+    if (!(run.renew === 'asked' || run.renew === 'stale') || run.turn === 'busy' || onCall.has(run) || (!rested && running?.status === 'busy')) return
+    run.renew = running && (thread === main || fresh(thread)) ? 'underway' : undefined
+    if (run.renew) void cycle(thread, running)
+    else stop(thread)
+    letGo(thread)
   }
 
   // A renew is on its way while the thread's session winds down its turn or restarts, but not
   // while it waits on background agents, which can take as long as they like.
-  function pending(thread: string) {
-    return renewed.has(thread) || (renewing.has(thread) && !waiting.has(thread))
+  function pending(run: Run) {
+    return run.renew === 'underway' || (!!run.renew && run.turn !== 'background')
   }
 
-  // Resolves once the thread's renew is through (its new session said hello) or off, right
+  // Resolves once the thread's renew is through (its new session connected) or off, right
   // away when none is on its way, so a voice call can wait for the new session.
   function renewal(thread: string): Promise<void> {
-    if (!pending(thread)) return Promise.resolve()
-    return new Promise(resolve => held.set(thread, [...(held.get(thread) ?? []), resolve]))
+    const run = runOf(thread)
+    if (!pending(run)) return Promise.resolve()
+    return new Promise(resolve => run.held.push(resolve))
   }
 
   function letGo(thread: string) {
-    if (pending(thread)) return
-    for (const resolve of held.get(thread) ?? []) resolve()
-    held.delete(thread)
+    const run = runOf(thread)
+    if (pending(run)) return
+    for (const resolve of run.held.splice(0)) resolve()
   }
 
   // A running session that isn't busy stops after a while; its next message resumes it.
   // The main thread keeps running, and compacts before its cache goes cold.
   function rest(thread: string, rested = false) {
-    clearTimeout(idle.get(thread))
-    idle.delete(thread)
-    if (busy.has(thread) || !live.has(thread)) return
-    if (thread === main) idle.set(thread, setTimeout(() => stopIfIdle(thread), cacheWarm))
-    else if (retiring.has(thread)) stop(thread)
+    const run = runOf(thread)
+    clearTimeout(run.rest)
+    run.rest = undefined
+    if (run.turn === 'busy' || run.phase.is !== 'live') return
+    if (thread === main) run.rest = setTimeout(stopIfIdle, cacheWarm, thread)
+    else if (run.leaving) stop(thread)
     else if (fresh(thread)) {
       const left = warmFor(thread)
-      if (left === 0 && rested) handOff(thread, true)
-      else if (left !== undefined) idle.set(thread, setTimeout(() => handOff(thread), left))
-    } else idle.set(thread, setTimeout(() => stopIfIdle(thread), idleStop))
+      if (left === 0 && rested) void handOff(thread, true)
+      else if (left !== undefined) run.rest = setTimeout(handOff, left, thread)
+    } else run.rest = setTimeout(stopIfIdle, idleStop, thread)
   }
 
   // A fresh thread keeps one session running, which takes its messages while its context has
@@ -248,7 +291,7 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
   // the transcript records which.
   function warmFor(thread: string) {
     const session = current(thread)
-    const { sent, at, short } = session ? last(thread, session) : { sent: 0 }
+    const { sent, at, short } = session ? claude.usage(cwdOf(thread), session) : { sent: 0 }
     if (!sent) return
     return sent >= capacity ? 0 : Math.max(0, (at ?? Date.now()) + (short ? cacheWarm / 12 : cacheWarm) - Date.now())
   }
@@ -259,77 +302,44 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
 
   // At a rest the Stop hook reported with no agents working, Claude's own status still says busy
   // for about a second, so a session that filled up on that turn hands over without asking it.
-  function handOff(thread: string, rested = false) {
-    idle.delete(thread)
-    agent(current(thread) ?? '', running => {
-      if (running && !busy.has(thread) && (rested || running.status === 'idle') && spent(thread)) cycle(thread, running)
-    })
+  async function handOff(thread: string, rested = false) {
+    const run = runOf(thread)
+    run.rest = undefined
+    const running = await claude.agent(current(thread) ?? '')
+    if (running && run.turn !== 'busy' && (rested || running.status === 'idle') && spent(thread)) void cycle(thread, running)
   }
 
   // The Stop hook ends a turn, but background tasks keep a session busy past it,
   // so Claude's own status decides; a busy session reports idle again when it's done.
   // A big conversation compacts first, while its cache is warm: resumed after the cache
   // expires, it would be written to the cache whole again.
-  function stopIfIdle(thread: string) {
-    idle.delete(thread)
+  async function stopIfIdle(thread: string) {
+    const run = runOf(thread)
+    run.rest = undefined
     const session = current(thread)
     if (!session) return
-    agent(session, running => {
-      if (busy.has(thread) || running?.status === 'busy') return
-      if (running && !retiring.has(thread) && !fresh(thread) && !onCall.has(callOf(thread)) && last(thread, session).sent > compactAbove) {
-        compacting.add(thread)
-        cycle(thread, running, '/compact')
-      } else if (thread !== main) stop(thread)
-    })
-  }
-
-  // The context a session's last request sent and when, from the newest usage or compaction in its transcript.
-  function last(thread: string, session: string): { sent: number; at?: number; short?: boolean } {
-    let file: number
-    try {
-      file = openSync(transcript(thread, session), 'r')
-    } catch {
-      return { sent: 0 }
-    }
-    try {
-      const size = fstatSync(file).size
-      const tail = Buffer.alloc(Math.min(size, 1 << 20))
-      readSync(file, tail, 0, tail.length, size - tail.length)
-      for (const line of tail.toString('utf8').split('\n').reverse()) {
-        if (!line.includes('"usage"') && !line.includes('"compact_boundary"')) continue
-        let entry: any
-        try {
-          entry = JSON.parse(line)
-        } catch {
-          continue
-        }
-        const at = entry.timestamp ? Date.parse(entry.timestamp) : undefined
-        if (entry.type === 'system' && entry.subtype === 'compact_boundary') return { sent: entry.compactMetadata?.postTokens ?? 0, at }
-        const usage = entry.type === 'assistant' && !entry.isSidechain ? entry.message?.usage : undefined
-        const sent = usage ? (usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0) : 0
-        if (sent) return { sent, at, short: !!usage.cache_creation?.ephemeral_5m_input_tokens && !usage.cache_creation?.ephemeral_1h_input_tokens }
-      }
-      return { sent: 0 }
-    } finally {
-      closeSync(file)
-    }
+    const running = await claude.agent(session)
+    if (run.turn === 'busy' || running?.status === 'busy') return
+    if (running && !run.leaving && !fresh(thread) && !onCall.has(run) && claude.usage(cwdOf(thread), session).sent > compactAbove) void cycle(thread, running, '/compact', true)
+    else if (thread !== main) stop(thread)
   }
 
   function stop(thread: string) {
-    idle.delete(thread)
-    retiring.delete(thread)
+    const run = runOf(thread)
+    clearTimeout(run.rest)
+    run.rest = undefined
     const session = current(thread)
-    if (session) execFile('claude', ['stop', session.slice(0, 8)], () => {})
+    if (session) void claude.stop(session)
   }
 
   // Resolves with the thread's session once it has stopped and the thread is forgotten.
   function retire(thread: string): Promise<string> {
     if (thread === main) throw new Error('the main thread stays open')
     return new Promise(resolve => {
-      leaving.set(thread, resolve)
-      if (!live.has(thread)) return forget(thread)
-      retiring.add(thread)
-      stopIfIdle(thread)
+      const run = runOf(thread)
+      run.leaving = resolve
+      if (run.phase.is !== 'live') return forget(thread)
+      void stopIfIdle(thread)
     })
   }
 
@@ -341,17 +351,21 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
   }
 
   function forget(thread: string) {
+    const run = runOf(thread)
     const session = threads[thread]?.session ?? ''
     delete threads[thread]
     save()
-    leaving.get(thread)!(session)
-    leaving.delete(thread)
+    become(run, { is: 'stopped' })
+    clearTimeout(run.rest)
+    runs.delete(thread)
+    rmSync(settingsOf(thread), { force: true })
+    run.leaving!(session)
   }
 
   function adopt(thread: string, name: string, session: string, prompt: string, cwd?: string) {
     threads[thread] = { name, session, ...(cwd && { cwd }) }
     save()
-    launch(thread, name, prompt)
+    void launch(thread, name, { prompt })
   }
 
   function find(nameOrThread: string) {
@@ -373,83 +387,49 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
     return (threads[thread] ??= { name, ...(cwd && { cwd }) })
   }
 
-  function launch(thread: string, name: string, prompt?: string, fork?: string, cwd?: string) {
-    const quiet = compacting.delete(thread)
-    if (launching.has(thread)) return
-    retiring.delete(thread)
+  // quiet: the prompt is the hub's own (a compaction), so the thread doesn't show as working.
+  async function launch(thread: string, name: string, { prompt, fork, cwd, quiet = false }: { prompt?: string; fork?: string; cwd?: string; quiet?: boolean } = {}) {
+    const run = runOf(thread)
+    if (closed || underway(run)) return
     const known = register(thread, name, cwd)
     claim(thread)
-    if ((prompt && !quiet) || queued.has(thread)) setState(thread, true)
-    launching.set(thread, undefined)
-    if (fork) return start(known, thread, prompt, fork)
-    sessionOf(thread, running => {
-      if (running && live.has(thread)) return settle(thread)
-      if (running) {
-        awaited.add(thread)
-        return recover(thread)
-      }
-      const session = known.session
-      if (!session || fresh(thread)) return start(known, thread, prompt)
-      // `claude --bg --resume` copies the conversation to a new id while the old
-      // session's job record exists, even once stopped; `claude rm` keeps the conversation.
-      execFile('claude', ['rm', session.slice(0, 8)], () => start(known, thread, prompt))
-    })
-  }
-
-  function agents(then: (running: Agent[]) => void) {
-    execFile('claude', ['agents', '--json'], (_, stdout) => {
-      let agents: Agent[] = []
-      try {
-        agents = JSON.parse(stdout)
-      } catch {}
-      then(agents.filter(agent => agent.pid))
-    })
-  }
-
-  function agent(session: string, then: (running?: Agent) => void) {
-    agents(running => then(running.find(agent => agent.sessionId === session)))
+    if ((prompt && !quiet) || run.queue.length) setState(thread, true)
+    const phase: Phase = { is: 'launching' }
+    become(run, phase)
+    if (fork) return start(thread, prompt, fork)
+    const running = await sessionOf(thread)
+    if (run.phase !== phase) return
+    if (running) {
+      become(run, { is: 'recovering' })
+      return recover(thread)
+    }
+    if (known.session && !fresh(thread)) await claude.rm(known.session)
+    if (run.phase === phase) await start(thread, prompt)
   }
 
   // The running session serving a thread: its current one, or one started for it whose
   // conversation isn't saved yet.
-  function sessionOf(thread: string, then: (running?: Agent) => void) {
-    agents(running => then(running.find(agent => agent.sessionId === current(thread)) ?? running.find(agent => boundTo(agent) === thread)))
+  async function sessionOf(thread: string) {
+    const running = await claude.agents()
+    return running.find(agent => agent.sessionId === current(thread)) ?? running.find(agent => boundTo(agent) === thread)
   }
 
-  // Claude Code's job record keeps the flags a session started with, since it respawns from them,
-  // so its settings env names the thread it serves.
-  function boundTo(agent: Agent) {
-    try {
-      const flags: string[] = JSON.parse(readFileSync(join(jobsDir, agent.id ?? agent.sessionId.slice(0, 8), 'state.json'), 'utf8')).respawnFlags
-      const { env } = JSON.parse(flags[flags.lastIndexOf('--settings') + 1]!)
-      return env.HEX_CHANNEL === channel ? env.HEX_THREAD : undefined
-    } catch {
-      return undefined
-    }
+  function boundTo(agent: claude.Agent) {
+    const env = claude.envOf(agent)
+    return env?.HEX_CHANNEL === channel ? env.HEX_THREAD : undefined
   }
 
-  function started(thread: string) {
-    try {
-      return JSON.parse(readFileSync(join(jobsDir, jobs.get(thread)!, 'state.json'), 'utf8')).sessionId as string | undefined
-    } catch {
-      return undefined
-    }
-  }
-
-  // What a thread's session starts with besides the basics. A session reads it only as it
-  // starts, so threads.json keeps a digest of what it started with to tell when it's stale.
   function extra(thread: string) {
     const { model, effort } = threads[thread]!
     return [...(model ? ['--model', model] : []), ...(effort ? ['--effort', effort] : []), ...args(thread)]
   }
 
-  function digest(list: string[]) {
-    return createHash('sha256').update(JSON.stringify(list)).digest('hex').slice(0, 16)
-  }
-
+  // A session that started with other arguments or another channel starts over: with its next
+  // message for a changed model or effort, and at its next rest after an update, so a crash or a
+  // plain restart of the hub leaves every session running. A thread with no record started its
+  // session with none of its own arguments, before the hub kept one.
   function stale(thread: string) {
-    const list = extra(thread)
-    return threads[thread]?.launched !== (list.length ? digest(list) : undefined)
+    return (threads[thread]?.launched ?? stamp([], server)) !== stamp(extra(thread), server)
   }
 
   function configure(thread: string, settings: Settings) {
@@ -461,90 +441,76 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
     save()
   }
 
-  function start(known: Thread, thread: string, prompt?: string, fork?: string) {
-    const bound = { ...bind(thread), HEX_CHANNEL: channel, HEX_THREAD: thread, HEX_HUB: socketPath, ...(http && { HEX_PORT: String(http.port) }), ...(general && thread === main ? { HEX_MAIN: '1' } : {}), ...(fresh(thread) ? { HEX_FRESH: '1' } : {}) }
+  function settingsOf(thread: string) {
+    return join(sessionsDir, `${encodeURIComponent(thread)}.json`)
+  }
+
+  async function start(thread: string, prompt?: string, fork?: string) {
+    const known = threads[thread]!
+    const env = {
+      ...bind(thread),
+      HEX_CHANNEL: channel,
+      HEX_THREAD: thread,
+      HEX_HUB: socketPath,
+      ...(token ? { HEX_PORT: String(port), HEX_TOKEN: token } : {}),
+      ...(general && thread === main ? { HEX_MAIN: '1' } : {}),
+      ...(fresh(thread) ? { HEX_FRESH: '1' } : {}),
+    }
+    writeFileSync(settingsOf(thread), JSON.stringify({ enabledPlugins: { [plugin]: true }, env }), { mode: 0o600 })
     const launchArgs = extra(thread)
-    const launched = launchArgs.length ? digest(launchArgs) : undefined
+    const launched = stamp(launchArgs, server)
     if (known.launched !== launched) {
       known.launched = launched
       save()
     }
-    let child
+    const resume = fork ? ['--resume', fork, '--fork-session'] : known.session && !fresh(thread) ? ['--resume', known.session] : []
     try {
-      child = spawn(launcher, [
-        '--bg',
-        '--channels', channel,
-        '--name', known.name,
-        ...(fork ? ['--resume', fork, '--fork-session'] : known.session && !fresh(thread) ? ['--resume', known.session] : []),
-        ...launchArgs,
-        '--settings', JSON.stringify({ enabledPlugins: { [plugin]: true }, env: bound }),
-        ...(prompt ? [prompt] : []),
-      ], { cwd: known.cwd ?? hexDir, env, stdio: ['ignore', 'pipe', 'pipe'] })
+      watchJob(thread, await claude.start(launcher, ['--channels', channel, '--name', known.name, ...resume, ...launchArgs, '--settings', settingsOf(thread), ...(prompt ? [prompt] : [])], { cwd: known.cwd ?? hexDir, env: inherited }))
     } catch (error) {
-      return fail(thread, String(error))
+      fail(thread, error instanceof Error ? error.message : String(error))
     }
-    let output = ''
-    child.stdout.on('data', chunk => (output += chunk))
-    child.stderr.on('data', chunk => (output += chunk))
-    child.on('error', error => fail(thread, error.message))
-    child.on('close', code => {
-      const job = output.match(/backgrounded · (\w+)/)?.[1]
-      if (job) watchJob(thread, job)
-      else fail(thread, output.trim() || `claude --bg exited with code ${code}`)
-    })
   }
 
   function watchJob(thread: string, job: string) {
-    if (!launching.has(thread)) return
-    jobs.set(thread, job)
+    const phase = runOf(thread).phase
+    if (phase.is !== 'launching') return
+    phase.job = job
     recover(thread)
-    const dir = join(jobsDir, job)
     const check = () => {
-      try {
-        const { state: status, detail } = JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8'))
-        if (status === 'failed') fail(thread, detail || 'the session failed to start')
-      } catch {}
+      const { state: status, detail } = claude.record(job)
+      if (status === 'failed') fail(thread, detail || 'the session failed to start')
     }
     try {
-      launching.set(thread, watch(dir, check))
+      phase.watch = claude.watchJob(job, check)
       check()
     } catch {
-      process.stderr.write(`hub: no job record at ${dir}, so a failed start of ${thread} can't be seen\n`)
+      process.stderr.write(`hub: no job record for ${job}, so a failed start of ${thread} can't be seen\n`)
     }
-  }
-
-  function settle(thread: string) {
-    launching.get(thread)?.close()
-    launching.delete(thread)
   }
 
   function fail(thread: string, reason: string) {
-    if (!launching.has(thread) || live.has(thread)) return
-    settle(thread)
-    jobs.delete(thread)
-    awaited.delete(thread)
-    respawned.delete(thread)
-    renewed.delete(thread)
+    const run = runOf(thread)
+    if (run.phase.is !== 'launching') return
+    become(run, { is: 'stopped' })
+    if (run.renew === 'underway') run.renew = undefined
     failed(thread, reason)
     setState(thread, false)
   }
 
   function deliver(thread: string, name: string, message: Message) {
-    const line = live.get(thread)
-    if (line && !stale(thread) && !spent(thread)) return line.send({ type: 'inbound', ...message })
-    if (line) return refresh(thread, message)
-    queued.set(thread, [...(queued.get(thread) ?? []), message])
-    launch(thread, name)
+    const run = runOf(thread)
+    if (run.phase.is === 'live') return stale(thread) || spent(thread) ? void refresh(thread, message) : run.phase.line.send({ type: 'inbound', ...message })
+    run.queue.push(message)
+    void launch(thread, name)
   }
 
   // Claude Code runs a slash command like /compact only as a session's first prompt,
   // and reads its launch arguments only at start, so a running session stops and
-  // resumes for either. `claude stop` returns before the process exits, and resuming
-  // before then starts a copy, so it waits for the exit.
-  function restart(thread: string, prompt?: string) {
+  // resumes for either.
+  async function restart(thread: string, prompt?: string) {
     const session = current(thread)
-    if (!session) return launch(thread, threads[thread]!.name, prompt)
-    agent(session, running => cycle(thread, running, prompt))
+    if (!session) return launch(thread, threads[thread]!.name, { prompt })
+    void cycle(thread, await claude.agent(session), prompt)
   }
 
   // Delivers a message to a fresh start of the thread's session, so it gets new launch
@@ -552,135 +518,141 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
   // or on background agents, keeps running and takes it as it is, unless earlier messages
   // already wait for the new start.
   // A session that took over while Claude was asked gets the message as any message would.
-  function refresh(thread: string, message: Message) {
-    const line = live.get(thread)
-    agent(current(thread) ?? '', running => {
-      if (live.get(thread) !== line) return deliver(thread, threads[thread]!.name, message)
-      const working = fresh(thread) ? busy.has(thread) || (running && running.status !== 'idle') : running?.status === 'busy'
-      if (line && working && !queued.has(thread)) return line.send({ type: 'inbound', ...message })
-      queued.set(thread, [...(queued.get(thread) ?? []), message])
-      cycle(thread, running)
-    })
+  async function refresh(thread: string, message: Message) {
+    const run = runOf(thread)
+    const phase = run.phase
+    const running = await claude.agent(current(thread) ?? '')
+    if (run.phase !== phase || phase.is !== 'live') return deliver(thread, threads[thread]!.name, message)
+    const working = fresh(thread) ? run.turn === 'busy' || (running && running.status !== 'idle') : running?.status === 'busy'
+    if (working && !run.queue.length) return phase.line.send({ type: 'inbound', ...message })
+    run.queue.push(message)
+    void cycle(thread, running)
   }
 
-  function cycle(thread: string, running?: Agent, prompt?: string) {
-    const name = threads[thread]!.name
-    if (!running) return launch(thread, name, prompt)
-    stop(thread)
-    exited(running.pid!, () => launch(thread, name, prompt))
-  }
-
-  // Node can't wait on a process it didn't start, and pidwait isn't on every system
-  // (macOS has none), so the process is checked until it's gone.
-  function exited(pid: number, then: () => void) {
-    try {
-      process.kill(pid, 0)
-      setTimeout(exited, 100, pid, then)
-    } catch {
-      then()
+  // `claude stop` returns before the process exits, and resuming before then starts a copy, so it
+  // waits for the exit. The stopped session's stream can close after that, so it isn't waited for.
+  async function cycle(thread: string, running?: claude.Agent, prompt?: string, quiet = false) {
+    const run = runOf(thread)
+    if (running) {
+      stop(thread)
+      await claude.exited(running.pid)
     }
+    if (run.phase.is === 'live' || run.phase.is === 'recovering') {
+      hangUp(run)
+      become(run, { is: 'stopped' })
+    }
+    void launch(thread, threads[thread]!.name, { prompt, quiet })
   }
 
   // A session's channel connected: over HTTP (its session is the one the hub started, or the one
   // Claude reports running for the thread), or through its plugin's hello, which names it.
-  function welcome(thread: string, line: Line, session = started(thread)) {
-    live.set(thread, line)
-    renewing.delete(thread)
-    asked.delete(thread)
-    renewed.delete(thread)
-    awaited.delete(thread)
-    respawned.delete(thread)
-    jobs.delete(thread)
-    settle(thread)
+  function welcome(thread: string, line: Line, session?: string) {
+    const run = runOf(thread)
+    const job = run.phase.is === 'launching' ? run.phase.job : undefined
+    become(run, { is: 'live', line })
+    run.renew = undefined
     threads[thread] ??= { name: thread }
-    if (session) note(thread, session)
-    for (const message of queued.get(thread) ?? []) line.send({ type: 'inbound', ...message })
-    queued.delete(thread)
+    const id = session ?? (job && claude.record(job).sessionId)
+    if (id) note(thread, id)
+    for (const message of run.queue.splice(0)) line.send({ type: 'inbound', ...message })
     rest(thread)
-    sessionOf(thread, running => {
-      if (live.get(thread) !== line || !running) return
-      note(thread, running.sessionId)
-      if (!running.startedAt || running.startedAt >= born) return
-      renewing.add(thread)
-      renew(thread)
-    })
     letGo(thread)
+    if (stale(thread)) {
+      run.renew = 'stale'
+      void renew(thread)
+    }
+    void sessionOf(thread).then(running => {
+      if (running && run.phase.is === 'live' && run.phase.line === line) note(thread, running.sessionId)
+    })
   }
 
   function note(thread: string, session: string) {
-    if (threads[thread]?.session !== session) unsaved.set(thread, session)
-    else unsaved.delete(thread)
+    runOf(thread).unsaved = threads[thread]?.session !== session ? session : undefined
     claim(thread)
   }
 
   function drop(thread: string, line: Line) {
-    if (live.get(thread) !== line) return
-    live.delete(thread)
-    hangUp(callOf(thread))
+    const run = runs.get(thread)
+    if (run?.phase.is !== 'live' || run.phase.line !== line) return
+    become(run, { is: 'recovering' })
+    hangUp(run)
     setState(thread, false)
-    if (leaving.has(thread)) forget(thread)
+    if (run.leaving) return forget(thread)
     recover(thread)
   }
 
-  // A session whose channel is gone comes back on its own while Claude Code reconnects it. After
-  // that, one still running restarts in place (a turn it was on runs again), a start that ended
-  // before its channel connected is reported, a gone main thread starts again, and a thread whose
-  // messages waited on a session that has since ended resumes.
+  // A session without its channel gets Claude Code's reconnect window to come back. After that, one
+  // still running restarts in place (a turn it was on runs again) if it started before the wait
+  // did, or else gets another window; a start that ended is reported, a gone main thread starts
+  // again, and a thread whose messages waited on a session that has since ended resumes.
   function recover(thread: string, since = Date.now()) {
-    if (recovering.has(thread) || closed) return
-    recovering.set(thread, setTimeout(() => {
-      recovering.delete(thread)
-      if (live.has(thread) || closed) return
-      sessionOf(thread, running => {
-        if (live.has(thread)) return
-        if (running) return (running.startedAt ?? 0) < since ? respawn(thread, running) : recover(thread)
-        const waited = awaited.delete(thread)
-        if (!waited) fail(thread, 'its session ended before its channel connected')
-        settle(thread)
-        if (thread === main) revive()
-        else if (waited) launch(thread, threads[thread]!.name)
-      })
-    }, reconnect))
+    const run = runOf(thread)
+    const phase = run.phase
+    if (closed || phase.is === 'stopped' || phase.is === 'live' || phase.deadline) return
+    phase.deadline = setTimeout(async () => {
+      phase.deadline = undefined
+      const running = await sessionOf(thread)
+      if (run.phase !== phase) return
+      if (!running) return gone(thread)
+      if ((running.startedAt ?? 0) >= since) return recover(thread)
+      // A respawn starts from the flags the session started with, which read the thread's current
+      // settings file only for a session the hub started that way.
+      if (claude.envOf(running)) return respawn(thread, running)
+      void cycle(thread, running)
+    }, reconnect)
   }
 
-  function respawn(thread: string, running: Agent) {
+  function gone(thread: string) {
+    const run = runOf(thread)
+    const started = run.phase.is === 'launching'
+    if (started) fail(thread, 'its session ended before its channel connected')
+    else become(run, { is: 'stopped' })
+    if (thread === main) revive()
+    else if (!started && run.queue.length) void launch(thread, threads[thread]?.name ?? thread)
+  }
+
+  async function respawn(thread: string, running: claude.Agent) {
+    const run = runOf(thread)
     const id = running.id ?? running.sessionId.slice(0, 8)
-    if (respawned.delete(thread)) {
+    if (run.phase.is === 'launching' && run.phase.respawned) {
       process.stderr.write(`hub: ${thread}'s session ${id} restarted and still has no channel\n`)
       return fail(thread, 'its session runs, but its channel never connects')
     }
-    respawned.add(thread)
     process.stderr.write(`hub: ${thread}'s session ${id} runs without its channel, so it restarts in place\n`)
-    if (!launching.has(thread)) launching.set(thread, undefined)
-    execFile('claude', ['respawn', id], () => recover(thread))
+    if (run.phase.is === 'launching') run.phase.respawned = true
+    else become(run, { is: 'launching', respawned: true })
+    const phase = run.phase
+    await claude.respawn(running)
+    if (run.phase === phase) recover(thread)
   }
 
   // A session that dies before Claude saves its conversation can't be resumed, so the
   // thread keeps its last saved session until the new one has a conversation on disk.
   function claim(thread: string) {
-    const session = unsaved.get(thread)
+    const run = runOf(thread)
     const known = threads[thread]
-    if (!session || !known || !existsSync(transcript(thread, session))) return
-    unsaved.delete(thread)
-    known.session = session
+    if (!run.unsaved || !known || !existsSync(claude.transcript(cwdOf(thread), run.unsaved))) return
+    known.session = run.unsaved
+    run.unsaved = undefined
     save()
   }
 
-  function transcript(thread: string, session: string) {
-    return join(projectsDir, (threads[thread]?.cwd ?? hexDir).replace(/[^a-zA-Z0-9]/g, '-'), `${session}.jsonl`)
+  function cwdOf(thread: string) {
+    return threads[thread]?.cwd ?? hexDir
   }
 
   function current(thread: string) {
-    return unsaved.get(thread) ?? threads[thread]?.session
+    return runs.get(thread)?.unsaved ?? threads[thread]?.session
   }
 
   rmSync(socketPath, { force: true })
-  const http = server && serve(port, `/${plugin.split('@')[0]}`, endpoint(plugin.split('@')[0]!, channel, server, {
-    call,
-    permission: (thread, request) => permission?.(thread, request),
-    open: (thread, line) => welcome(thread, line),
-    close: drop,
-  }, listening))
+  const serve = server && endpoint(path.slice(1), channel, token!, server, {
+      call,
+      permission: (thread, request) => permission?.(thread, request),
+      open: (thread, line) => welcome(thread, line),
+      close: drop,
+    })
+  if (serve) channels.set(path, serve)
 
   const sock = createServer(socket => {
     let thread = ''
@@ -704,17 +676,17 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
       if (request.type === 'hello') welcome((thread = request.thread), line, request.session)
       if (request.type === 'state') setState(request.thread, request.busy, request.background === true)
       if (request.type === 'renew') {
-        renewing.add(request.thread)
-        asked.add(request.thread)
-        hangUp(callOf(request.thread))
+        const run = runOf(request.thread)
+        if (run.renew !== 'underway') run.renew = 'asked'
+        hangUp(run)
       }
       if (request.type === 'keep') {
-        renewing.delete(request.thread)
-        asked.delete(request.thread)
-        onCall.add(callOf(request.thread))
+        const run = runOf(request.thread)
+        if (run.renew !== 'underway') run.renew = undefined
+        onCall.add(run)
         letGo(request.thread)
       }
-      if (request.type === 'open') launch(request.thread, request.name, request.prompt)
+      if (request.type === 'open') void launch(request.thread, request.name, { prompt: request.prompt })
       if (request.type === 'permission_request') permission?.(thread, request)
       if (request.type === 'answer') asks?.answer(request.thread, request.message, request.label, request.via)
       if (request.type === 'settle') asks?.settle(request.thread, request.message, request.note)
@@ -734,17 +706,24 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
   // The main thread is always running: started with the hub, and started again when its session
   // is gone.
   function revive() {
-    if (!main || closed || live.has(main)) return
+    if (!main || closed || runOf(main).phase.is === 'live') return
     rename(main, mainName)
-    launch(main, mainName)
+    void launch(main, mainName)
   }
   // Sessions that outlived the hub (a hub restart) reconnect, or recover. A fresh main thread's
   // launch never resumes, so one still running waits for its session instead of starting another.
-  if (main || Object.keys(threads).length) agents(running => {
-    const serving = new Set(Object.keys(threads).filter(thread => running.some(agent => agent.sessionId === current(thread) || boundTo(agent) === thread)))
-    for (const thread of serving) recover(thread, born)
-    if (main && !(fresh(main) && serving.has(main))) revive()
-  })
+  if (main || Object.keys(threads).length) {
+    void claude.agents().then(running => {
+      const serving = new Set(Object.keys(threads).filter(thread => running.some(agent => agent.sessionId === current(thread) || boundTo(agent) === thread)))
+      for (const thread of serving) {
+        const run = runOf(thread)
+        if (run.phase.is !== 'stopped') continue
+        become(run, { is: 'recovering' })
+        recover(thread)
+      }
+      if (main && !(fresh(main) && serving.has(main))) revive()
+    })
+  }
 
   return {
     deliver,
@@ -752,10 +731,9 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
     configure,
     settings: (thread: string): Settings => ({ model: threads[thread]?.model, effort: threads[thread]?.effort }),
     register: (thread: string, name: string, cwd?: string) => void register(thread, name, cwd),
-    open: (thread: string, name: string, prompt?: string, cwd?: string) => launch(thread, name, prompt, undefined, cwd),
-    fork: (thread: string, name: string, session: string, prompt: string, cwd?: string) => launch(thread, name, prompt, session, cwd),
+    open: (thread: string, name: string, prompt?: string, cwd?: string) => void launch(thread, name, { prompt, cwd }),
+    fork: (thread: string, name: string, session: string, prompt: string, cwd?: string) => void launch(thread, name, { prompt, fork: session, cwd }),
     main,
-    port: http?.port,
     renewal,
     session: current,
     threads: () => Object.keys(threads),
@@ -763,7 +741,8 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
     cwd: (thread: string) => threads[thread]?.cwd,
     stop,
     answer: (thread: string, request_id: string, behavior: 'allow' | 'deny') => {
-      live.get(thread)?.send({ type: 'permission', request_id, behavior })
+      const { phase } = runOf(thread)
+      if (phase.is === 'live') phase.line.send({ type: 'permission', request_id, behavior })
     },
     release,
     adopt,
@@ -773,8 +752,12 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
     close: () => {
       closed = true
       sock.close()
-      http?.close()
-      for (const timer of recovering.values()) clearTimeout(timer)
+      if (serve && channels.get(path) === serve) channels.delete(path)
+      for (const run of runs.values()) {
+        become(run, { is: 'stopped' })
+        clearTimeout(run.rest)
+        hangUp(run)
+      }
     },
   }
 }

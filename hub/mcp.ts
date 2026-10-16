@@ -1,5 +1,3 @@
-import type { Server } from 'bun'
-
 export type Tool = { name: string; description: string; inputSchema: object; _meta?: object }
 // What a chat app's channel says to each session: how to read its messages, and the tools that act in its thread.
 export type ChannelServer = { title: string; instructions: string; tools: Tool[]; permission?: boolean }
@@ -17,18 +15,22 @@ type Hooks = {
 // `server/discover` for 2026-07-28, where it registers no channel ("no unsolicited notification
 // path"), and falls back to `initialize` when that's declined.
 const REVISIONS = ['2025-11-25', '2025-06-18', '2025-03-26']
-// Claude Code starts listening for a server's channel some tens of milliseconds after it lists the
-// server's tools, says nothing when it does, and drops what comes before.
-const LISTENING = 1000
 const encoder = new TextEncoder()
+const NUDGE = 250
+
+// How far a session initialized here is from listening. Claude Code drops channel messages that come
+// before it listens and says nothing when it starts, but it registers its channel handler in the same
+// step as its tools/list_changed handler, so once its stream is open and it has listed the tools, it's
+// told they changed, and the list that answers is the sign it listens. A session starting cold
+// registers them a while after it lists the tools and drops what came before, so it's told again
+// until it answers.
+type Handshake = { is: 'initialized' } | { is: 'listed' } | { is: 'streaming'; nudge: () => void; open: () => void } | { is: 'nudged'; open: () => void }
 
 // A channel over MCP's Streamable HTTP transport, for sessions whose plugin's .mcp.json points here
-// with their binding in headers. Every session id is taken as it comes, so a session that connected
-// before the hub restarted carries on where it was without initializing again.
-export function endpoint(name: string, channel: string, server: ChannelServer, hooks: Hooks, listening = LISTENING) {
-  // Sessions initialized here whose stream hasn't ended: when they listed the tools, and the
-  // stream waiting for that.
-  const starting = new Map<string, { listed?: number; open?: () => void }>()
+// with their binding and the hub's token in headers. Every session id is taken as it comes, so a
+// session that connected before the hub restarted carries on where it was without initializing again.
+export function endpoint(name: string, channel: string, token: string, server: ChannelServer, hooks: Hooks) {
+  const starting = new Map<string, Handshake>()
 
   function threadOf(request: Request) {
     const thread = request.headers.get('x-hex-thread')
@@ -48,8 +50,20 @@ export function endpoint(name: string, channel: string, server: ChannelServer, h
     }
   }
 
-  // A new session's stream opens to the hub once Claude Code listens on it; a stream that comes
-  // back after a drop opens at once. Bun starts a response's body only once it sends it, so writes wait for that.
+  function listed(session: string | null) {
+    const step = session ? starting.get(session) : undefined
+    if (step?.is === 'initialized') starting.set(session!, { is: 'listed' })
+    if (step?.is === 'streaming') {
+      starting.set(session!, { is: 'nudged', open: step.open })
+      step.nudge()
+    }
+    if (step?.is === 'nudged') {
+      starting.delete(session!)
+      step.open()
+    }
+  }
+
+  // Bun starts a response's body only once it sends it, so writes wait for that.
   function stream(thread: string | undefined, session: string | null) {
     let controller: ReadableStreamDefaultController<Uint8Array> | undefined
     let line: Line | undefined
@@ -63,6 +77,7 @@ export function endpoint(name: string, channel: string, server: ChannelServer, h
         gone()
       }
     }
+    const event = (message: object) => write(`event: message\ndata: ${JSON.stringify({ jsonrpc: '2.0', ...message })}\n\n`)
     function gone() {
       clearInterval(keepAlive)
       if (session) starting.delete(session)
@@ -77,19 +92,25 @@ export function endpoint(name: string, channel: string, server: ChannelServer, h
       cancel: gone,
     })
     if (thread) {
-      line = { send: payload => write(`event: message\ndata: ${JSON.stringify(notification(payload))}\n\n`) }
+      line = { send: payload => event(notification(payload)) }
       keepAlive = setInterval(write, 15_000, ': keepalive\n\n')
       const open = () => line && hooks.open(thread, line)
-      const started = session ? starting.get(session) : undefined
-      if (!started) open()
-      else if (started.listed) setTimeout(open, started.listed + listening - Date.now())
-      else started.open = open
+      const nudge = () => {
+        event({ method: 'notifications/tools/list_changed' })
+        setTimeout(() => line && starting.get(session!)?.is === 'nudged' && nudge(), NUDGE)
+      }
+      const step = session ? starting.get(session) : undefined
+      if (!step) open()
+      else if (step.is === 'listed') {
+        starting.set(session!, { is: 'nudged', open })
+        nudge()
+      } else starting.set(session!, { is: 'streaming', nudge, open })
     }
     return new Response(body, { headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', ...(session && { 'mcp-session-id': session }) } })
   }
 
   return async (request: Request): Promise<Response> => {
-    if (request.headers.has('origin') || !['127.0.0.1', 'localhost'].includes(new URL(request.url).hostname)) return new Response('Forbidden', { status: 403 })
+    if (request.headers.has('origin') || !['127.0.0.1', 'localhost'].includes(new URL(request.url).hostname) || request.headers.get('x-hex-token') !== token) return new Response('Forbidden', { status: 403 })
     const thread = threadOf(request)
     const session = request.headers.get('mcp-session-id')
     if (request.method === 'GET') return stream(thread, session)
@@ -108,19 +129,15 @@ export function endpoint(name: string, channel: string, server: ChannelServer, h
     }
     if (method === 'initialize') {
       const opened = crypto.randomUUID()
-      starting.set(opened, {})
-      const capabilities = { tools: {}, experimental: { 'claude/channel': {}, ...(server.permission && { 'claude/channel/permission': {} }) } }
+      starting.set(opened, { is: 'initialized' })
+      const capabilities = { tools: { listChanged: true }, experimental: { 'claude/channel': {}, ...(server.permission && { 'claude/channel/permission': {} }) } }
       const revision = REVISIONS.includes(params?.protocolVersion) ? params.protocolVersion : REVISIONS[0]
       const response = result(id, { protocolVersion: revision, capabilities, serverInfo: { name, version: '1.0.0' }, instructions: server.instructions })
       response.headers.set('mcp-session-id', opened)
       return response
     }
     if (method === 'tools/list') {
-      const started = session ? starting.get(session) : undefined
-      if (started && !started.listed) {
-        started.listed = Date.now()
-        if (started.open) setTimeout(started.open, listening)
-      }
+      listed(session)
       return result(id, { tools: server.tools })
     }
     if (method === 'tools/call') return result(id, await call(thread, params?.name, params?.arguments ?? {}))
@@ -130,35 +147,6 @@ export function endpoint(name: string, channel: string, server: ChannelServer, h
 }
 
 function notification(payload: Payload) {
-  if (payload.type === 'inbound') return { jsonrpc: '2.0', method: 'notifications/claude/channel', params: { content: payload.content, meta: payload.meta } }
-  return { jsonrpc: '2.0', method: 'notifications/claude/channel/permission', params: { request_id: payload.request_id, behavior: payload.behavior } }
-}
-
-const listeners = new Map<number, { server: Server; routes: Map<string, (request: Request) => Promise<Response>> }>()
-
-// Every hub in a process serves on one port, each under its own path. Port 0 gets a port of its own.
-export function serve(port: number, path: string, handle: (request: Request) => Promise<Response>) {
-  let listener = listeners.get(port)
-  if (!listener) {
-    const routes = new Map<string, (request: Request) => Promise<Response>>()
-    const server = Bun.serve({
-      hostname: '127.0.0.1',
-      port,
-      idleTimeout: 0,
-      fetch: request => routes.get(new URL(request.url).pathname)?.(request) ?? new Response('Not Found', { status: 404 }),
-    })
-    listener = { server, routes }
-    listeners.set(server.port!, listener)
-  }
-  const { server, routes } = listener
-  routes.set(path, handle)
-  return {
-    port: server.port!,
-    close() {
-      routes.delete(path)
-      if (routes.size) return
-      listeners.delete(server.port!)
-      void server.stop(true)
-    },
-  }
+  if (payload.type === 'inbound') return { method: 'notifications/claude/channel', params: { content: payload.content, meta: payload.meta } }
+  return { method: 'notifications/claude/channel/permission', params: { request_id: payload.request_id, behavior: payload.behavior } }
 }

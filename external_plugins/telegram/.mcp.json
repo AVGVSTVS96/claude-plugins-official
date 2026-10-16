@@ -2,10 +2,11 @@
   "mcpServers": {
     "telegram": {
       "type": "http",
-      "url": "http://127.0.0.1:${HEX_PORT:-8789}/telegram",
+      "url": "http://127.0.0.1:${HEX_PORT}/telegram",
       "headers": {
-        "X-Hex-Channel": "${HEX_CHANNEL:-}",
-        "X-Hex-Thread": "${HEX_THREAD:-}"
+        "X-Hex-Channel": "${HEX_CHANNEL}",
+        "X-Hex-Thread": "${HEX_THREAD}",
+        "X-Hex-Token": "${HEX_TOKEN}"
       }
     }
   }
