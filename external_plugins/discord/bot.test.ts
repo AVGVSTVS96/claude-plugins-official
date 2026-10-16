@@ -1,5 +1,6 @@
 import { beforeAll, expect, mock, test } from 'bun:test'
-import { connect } from 'net'
+import { connect as netConnect } from 'net'
+import { connect } from '../../hub/testing.ts'
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -159,29 +160,14 @@ beforeAll(async () => {
   ;({ received, call } = await session(here.id))
 })
 
-// A session bound to thread, connected once the hub has registered it.
+// A session bound to thread, connected once the hub has registered it, with its hooks on hub.sock.
 async function session(thread: string) {
-  const socket = connect(join(state, 'hub.sock'))
-  const received: any[] = []
-  let buffer = ''
-  let next = 0
-  socket.setEncoding('utf8')
-  socket.on('data', (chunk: string) => {
-    buffer += chunk
-    const lines = buffer.split('\n')
-    buffer = lines.pop()!
-    received.push(...lines.map(line => JSON.parse(line)))
-  })
-  await new Promise(resolve => socket.on('connect', resolve))
-  const send = (payload: object) => socket.write(JSON.stringify(payload) + '\n')
-  send({ type: 'hello', thread, session: crypto.randomUUID() })
-  const call = (tool: string, args: object): Promise<any> => {
-    const id = ++next
-    send({ type: 'call', id, tool, args })
-    return until(() => received.find(line => line.type === 'result' && line.id === id))
-  }
-  await call('list_channels', {})
-  return { received, call, send }
+  const line = await connect({ stateDir: state, path: '/discord', channel: 'plugin:discord@hex', thread })
+  const hooks = netConnect(join(state, 'hub.sock'))
+  await new Promise(resolve => hooks.on('connect', resolve))
+  const send = (payload: object) => hooks.write(JSON.stringify(payload) + '\n')
+  await line.call('list_channels', {})
+  return { received: line.received, call: line.call, send }
 }
 
 test('a message in a thread names the channel the thread is in', async () => {

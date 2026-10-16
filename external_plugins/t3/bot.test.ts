@@ -6,8 +6,10 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import type { Subprocess } from 'bun'
 import { client, ndJsonStream, type SessionNotification } from '@agentclientprotocol/sdk'
+import { connect as channel, service } from '../../hub/testing.ts'
 
 const SESSION = '0a1b2c3d-0000-4000-8000-000000000000'
+let PORT = 0
 
 let dir: string
 let project: string
@@ -27,19 +29,15 @@ exit 0`)
 jq -cn '$ARGS.positional' --args -- "$@" >> "${dir}/launched"
 [ -f "${dir}/broken" ] && { echo "Workspace not trusted." >&2; exit 1; }
 echo "backgrounded · job12345 · test"`)
-  bot = Bun.spawn(['bun', join(import.meta.dir, 'bot.ts')], {
-    env: {
-      ...process.env,
-      HOME: dir,
-      PATH: `${dir}:${process.env.PATH}`,
-      T3_STATE_DIR: join(dir, 'state'),
-      HEX_PORT: '0',
-      HEX_DIR: join(dir, 'hex'),
-      HEX_LAUNCHER: join(dir, 'launch'),
-      CLAUDE_CONFIG_DIR: join(dir, 'config'),
-    },
-    stderr: 'ignore',
-  })
+  ;({ process: bot, port: PORT } = await service(join(import.meta.dir, 'bot.ts'), {
+    ...process.env,
+    HOME: dir,
+    PATH: `${dir}:${process.env.PATH}`,
+    T3_STATE_DIR: join(dir, 'state'),
+    HEX_DIR: join(dir, 'hex'),
+    HEX_LAUNCHER: join(dir, 'launch'),
+    CLAUDE_CONFIG_DIR: join(dir, 'config'),
+  }))
   await until(() => existsSync(join(dir, 'state', 'acp.sock')))
 })
 
@@ -84,19 +82,16 @@ async function t3() {
   return { agent, updates, socket }
 }
 
-// The hex session's side: its channel saying hello on the hub socket, and its hooks.
+// The hex session's side: its channel over HTTP, its Claude job record, and its hooks.
 async function session(thread: string) {
+  const settings = join(dir, 'state', 'settings-test.json')
+  writeFileSync(settings, JSON.stringify({ env: { HEX_CHANNEL: 'plugin:t3@hex', HEX_THREAD: thread } }))
+  writeFileSync(join(dir, 'config', 'jobs', 'job12345', 'state.json'), JSON.stringify({ state: 'working', sessionId: SESSION, respawnFlags: ['--settings', settings] }))
+  // A session the hub didn't start is found by its job record once it connects.
+  if (!existsSync(join(dir, 'agents'))) writeFileSync(join(dir, 'agents'), JSON.stringify([{ id: 'job12345', sessionId: SESSION, pid: Bun.spawn(['sleep', '60']).pid, status: 'idle' }]))
+  const line = await channel({ stateDir: join(dir, 'state'), path: '/t3', channel: 'plugin:t3@hex', thread, at: PORT })
+  const inbound = line.received
   const socket = await open(join(dir, 'state', 'hub.sock'))
-  const inbound: any[] = []
-  let buffer = ''
-  socket.setEncoding('utf8')
-  socket.on('data', (chunk: string) => {
-    buffer += chunk
-    const parts = buffer.split('\n')
-    buffer = parts.pop()!
-    inbound.push(...parts.map(line => JSON.parse(line)))
-  })
-  socket.write(JSON.stringify({ type: 'hello', thread, session: SESSION }) + '\n')
   const transcript = join(dir, 'config', 'projects', project.replace(/[^a-zA-Z0-9]/g, '-'), `${SESSION}.jsonl`)
   mkdirSync(join(transcript, '..'), { recursive: true })
   return {

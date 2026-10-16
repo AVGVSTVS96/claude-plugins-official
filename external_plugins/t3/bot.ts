@@ -60,7 +60,7 @@ const hub = startHub({
   call: async (_, tool) => {
     throw new Error(`unknown tool: ${tool}`)
   },
-  // A new thread's session starts with its first prompt and is only known once it says hello.
+  // A new thread's session starts with its first prompt and is only known once its channel connects.
   // Its turn is done once a stop leaves no background agent working.
   state: (thread, busy, background) => {
     const turn = turns.get(thread)

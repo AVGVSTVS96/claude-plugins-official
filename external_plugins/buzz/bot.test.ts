@@ -10,6 +10,7 @@ import { matchFilter, type Filter } from 'nostr-tools/filter'
 import { bytesToHex } from 'nostr-tools/utils'
 import { schnorr } from '@noble/curves/secp256k1.js'
 import { connectRelay } from './relay.ts'
+import { connect as connectSession, service } from '../../hub/testing.ts'
 
 type Peer = { challenge: string; pubkey?: string; subs: Map<string, Filter[]> }
 
@@ -238,11 +239,7 @@ exit 0
   prepare?.({ state, relay, channel, me, key })
 
   const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^(BUZZ_|HEX_|TELEGRAM_|DISCORD_)/.test(name)))
-  const bot = Bun.spawn(['bun', join(import.meta.dir, 'bot.ts')], {
-    env: { ...env, HEX_PORT: '0', BUZZ_STATE_DIR: state, HEX_DIR: join(dir, 'hex'), CLAUDE_CONFIG_DIR: join(dir, 'config'), PATH: `${dir}:${process.env.PATH}` },
-    stdout: 'ignore',
-    stderr: 'ignore',
-  })
+  const { process: bot, port } = await service(join(import.meta.dir, 'bot.ts'), { ...env, BUZZ_STATE_DIR: state, HEX_DIR: join(dir, 'hex'), CLAUDE_CONFIG_DIR: join(dir, 'config'), PATH: `${dir}:${process.env.PATH}` })
   const sockets: Socket[] = []
   running.push({ bot, relay, sockets })
   await until(() => relay.frames.some(([type, , filter]: any[]) => type === 'REQ' && filter['#h']?.includes(dm)))
@@ -250,30 +247,18 @@ exit 0
   const published = (kind: number) => relay.events.filter(event => event.kind === kind && event.pubkey === me)
   const calls = (): string[][] => existsSync(join(dir, 'calls')) ? readFileSync(join(dir, 'calls'), 'utf8').split('\n').slice(0, -1).map(line => JSON.parse(line)) : []
 
+  // A session's channel over HTTP; its hooks go to hub.sock.
   async function session(thread: string) {
+    writeFileSync(join(dir, 'config', 'jobs', 'job12345', 'state.json'), JSON.stringify({ state: 'working', sessionId: SESSION }))
+    const line = await connectSession({ stateDir: state, path: '/buzz', channel: 'plugin:buzz@hex', thread, at: port })
     const socket = connect(join(state, 'hub.sock'))
     sockets.push(socket)
-    const received: any[] = []
-    let buffer = ''
-    let next = 0
-    socket.setEncoding('utf8')
-    socket.on('data', (chunk: string) => {
-      buffer += chunk
-      const lines = buffer.split('\n')
-      buffer = lines.pop()!
-      received.push(...lines.map(line => JSON.parse(line)))
-    })
     await new Promise(resolve => socket.on('connect', resolve))
-    const send = (payload: object) => socket.write(JSON.stringify(payload) + '\n')
-    send({ type: 'hello', thread, session: SESSION })
+    const inbound = () => line.received.filter(message => message.type === 'inbound')
     return {
-      send,
-      inbound: (count: number) => until(() => received.filter(line => line.type === 'inbound')[count - 1] && received.filter(line => line.type === 'inbound')),
-      call: (tool: string, args: object) => {
-        const id = ++next
-        send({ type: 'call', id, tool, args })
-        return until(() => received.find(line => line.type === 'result' && line.id === id))
-      },
+      send: (payload: object) => socket.write(JSON.stringify(payload) + '\n'),
+      inbound: (count: number) => until(() => inbound()[count - 1] && inbound()),
+      call: line.call,
     }
   }
 

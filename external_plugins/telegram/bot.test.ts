@@ -4,7 +4,9 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import * as grammy from 'grammy'
+import { connect as connectSession } from '../../hub/testing.ts'
 
+const CHANNEL = 'plugin:telegram@hex'
 const OWNER = 2000
 const FORUM = -1001234
 const DESK = `${FORUM}:5`
@@ -59,8 +61,9 @@ class Bot extends grammy.Bot {
 mock.module('grammy', () => ({ ...grammy, Bot }))
 
 const state = mkdtempSync(join(tmpdir(), 'telegram-'))
-const received: any[] = []
+let received: any[] = []
 let call: (tool: string, args: object) => Promise<any>
+let ask: (request: object) => Promise<unknown>
 let session: (payload: object) => void
 
 async function until<T>(check: () => T | undefined, timeout = 3000): Promise<T> {
@@ -95,24 +98,13 @@ beforeAll(async () => {
     return Response.json({ text: form.get('model') === 'whisper' ? ' anchors ship friday ' : 'wrong model' })
   }) as any
   await import('./bot.ts')
-  const socket = connect(join(state, 'hub.sock'))
-  let buffer = ''
-  let next = 0
-  socket.setEncoding('utf8')
-  socket.on('data', (chunk: string) => {
-    buffer += chunk
-    const lines = buffer.split('\n')
-    buffer = lines.pop()!
-    received.push(...lines.map(line => JSON.parse(line)))
-  })
-  await new Promise(resolve => socket.on('connect', resolve))
-  session = payload => socket.write(JSON.stringify(payload) + '\n')
-  session({ type: 'hello', thread: DESK, session: '0a1b2c3d-0000-4000-8000-000000000000' })
-  call = (tool, args) => {
-    const id = ++next
-    session({ type: 'call', id, tool, args })
-    return until(() => received.find(line => line.type === 'result' && line.id === id))
-  }
+  const desk = await connectSession({ stateDir: state, path: '/telegram', channel: CHANNEL, thread: DESK })
+  received = desk.received
+  call = desk.call
+  ask = desk.ask
+  const hooks = connect(join(state, 'hub.sock'))
+  await new Promise(resolve => hooks.on('connect', resolve))
+  session = payload => hooks.write(JSON.stringify(payload) + '\n')
 })
 
 test('the bot asks Telegram for reactions, button taps and poll votes', () => {
@@ -158,7 +150,7 @@ test('buttons come back as a tap with the label, and the message keeps only the 
 })
 
 test('a permission prompt asks in its own topic, and the owner\'s tap answers the session instead of reaching it as a message', async () => {
-  session({ type: 'permission_request', request_id: 'abcde', tool_name: 'Bash', description: 'Delete the build folder', input_preview: '{"command":"rm -rf build","description":"Delete the build folder"}' })
+  void ask({ request_id: 'abcde', tool_name: 'Bash', description: 'Delete the build folder', input_preview: '{"command":"rm -rf build","description":"Delete the build folder"}' })
   const prompt = await called('sendMessage', p => p.text?.startsWith('🔐'))
   const markup = { inline_keyboard: [[{ text: 'Allow', callback_data: 'perm:allow:abcde' }, { text: 'Deny', callback_data: 'perm:deny:abcde' }]] }
   expect(prompt).toMatchObject({ chat_id: String(FORUM), message_thread_id: 5, text: '🔐 Bash: Delete the build folder\n\ncommand: rm -rf build', reply_markup: markup })
@@ -178,7 +170,7 @@ test('a permission prompt asks in its own topic, and the owner\'s tap answers th
 })
 
 test('a prompt still open when the turn ends, answered in the session itself, stops offering its buttons', async () => {
-  session({ type: 'permission_request', request_id: 'fghij', tool_name: 'Write', description: 'Write notes.md', input_preview: '{"file_path":"/tmp/notes.md","content":"hi"}' })
+  void ask({ request_id: 'fghij', tool_name: 'Write', description: 'Write notes.md', input_preview: '{"file_path":"/tmp/notes.md","content":"hi"}' })
   expect((await called('sendMessage', p => p.text?.startsWith('🔐 Write'))).text).toBe('🔐 Write: Write notes.md\n\nfile_path: /tmp/notes.md\ncontent: hi')
   const id = nextMessage
   session({ type: 'state', thread: DESK, busy: true })
@@ -316,18 +308,8 @@ test('the got-it reaction lands on each message when access.json sets one', asyn
 })
 
 test('a DM is its own thread: it reaches the DM session, not the group, and replies go back to the DM', async () => {
-  const dm = connect(join(state, 'hub.sock'))
-  const lines: any[] = []
-  let buffer = ''
-  dm.setEncoding('utf8')
-  dm.on('data', (chunk: string) => {
-    buffer += chunk
-    const parts = buffer.split('\n')
-    buffer = parts.pop()!
-    lines.push(...parts.map(line => JSON.parse(line)))
-  })
-  await new Promise(resolve => dm.on('connect', resolve))
-  dm.write(JSON.stringify({ type: 'hello', thread: String(OWNER), session: '0a1b2c3d-0000-4000-8000-0000000000dm' }) + '\n')
+  const dm = await connectSession({ stateDir: state, path: '/telegram', channel: CHANNEL, thread: String(OWNER) })
+  const lines = dm.received
   const forwards = calls.filter(c => c.method === 'forwardMessage').length
 
   await update({ message: { message_id: ++nextMessage, date: 1760000000, chat: { id: OWNER, type: 'private', first_name: 'Bassim' }, from: owner, text: 'quick one' } })
@@ -335,10 +317,9 @@ test('a DM is its own thread: it reaches the DM session, not the group, and repl
   expect(got.meta.chat_id).toBe(String(OWNER))
   expect(calls.filter(c => c.method === 'forwardMessage').length).toBe(forwards)
 
-  dm.write(JSON.stringify({ type: 'call', id: 1, tool: 'reply', args: { text: 'on it, from the DM' } }) + '\n')
-  await until(() => lines.find(line => line.type === 'result' && line.id === 1))
+  await dm.call('reply', { text: 'on it, from the DM' })
   expect(await called('sendMessage', p => p.text === 'on it, from the DM')).toMatchObject({ chat_id: String(OWNER) })
-  dm.destroy()
+  dm.close()
 })
 
 const ledger = () => JSON.parse(readFileSync(join(state, 'ledger.json'), 'utf8'))
