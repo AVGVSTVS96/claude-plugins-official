@@ -4,7 +4,7 @@ id: telegram-topics
 summary: Rework the Telegram channel so every forum topic in a group is its own Claude Code session, through the thread hub.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: telegram-topics.patch
-patch_sha256: 8375427e9858595b068c3b0f233c067e7ad47e180fefbf00ea772ede202c646c
+patch_sha256: 4a4d5141e613798daf4bb7d16fc25079e54a908e0b48935042afe85c79f98d5b
 ---
 
 ## Intent
@@ -18,7 +18,7 @@ serves a session per forum topic through `hub/`, and no process runs per session
 - `channel.ts` keeps upstream's tools and instructions as the channel the hub
   serves every session over HTTP. `.mcp.json` points the session there
   (`HEX_PORT`) with its `HEX_CHANNEL`, `HEX_THREAD` and the hub's `HEX_TOKEN`
-  in headers, in place of upstream's `bun server.ts`: Claude Code never restarts
+  (as `Authorization`) in headers, in place of upstream's `bun server.ts`: Claude Code never restarts
   a stdio server that dies, and reconnects to an HTTP one.
 
 On top of upstream:

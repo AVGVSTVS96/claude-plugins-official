@@ -25,7 +25,7 @@ index 0000000000000000000000000000000000000000..c2658d7d1b31848c3b71960543cb0368
 +node_modules/
 diff --git a/external_plugins/buzz/.mcp.json b/external_plugins/buzz/.mcp.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..b44e5e6cf744c31c3537cf815f0c731aea442b2b
+index 0000000000000000000000000000000000000000..07d7a130f22099982a1e8f5e5fbb22f7caa97791
 --- /dev/null
 +++ b/external_plugins/buzz/.mcp.json
 @@ -0,0 +1,13 @@
@@ -37,7 +37,7 @@ index 0000000000000000000000000000000000000000..b44e5e6cf744c31c3537cf815f0c731a
 +      "headers": {
 +        "X-Hex-Channel": "${HEX_CHANNEL}",
 +        "X-Hex-Thread": "${HEX_THREAD}",
-+        "X-Hex-Token": "${HEX_TOKEN}"
++        "Authorization": "Bearer ${HEX_TOKEN}"
 +      }
 +    }
 +  }
@@ -51,7 +51,7 @@ index 0000000000000000000000000000000000000000..214c29d1395919ce175f26d140526368
 +registry=https://registry.npmjs.org/
 diff --git a/external_plugins/buzz/README.md b/external_plugins/buzz/README.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..ef273a3ad29bc525b758bc614abe097b298df636
+index 0000000000000000000000000000000000000000..44258925a2f978169b79c9cd4ee39986cfb16ec8
 --- /dev/null
 +++ b/external_plugins/buzz/README.md
 @@ -0,0 +1,10 @@
@@ -60,7 +60,7 @@ index 0000000000000000000000000000000000000000..ef273a3ad29bc525b758bc614abe097b
 +A channel for [Buzz](https://github.com/block/buzz), where every Buzz thread is its own Claude Code session, Claude-tag style: tag the agent in a channel and it starts a thread on your message, with a fresh session working inside it. Inside a thread, or in a DM, you just talk. It works with any Buzz relay, no Buzz changes needed. Its intent, invariants and design live in [`patches/buzz-threads/PATCH.md`](../../patches/buzz-threads/PATCH.md).
 +
 +- `bot.ts` holds the one relay connection (`relay.ts`). It runs in the hub service (`bun hub/serve.ts`) next to Telegram and Discord, so a conversation can move between them. It starts sessions in `HEX_DIR` through `HEX_LAUNCHER`, like Discord.
-+- `channel.ts` is the channel the hub serves each session over HTTP, so no process runs per session. `.mcp.json` points a session at the hub's port (`HEX_PORT`) with its thread (`HEX_THREAD`) and the hub's token (`HEX_TOKEN`) in headers.
++- `channel.ts` is the channel the hub serves each session over HTTP, so no process runs per session. `.mcp.json` points a session at the hub's port (`HEX_PORT`) with its thread (`HEX_THREAD`) and the hub's token (`HEX_TOKEN`, as `Authorization`) in headers.
 +- `activity.ts` and `memory.ts` fill Buzz Desktop's activity and memory panels, and share files with Agent Files where the relay supports it.
 +- `provider.ts` is `buzz-backend-hex`, the Buzz Desktop provider that deploys the agent's key here over SSH.
 +

@@ -4,7 +4,7 @@ id: discord-threads
 summary: Rework the Discord channel so every thread in a server is its own Claude Code session, Claude-tag style, through the thread hub.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: discord-threads.patch
-patch_sha256: e17122cc0d0a63d50795f4b9ed1453132337556772cbefda03562bcb1463785c
+patch_sha256: 11f4e84d7854aac6346f0ce1d119fa97326d3410484f82e1643be607219702f4
 ---
 
 ## Intent
@@ -19,7 +19,7 @@ session per Discord thread through `hub/`, and no process runs per session:
 - `channel.ts` keeps upstream's tools and instructions as the channel the hub
   serves every session over HTTP. `.mcp.json` points the session there
   (`HEX_PORT`) with its `HEX_CHANNEL`, `HEX_THREAD` and the hub's `HEX_TOKEN`
-  in headers, in place of upstream's `bun server.ts`.
+  (as `Authorization`) in headers, in place of upstream's `bun server.ts`.
 
 Discord is the place for deeper work, Claude-tag style:
 

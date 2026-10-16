@@ -138,10 +138,10 @@ index 0000000000000000000000000000000000000000..e79abf7a89b423d6461497ea8493bcab
 +}
 diff --git a/hub/hub.test.ts b/hub/hub.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..776d296cddecaa2407a89bdbec50ea128bf4cd89
+index 0000000000000000000000000000000000000000..223b85dbe6cfd35ccb4ec674cd29f05cadd1a35e
 --- /dev/null
 +++ b/hub/hub.test.ts
-@@ -0,0 +1,1439 @@
+@@ -0,0 +1,1464 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { connect, createServer, type Socket } from 'net'
 +import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, chmodSync, existsSync } from 'fs'
@@ -192,7 +192,7 @@ index 0000000000000000000000000000000000000000..776d296cddecaa2407a89bdbec50ea12
 +})
 +
 +// stale: the registry's sessions started with what the hub no longer gives a session, as after an update.
-+function start(options: { main?: string; general?: boolean; idleStop?: number; cacheWarm?: number; compactAbove?: number; reconnect?: number; launcher?: string; registry?: Record<string, any>; stale?: boolean; agents?: object[]; fresh?: (thread: string) => boolean; capacity?: number; bind?: (thread: string) => Record<string, string> } = {}) {
++function start(options: { main?: string; general?: boolean; idleStop?: number; cacheWarm?: number; compactAbove?: number; reconnect?: number; launcher?: string; registry?: Record<string, any>; stale?: boolean; agents?: object[]; fresh?: (thread: string) => boolean; capacity?: number; bind?: (thread: string) => Record<string, string>; hooks?: string[] } = {}) {
 +  const { idleStop, cacheWarm, compactAbove, reconnect, capacity } = options
 +  if (options.registry) writeFileSync(join(dir, 'threads.json'), JSON.stringify(options.stale ? before(options.registry) : options.registry))
 +  if (options.agents) writeFileSync(join(dir, 'agents'), JSON.stringify(options.agents))
@@ -215,6 +215,7 @@ index 0000000000000000000000000000000000000000..776d296cddecaa2407a89bdbec50ea12
 +    launcher: options.launcher,
 +    fresh: options.fresh,
 +    bind: options.bind,
++    hooks: options.hooks,
 +    mainName: 'hex',
 +  })
 +}
@@ -259,7 +260,7 @@ index 0000000000000000000000000000000000000000..776d296cddecaa2407a89bdbec50ea12
 +// tools/list_changed it drops, as a session starting cold does before it listens.
 +function http(thread?: string, extra: Record<string, string> = {}, deaf = 0) {
 +  const url = `http://127.0.0.1:${listener.port}/telegram`
-+  const headers = { ...(thread && { 'x-hex-channel': CHANNEL, 'x-hex-thread': thread }), 'x-hex-token': readFileSync(join(dir, 'token'), 'utf8'), 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...extra }
++  const headers = { ...(thread && { 'x-hex-channel': CHANNEL, 'x-hex-thread': thread }), authorization: `Bearer ${readFileSync(join(dir, 'token'), 'utf8')}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...extra }
 +  const received: any[] = []
 +  const stream = new AbortController()
 +  streams.push(stream)
@@ -535,6 +536,7 @@ index 0000000000000000000000000000000000000000..776d296cddecaa2407a89bdbec50ea12
 +  const { close } = await session('chat:7')
 +  close()
 +  expect(await until(() => calls().find(args => args[0] === 'respawn'))).toEqual(['respawn', SESSION.slice(0, 8)])
++  expect(JSON.parse(readFileSync(join(dir, 'sessions', 'chat%3A7.json'), 'utf8')).env.HEX_TOKEN).toBe(readFileSync(join(dir, 'token'), 'utf8'))
 +  hub.deliver('chat:7', 'Desk anchors', message)
 +  const back = await session('chat:7')
 +  await until(() => back.received.length)
@@ -671,8 +673,8 @@ index 0000000000000000000000000000000000000000..776d296cddecaa2407a89bdbec50ea12
 +
 +test("a request without the hub's token is refused, and the token is the owner's alone", async () => {
 +  start()
-+  expect((await http('chat:7', { 'x-hex-token': 'guess' }).post({ id: 1, method: 'ping' })).status).toBe(403)
-+  const { 'x-hex-token': _, ...anonymous } = { 'x-hex-token': '' }
++  expect((await http('chat:7', { authorization: 'Bearer guess' }).post({ id: 1, method: 'ping' })).status).toBe(403)
++  const { authorization: _, ...anonymous } = { authorization: '' }
 +  expect((await fetch(`http://127.0.0.1:${listener.port}/telegram`, { method: 'POST', headers: { 'content-type': 'application/json', ...anonymous }, body: '{"jsonrpc":"2.0","id":1,"method":"ping"}' })).status).toBe(403)
 +  expect(statSync(join(dir, 'token')).mode & 0o777).toBe(0o600)
 +  hub.deliver('chat:7', 'Desk anchors', message)
@@ -1229,6 +1231,29 @@ index 0000000000000000000000000000000000000000..776d296cddecaa2407a89bdbec50ea12
 +  expect(calls().some(args => args[0] === '--bg')).toBe(false)
 +})
 +
++test('a change to only the hooks a session loads renews it at its next rest', async () => {
++  const hooks = join(dir, 'hooks.json')
++  writeFileSync(hooks, '{"hooks":{}}')
++  const launched = stamp([], SERVER, [hooks])
++  expect(stamp([], SERVER, [hooks])).toBe(launched)
++  writeFileSync(hooks, '{"hooks":{"Stop":[]}}')
++  expect(stamp([], SERVER, [hooks])).not.toBe(launched)
++  start({ hooks: [hooks], registry: { 'chat:7': { name: 'Desk anchors', session: SESSION, launched } }, agents: [{ sessionId: SESSION, pid: 42, status: 'idle', startedAt: 1 }] })
++  const { send } = await session('chat:7')
++  send({ type: 'state', thread: 'chat:7', busy: false })
++  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
++})
++
++test('a session whose hooks are unchanged keeps running across a hub restart', async () => {
++  const hooks = join(dir, 'hooks.json')
++  writeFileSync(hooks, '{"hooks":{}}')
++  start({ hooks: [hooks], registry: { 'chat:7': { name: 'Desk anchors', session: SESSION, launched: stamp([], SERVER, [hooks]) } }, agents: [{ sessionId: SESSION, pid: 42, status: 'idle', startedAt: 1 }] })
++  const { send } = await session('chat:7')
++  send({ type: 'state', thread: 'chat:7', busy: false })
++  await Bun.sleep(150)
++  expect(calls().some(args => args[0] === 'stop')).toBe(false)
++})
++
 +test('a main thread whose session started with what the hub no longer gives starts over as soon as it rests', async () => {
 +  const old = Bun.spawn(['sleep', '30'])
 +  start({ stale: true, main: 'chat', registry: { chat: { name: 'hex', session: SESSION } }, agents: [{ sessionId: SESSION, pid: old.pid, status: 'idle', startedAt: 1 }], reconnect: 60_000 })
@@ -1583,10 +1608,10 @@ index 0000000000000000000000000000000000000000..776d296cddecaa2407a89bdbec50ea12
 +})
 diff --git a/hub/hub.ts b/hub/hub.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..96085261181974f659d1007ea5f0288215855694
+index 0000000000000000000000000000000000000000..10db19a270a9072b76fd373d7d99c73c5d6bf95c
 --- /dev/null
 +++ b/hub/hub.ts
-@@ -0,0 +1,778 @@
+@@ -0,0 +1,789 @@
 +import { createServer } from 'net'
 +import { createHash, randomBytes } from 'crypto'
 +import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync, type FSWatcher } from 'fs'
@@ -1691,10 +1716,12 @@ index 0000000000000000000000000000000000000000..96085261181974f659d1007ea5f02882
 +  return Number(tokens)
 +}
 +
-+// What a session reads only as it starts: its launch arguments and its channel's instructions and
-+// tools. threads.json keeps a digest of what each thread's session started with.
-+export function stamp(args: string[], server?: ChannelServer) {
-+  return createHash('sha256').update(JSON.stringify([args, server ?? null])).digest('hex').slice(0, 16)
++// What a session reads only as it starts: its launch arguments, its channel's instructions and
++// tools, and the hooks its launcher loads. threads.json keeps a digest of what each thread's
++// session started with.
++export function stamp(args: string[], server?: ChannelServer, hooks: string[] = []) {
++  const read = (file: string) => (existsSync(file) ? readFileSync(file, 'utf8') : null)
++  return createHash('sha256').update(JSON.stringify([args, server ?? null, ...(hooks.length ? [hooks.map(read)] : [])])).digest('hex').slice(0, 16)
 +}
 +
 +// A voice call passes through this process (its page and phone line go through the hub's
@@ -1723,7 +1750,7 @@ index 0000000000000000000000000000000000000000..96085261181974f659d1007ea5f02882
 +  return readFileSync(file, 'utf8').trim()
 +}
 +
-+export function startHub({ stateDir, channel, server, port = PORT, main, mainName = 'main', general = false, call, state, failed, permission, asks, args = () => [], bind = () => ({}), fresh = () => false, limits, hexDir = process.cwd(), launcher = 'claude' }: {
++export function startHub({ stateDir, channel, server, port = PORT, main, mainName = 'main', general = false, call, state, failed, permission, asks, args = () => [], bind = () => ({}), fresh = () => false, limits, hexDir = process.cwd(), launcher = 'claude', hooks = process.env.HEX_HOOKS?.split(':').filter(Boolean) ?? [] }: {
 +  stateDir: string
 +  channel: string
 +  // What the channel serves its sessions over HTTP; a client without one serves them through its
@@ -1749,6 +1776,9 @@ index 0000000000000000000000000000000000000000..96085261181974f659d1007ea5f02882
 +  limits?: Partial<Limits>
 +  hexDir?: string
 +  launcher?: string
++  // The hooks files the launcher's plugins load (HEX_HOOKS, colon-separated): a change to one
++  // renews sessions like a change to the channel does.
++  hooks?: string[]
 +}) {
 +  const { idleStop, cacheWarm, compactAbove, reconnect, capacity } = { ...LIMITS, ...limits }
 +  const registry = join(stateDir, 'threads.json')
@@ -2018,7 +2048,7 @@ index 0000000000000000000000000000000000000000..96085261181974f659d1007ea5f02882
 +  // plain restart of the hub leaves every session running. A thread with no record started its
 +  // session with none of its own arguments, before the hub kept one.
 +  function stale(thread: string) {
-+    return (threads[thread]?.launched ?? stamp([], server)) !== stamp(extra(thread), server)
++    return (threads[thread]?.launched ?? stamp([], server)) !== stamp(extra(thread), server, hooks)
 +  }
 +
 +  function configure(thread: string, settings: Settings) {
@@ -2034,8 +2064,8 @@ index 0000000000000000000000000000000000000000..96085261181974f659d1007ea5f02882
 +    return join(sessionsDir, `${encodeURIComponent(thread)}.json`)
 +  }
 +
-+  async function start(thread: string, prompt?: string, fork?: string) {
-+    const known = threads[thread]!
++  // A respawn reads the same file, so it gets the hub's current token and binding too.
++  function writeSettings(thread: string) {
 +    const env = {
 +      ...bind(thread),
 +      HEX_CHANNEL: channel,
@@ -2046,8 +2076,13 @@ index 0000000000000000000000000000000000000000..96085261181974f659d1007ea5f02882
 +      ...(fresh(thread) ? { HEX_FRESH: '1' } : {}),
 +    }
 +    writeFileSync(settingsOf(thread), JSON.stringify({ enabledPlugins: { [plugin]: true }, env }), { mode: 0o600 })
++  }
++
++  async function start(thread: string, prompt?: string, fork?: string) {
++    const known = threads[thread]!
++    writeSettings(thread)
 +    const launchArgs = extra(thread)
-+    const launched = stamp(launchArgs, server)
++    const launched = stamp(launchArgs, server, hooks)
 +    if (known.launched !== launched) {
 +      known.launched = launched
 +      save()
@@ -2211,6 +2246,7 @@ index 0000000000000000000000000000000000000000..96085261181974f659d1007ea5f02882
 +    if (run.phase.is === 'launching') run.phase.respawned = true
 +    else become(run, { is: 'launching', respawned: true })
 +    const phase = run.phase
++    writeSettings(thread)
 +    await claude.respawn(running)
 +    if (run.phase === phase) recover(thread)
 +  }
@@ -2367,10 +2403,10 @@ index 0000000000000000000000000000000000000000..96085261181974f659d1007ea5f02882
 +}
 diff --git a/hub/mcp.ts b/hub/mcp.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..f44f78184c9a4c5194f1f9aa6ad156fe64d1e6cf
+index 0000000000000000000000000000000000000000..28d145a6ef66a3c3232767efeeee296c16715b01
 --- /dev/null
 +++ b/hub/mcp.ts
-@@ -0,0 +1,152 @@
+@@ -0,0 +1,154 @@
 +export type Tool = { name: string; description: string; inputSchema: object; _meta?: object }
 +// What a chat app's channel says to each session: how to read its messages, and the tools that act in its thread.
 +export type ChannelServer = { title: string; instructions: string; tools: Tool[]; permission?: boolean }
@@ -2483,7 +2519,9 @@ index 0000000000000000000000000000000000000000..f44f78184c9a4c5194f1f9aa6ad156fe
 +  }
 +
 +  return async (request: Request): Promise<Response> => {
-+    if (request.headers.has('origin') || !['127.0.0.1', 'localhost'].includes(new URL(request.url).hostname) || request.headers.get('x-hex-token') !== token) return new Response('Forbidden', { status: 403 })
++    // The token comes as Authorization: Claude Code then takes a refusal as a failed connection,
++    // where with any other header it marks the server as needing a login for 15 minutes.
++    if (request.headers.has('origin') || !['127.0.0.1', 'localhost'].includes(new URL(request.url).hostname) || request.headers.get('authorization') !== `Bearer ${token}`) return new Response('Forbidden', { status: 403 })
 +    const thread = threadOf(request)
 +    const session = request.headers.get('mcp-session-id')
 +    if (request.method === 'GET') return stream(thread, session)

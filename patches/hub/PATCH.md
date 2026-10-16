@@ -4,7 +4,7 @@ id: hub
 summary: Add a client-agnostic hub that gives every chat thread its own Claude Code session and moves threads between clients.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: hub.patch
-patch_sha256: aea1b9fc8495bc6e96c0bc4101682e6843084df6fb731bbf4c04778a7d006dfb
+patch_sha256: 6539d8f6d27bf9e8dac3a467ac88d0c2d816f33626950927fd9160fccbd2fb8c
 ---
 
 ## Intent
@@ -109,8 +109,11 @@ stream is open and it has listed them (again every 250 ms, since a session
 starting cold drops it until it listens), and opens the channel when the
 session lists them again. Any local user can reach the port, so the hub makes
 a token once (`token` in its state folder, owner-only) and refuses a request
-without it, one with an `Origin` header, or one by a host other than
-localhost, and a session with no thread (its env has none, or
+without it as `Authorization: Bearer`, one with an `Origin` header, or one by a host other than
+localhost. The token goes in `Authorization` because Claude Code takes a
+refusal then as a failed connection; with any other header it records the
+server in `mcp-needs-auth-cache.json` and skips it for 15 minutes, which no
+restart in place clears. A session with no thread (its env has none, or
 another channel's) gets no messages and acts on no thread. A client with no
 `server` keeps its plugin's own process, which reaches the hub on `hub.sock`
 and says hello; sessions started before the hub served over HTTP do the same
@@ -122,7 +125,8 @@ start, the hub gives Claude Code 20 seconds to reconnect it (it retries a
 dropped HTTP server at about 0, 1, 3, 7 and 15 seconds, then gives up for
 good). After that, a session still running that started before then restarts
 in place (`claude respawn`, which keeps its conversation and runs a turn it was
-on again) when its flags read the thread's settings file, and otherwise stops
+on again) when its flags read the thread's settings file, which the hub writes
+again first, so the session comes back with the current token and binding, and otherwise stops
 and resumes, since a respawn would start it without its binding; one that
 started since gets the same time, and one that restarted
 and still has no channel is reported as a failed start, as is a session the
@@ -149,8 +153,9 @@ lags the hook and counts a running shell as busy, so it isn't asked for a renew
 the session asked for itself), the hub stops it, and a main thread or a fresh thread starts over as soon as its process exits
 (a fresh thread as a new session); any other thread's next message resumes it.
 `threads.json` keeps a digest (`stamp`) of what each thread's session started
-with: its launch arguments and the channel's instructions and tools, which a
-session reads only as it starts and a reconnect keeps. A session that connects
+with: its launch arguments, the channel's instructions and tools, and the hooks
+files its launcher's plugins load (`hooks`, from `HEX_HOOKS`), which a session
+reads only as it starts and a reconnect keeps. A session that connects
 with another digest renews too, once Claude reports it idle, and its next message
 goes to a fresh start, so an update that changes them moves each session onto
 it at its own next rest, while a crash or a plain restart of the hub leaves
@@ -222,13 +227,16 @@ handoffs (release, adopt, fork), permission prompts and bad input against a fake
 channels that drop and come back, sessions that restart in place once and are reported after,
 sessions that outlived the hub, starts that end before their channel connects, unsaved sessions found by their job, a new stream held until
 Claude Code lists its tools again (told again while it drops that), a stream adopted after a
-restart, the declined protocol, requests without the token refused, owner-only token and
+restart, the declined protocol, requests without the token refused, a restart in place
+writing the current token first, a hooks-only change renewing and unchanged hooks not, owner-only token and
 settings files, sessions whose flags read no settings file stopped and resumed instead of
 respawned, `HEX_CHAT_CAPACITY` parsing, and unbound sessions. Run `scripts/verify`. Live: in an
 isolated `CLAUDE_CONFIG_DIR`, a new thread and a warm DM each get a message and reply on a
 cold start without a restart, the DM's next message goes straight to the same session, both
 carry on through a hub restart with no renew, and both restart in place with their token after
-a 30-second outage.
+a 30-second outage. A session started with a wrong token is refused, Claude Code records
+no needs-auth entry, and the hub restarts it in place with the right one, which then gets a
+message, with no step by hand.
 
 ## Removal
 
