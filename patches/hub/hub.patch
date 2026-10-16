@@ -1,9 +1,9 @@
 diff --git a/hub/claude.ts b/hub/claude.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..e0b95f53c2ffb8a4e9b73b09b454dbb00a0e0915
+index 0000000000000000000000000000000000000000..cb68ecc69cad62019f3ab051d5d5a92440c29358
 --- /dev/null
 +++ b/hub/claude.ts
-@@ -0,0 +1,134 @@
+@@ -0,0 +1,148 @@
 +import { execFile, spawn } from 'child_process'
 +import { closeSync, fstatSync, openSync, readFileSync, readSync, watch } from 'fs'
 +import { homedir } from 'os'
@@ -90,18 +90,32 @@ index 0000000000000000000000000000000000000000..e0b95f53c2ffb8a4e9b73b09b454dbb0
 +  return watch(join(home(), 'jobs', id), change)
 +}
 +
-+// Claude keeps the flags a session started with, since it respawns from them, so the settings
-+// file it was given says what it serves.
-+export function settingsOf(agent: Agent): { enabledPlugins?: object; env?: Record<string, string> } | undefined {
++type Launch = { enabledPlugins?: object; env?: Record<string, string> }
++
++// Claude keeps the flags a session started with, since it respawns from them.
++function settingsFlag(agent: Agent) {
 +  const flags = record(job(agent)).respawnFlags ?? []
++  return flags.includes('--settings') ? flags[flags.lastIndexOf('--settings') + 1]! : ''
++}
++
++// The settings file a session started with, which a respawn reads again.
++export function settingsOf(agent: Agent): Launch | undefined {
 +  try {
-+    return JSON.parse(readFileSync(flags[flags.lastIndexOf('--settings') + 1]!, 'utf8'))
++    return JSON.parse(readFileSync(settingsFlag(agent), 'utf8'))
 +  } catch {
 +    return undefined
 +  }
 +}
 +
-+export const envOf = (agent: Agent) => settingsOf(agent)?.env
++// What a session serves. A hub from before the settings file gave a session its settings inline.
++export function envOf(agent: Agent): Launch['env'] {
++  const flag = settingsFlag(agent)
++  try {
++    return (flag.startsWith('{') ? (JSON.parse(flag) as Launch) : settingsOf(agent))?.env
++  } catch {
++    return undefined
++  }
++}
 +
 +export function transcript(cwd: string, session: string) {
 +  return join(home(), 'projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'), `${session}.jsonl`)
@@ -140,10 +154,10 @@ index 0000000000000000000000000000000000000000..e0b95f53c2ffb8a4e9b73b09b454dbb0
 +}
 diff --git a/hub/hub.test.ts b/hub/hub.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..68cc2a31cfa97199704bfc7983b6f595173599f0
+index 0000000000000000000000000000000000000000..29d972b77da279b569a89fba6eb78b6156c3f249
 --- /dev/null
 +++ b/hub/hub.test.ts
-@@ -0,0 +1,1481 @@
+@@ -0,0 +1,1499 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { connect, createServer, type Socket } from 'net'
 +import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, chmodSync, existsSync } from 'fs'
@@ -1373,6 +1387,24 @@ index 0000000000000000000000000000000000000000..68cc2a31cfa97199704bfc7983b6f595
 +  expect(calls().some(args => args[0] === 'respawn')).toBe(false)
 +})
 +
++test('a session from before the hub served over HTTP says hello on hub.sock, and starts over at its next rest', async () => {
++  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'idle' }] })
++  await plugin('chat:7')
++  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
++})
++
++test('a fresh main thread whose unsaved session an older hub started with its settings inline is waited for, not started twice, and is stopped rather than respawned once its channel stays gone', async () => {
++  const old = Bun.spawn(['sleep', '30'])
++  const id = '1a2b3c4d-0000-4000-8000-000000000000'
++  mkdirSync(join(dir, 'jobs', id.slice(0, 8)), { recursive: true })
++  writeFileSync(join(dir, 'jobs', id.slice(0, 8), 'state.json'), JSON.stringify({ state: 'working', sessionId: id, respawnFlags: ['--channels', CHANNEL, '--settings', JSON.stringify({ enabledPlugins: {}, env: { HEX_CHANNEL: CHANNEL, HEX_THREAD: 'voice' } })] }))
++  start({ main: 'voice', fresh: () => true, capacity: 0, reconnect: 50, registry: { voice: { name: 'voice' } }, agents: [{ sessionId: id, pid: old.pid, status: 'idle', startedAt: 1 }] })
++  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', id.slice(0, 8)])
++  expect(calls().some(args => args[0] === '--bg' || args[0] === 'respawn')).toBe(false)
++  old.kill()
++  await launched()
++})
++
 +test('HEX_CHAT_CAPACITY may be 0, and must be a number', async () => {
 +  const load = (tokens: string) => Bun.spawnSync(['bun', '-e', `import(${JSON.stringify(join(import.meta.dir, 'hub.ts'))}).then(() => console.log('ok'))`], { env: { ...process.env, HEX_CHAT_CAPACITY: tokens } })
 +  expect(load('0').stdout.toString()).toBe('ok\n')
@@ -1627,7 +1659,7 @@ index 0000000000000000000000000000000000000000..68cc2a31cfa97199704bfc7983b6f595
 +})
 diff --git a/hub/hub.ts b/hub/hub.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..6e9f45b7a734ce2cd9489b8c3b985bf9dd785b76
+index 0000000000000000000000000000000000000000..4aa8a4b3a0f333e5bb3281ccf2a9b1665c2e207e
 --- /dev/null
 +++ b/hub/hub.ts
 @@ -0,0 +1,790 @@
@@ -1962,11 +1994,10 @@ index 0000000000000000000000000000000000000000..6e9f45b7a734ce2cd9489b8c3b985bf9
 +    else if (thread !== main) stop(thread)
 +  }
 +
-+  function stop(thread: string) {
++  function stop(thread: string, session = current(thread)) {
 +    const run = runOf(thread)
 +    clearTimeout(run.rest)
 +    run.rest = undefined
-+    const session = current(thread)
 +    if (session) void claude.stop(session)
 +  }
 +
@@ -2178,7 +2209,7 @@ index 0000000000000000000000000000000000000000..6e9f45b7a734ce2cd9489b8c3b985bf9
 +  async function cycle(thread: string, running?: claude.Agent, prompt?: string, quiet = false) {
 +    const run = runOf(thread)
 +    if (running) {
-+      stop(thread)
++      stop(thread, running.sessionId)
 +      await claude.exited(running.pid)
 +    }
 +    if (run.phase.is === 'live' || run.phase.is === 'recovering') {
@@ -2189,7 +2220,8 @@ index 0000000000000000000000000000000000000000..6e9f45b7a734ce2cd9489b8c3b985bf9
 +  }
 +
 +  // A session's channel connected: over HTTP (its session is the one the hub started, or the one
-+  // Claude reports running for the thread), or through its plugin's hello, which names it.
++  // Claude reports running for the thread), or through its plugin's hello, which names it. A
++  // client that serves over HTTP hears a hello only from a session started before it did.
 +  function welcome(thread: string, line: Line, session?: string) {
 +    const run = runOf(thread)
 +    const job = run.phase.is === 'launching' ? run.phase.job : undefined
@@ -2201,7 +2233,7 @@ index 0000000000000000000000000000000000000000..6e9f45b7a734ce2cd9489b8c3b985bf9
 +    for (const message of run.queue.splice(0)) line.send({ type: 'inbound', ...message })
 +    rest(thread)
 +    letGo(thread)
-+    if (stale(thread)) {
++    if ((server && session) || stale(thread)) {
 +      run.renew = 'stale'
 +      void renew(thread)
 +    }
@@ -2241,7 +2273,7 @@ index 0000000000000000000000000000000000000000..6e9f45b7a734ce2cd9489b8c3b985bf9
 +      if ((running.startedAt ?? 0) >= since) return recover(thread)
 +      // A respawn starts from the flags the session started with, which read the thread's current
 +      // settings file only for a session the hub started that way.
-+      if (claude.envOf(running)) return respawn(thread, running)
++      if (claude.settingsOf(running)) return respawn(thread, running)
 +      void cycle(thread, running)
 +    }, reconnect)
 +  }

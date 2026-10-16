@@ -329,11 +329,10 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
     else if (thread !== main) stop(thread)
   }
 
-  function stop(thread: string) {
+  function stop(thread: string, session = current(thread)) {
     const run = runOf(thread)
     clearTimeout(run.rest)
     run.rest = undefined
-    const session = current(thread)
     if (session) void claude.stop(session)
   }
 
@@ -545,7 +544,7 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
   async function cycle(thread: string, running?: claude.Agent, prompt?: string, quiet = false) {
     const run = runOf(thread)
     if (running) {
-      stop(thread)
+      stop(thread, running.sessionId)
       await claude.exited(running.pid)
     }
     if (run.phase.is === 'live' || run.phase.is === 'recovering') {
@@ -556,7 +555,8 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
   }
 
   // A session's channel connected: over HTTP (its session is the one the hub started, or the one
-  // Claude reports running for the thread), or through its plugin's hello, which names it.
+  // Claude reports running for the thread), or through its plugin's hello, which names it. A
+  // client that serves over HTTP hears a hello only from a session started before it did.
   function welcome(thread: string, line: Line, session?: string) {
     const run = runOf(thread)
     const job = run.phase.is === 'launching' ? run.phase.job : undefined
@@ -568,7 +568,7 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
     for (const message of run.queue.splice(0)) line.send({ type: 'inbound', ...message })
     rest(thread)
     letGo(thread)
-    if (stale(thread)) {
+    if ((server && session) || stale(thread)) {
       run.renew = 'stale'
       void renew(thread)
     }
@@ -608,7 +608,7 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
       if ((running.startedAt ?? 0) >= since) return recover(thread)
       // A respawn starts from the flags the session started with, which read the thread's current
       // settings file only for a session the hub started that way.
-      if (claude.envOf(running)) return respawn(thread, running)
+      if (claude.settingsOf(running)) return respawn(thread, running)
       void cycle(thread, running)
     }, reconnect)
   }

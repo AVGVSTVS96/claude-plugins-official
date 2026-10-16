@@ -4,7 +4,7 @@ id: hub
 summary: Add a client-agnostic hub that gives every chat thread its own Claude Code session and moves threads between clients.
 baseline: ea10b213686c90bb1984b2016937310e05336cf3
 patch_file: hub.patch
-patch_sha256: 5d0b4dd02a05eebcae81eccf086b8c213a144286d0214cb21441239bc742e6b6
+patch_sha256: c6eee6ce93d4b1bee9de4cb5a36b2cd28f8163630adcc9162f5b41e0dd34c71f
 ---
 
 ## Intent
@@ -116,8 +116,9 @@ server in `mcp-needs-auth-cache.json` and skips it for 15 minutes, which no
 restart in place clears. A session with no thread (its env has none, or
 another channel's) gets no messages and acts on no thread. A client with no
 `server` keeps its plugin's own process, which reaches the hub on `hub.sock`
-and says hello; sessions started before the hub served over HTTP do the same
-until they next start.
+and says hello; sessions started before the hub served over HTTP do the same,
+and since a client that serves over HTTP hears a hello from nothing else, such a
+session starts over at its next rest, the way a stale one does.
 
 A thread whose session runs needs its channel. When it drops, when the hub
 starts, when a message finds its session running without one, and after a
@@ -138,8 +139,10 @@ never waits on a start that is gone. A gone main thread
 starts again, and a thread whose messages waited on a session that has since
 ended resumes. The running session serving a thread is its current one, or one
 Claude's job record shows was started for it (its `respawnFlags` keep the
-settings env), so a session whose conversation isn't saved yet is waited for,
-never started twice.
+settings env, in its settings file or, from a hub before that file, inline), so a
+session whose conversation isn't saved yet is waited for, never started twice. A
+session the hub stops to start again is stopped by its own id, which for one
+found by its job record isn't the thread's saved one.
 
 `tappable` turns `buzz://` links into web links through `open.html` on hex's
 site, since chat apps only link web addresses.

@@ -1227,6 +1227,24 @@ test('a session whose flags read no settings file of the hub stops and resumes o
   expect(calls().some(args => args[0] === 'respawn')).toBe(false)
 })
 
+test('a session from before the hub served over HTTP says hello on hub.sock, and starts over at its next rest', async () => {
+  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'idle' }] })
+  await plugin('chat:7')
+  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
+})
+
+test('a fresh main thread whose unsaved session an older hub started with its settings inline is waited for, not started twice, and is stopped rather than respawned once its channel stays gone', async () => {
+  const old = Bun.spawn(['sleep', '30'])
+  const id = '1a2b3c4d-0000-4000-8000-000000000000'
+  mkdirSync(join(dir, 'jobs', id.slice(0, 8)), { recursive: true })
+  writeFileSync(join(dir, 'jobs', id.slice(0, 8), 'state.json'), JSON.stringify({ state: 'working', sessionId: id, respawnFlags: ['--channels', CHANNEL, '--settings', JSON.stringify({ enabledPlugins: {}, env: { HEX_CHANNEL: CHANNEL, HEX_THREAD: 'voice' } })] }))
+  start({ main: 'voice', fresh: () => true, capacity: 0, reconnect: 50, registry: { voice: { name: 'voice' } }, agents: [{ sessionId: id, pid: old.pid, status: 'idle', startedAt: 1 }] })
+  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', id.slice(0, 8)])
+  expect(calls().some(args => args[0] === '--bg' || args[0] === 'respawn')).toBe(false)
+  old.kill()
+  await launched()
+})
+
 test('HEX_CHAT_CAPACITY may be 0, and must be a number', async () => {
   const load = (tokens: string) => Bun.spawnSync(['bun', '-e', `import(${JSON.stringify(join(import.meta.dir, 'hub.ts'))}).then(() => console.log('ok'))`], { env: { ...process.env, HEX_CHAT_CAPACITY: tokens } })
   expect(load('0').stdout.toString()).toBe('ok\n')
