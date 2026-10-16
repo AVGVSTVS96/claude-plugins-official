@@ -5,7 +5,7 @@ import { join } from 'path'
 
 const home = mkdtempSync(join(tmpdir(), 'voice-activity-'))
 process.env.CLAUDE_CONFIG_DIR = join(home, 'claude')
-const { findThread, followAgent, followThread, followTranscript, headline } = await import('./activity.ts')
+const { findThread, followAgent, followThread, followTranscript, headline, stepOf } = await import('./activity.ts')
 afterAll(() => rmSync(home, { recursive: true }))
 
 const hex = '/home/someone/hex'
@@ -65,6 +65,27 @@ test('each kind of step reads as a few plain words', () => {
     'Gmail: search threads',
     undefined,
   ])
+})
+
+test('each step says what kind it is, and a thought keeps its own words where the agent line says Thinking', () => {
+  const path = join(home, 'kinds.jsonl')
+  write(
+    path,
+    tool('Bash', { command: 'npm run check' }),
+    tool('Read', { file_path: '/repo/a.ts' }),
+    tool('Edit', { file_path: '/repo/a.ts', old_string: 'a', new_string: 'b' }),
+    tool('Grep', { pattern: 'lane' }),
+    tool('WebFetch', { url: 'https://ui.shadcn.com/docs', prompt: 'read' }),
+    tool('Agent', { description: 'Judge the restyles', prompt: 'go' }),
+    tool('mcp__plugin_telegram_telegram__reply', { text: 'done' }),
+    said('Sent it.'),
+  )
+  const kinds: string[] = []
+  followTranscript(path, 0, (_: unknown, updates: () => any[]) => kinds.push(...updates().map(update => stepOf(update)?.kind)))()
+  expect(kinds).toEqual(['run', 'read', 'edit', 'search', 'web', 'agent', 'tool', 'say'])
+  const thought = { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'The **lane** first.\n\nThen rows.' } } as const
+  expect(stepOf(thought)).toEqual({ kind: 'think', text: 'The lane first. Then rows.' })
+  expect(headline(thought)).toBe('Thinking')
 })
 
 test("an agent's own words read as their first line, without markdown, and its plan as the step in progress", () => {

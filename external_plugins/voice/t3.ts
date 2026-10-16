@@ -4,9 +4,12 @@ import { existsSync, watch } from 'fs'
 import { homedir } from 'os'
 import { basename, dirname, join } from 'path'
 
-// request: what hex's General is asked to do about it; without one, the action just puts it away.
-export type Stuck = { id: string; title: string; why: string; action: string; mark: 'paused' | 'failed'; at: string; request?: string }
-export type Fresh = { id: string; title: string; where: string; line: string; at: string }
+// app: where it's stuck, t3 or hex itself. request: what hex's General is asked to do about it; without one,
+// the action just puts it away.
+export type Stuck = { id: string; app: string; title: string; why: string; action: string; mark: 'paused' | 'failed'; at: string; request?: string }
+// topic: the T3 project it finished in, or the thread's own title. where says the same as one line, for apps
+// that still read it.
+export type Fresh = { id: string; app: string; topic: string; title: string; where: string; line: string; at: string }
 
 type Thread = { id: string; title: string; project: string | null; visited: string | null; limit: string | null; mine: boolean }
 type Run = { thread: string; ordinal: number; status: string; requested: string; completed: string | null }
@@ -92,6 +95,7 @@ export class T3 {
       const until = parked.map(thread => thread.limit!).sort()[0]!
       stuck.push({
         id: `t3-limit-${until}`,
+        app: 't3',
         title: `${count(parked.length, 'T3 thread')} ${parked.length === 1 ? 'waits' : 'wait'} for ${day(until)}`,
         why: `A usage limit: ${parked.map(thread => thread.title).join(', ')}.`,
         action: 'Switch plan',
@@ -105,6 +109,7 @@ export class T3 {
       if (!thread || thread.limit && thread.limit > iso || Date.parse(run.requested) > now - QUEUED) continue
       stuck.push({
         id: `t3-queued-${digest(`${run.thread}:${run.requested}`)}`,
+        app: 't3',
         title: `${thread.title}: queued since ${day(run.requested)}`,
         why: 'Its run never started.',
         action: 'Resume',
@@ -121,6 +126,7 @@ export class T3 {
       const titles = failed.map(run => threads.get(run.thread)!.title)
       stuck.push({
         id: `t3-failed-${digest(failed.map(run => `${run.thread}:${run.ordinal}`).sort().join(','))}`,
+        app: 't3',
         title: failed.length === 1 ? `${titles[0]} ended in an error` : `${failed.length} T3 runs ended in an error`,
         why: failed.length === 1 ? 'You haven’t opened it since.' : `${titles.join(', ')}.`,
         action: 'Look',
@@ -138,7 +144,15 @@ export class T3 {
       .sort((a, b) => b.completed!.localeCompare(a.completed!))
       .map((run): Fresh => {
         const thread = threads.get(run.thread)!
-        return { id: `t3-done-${digest(`${run.thread}:${run.ordinal}`)}`, title: thread.title, where: thread.project ? `T3 · ${thread.project}` : 'T3', line: this.lastWords(run.thread), at: run.completed! }
+        return {
+          id: `t3-done-${digest(`${run.thread}:${run.ordinal}`)}`,
+          app: 't3',
+          topic: thread.project ?? thread.title,
+          title: thread.title,
+          where: thread.project ? `T3 · ${thread.project}` : 'T3',
+          line: this.lastWords(run.thread),
+          at: run.completed!,
+        }
       })
     return { stuck, fresh }
   }

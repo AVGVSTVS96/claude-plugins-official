@@ -13,42 +13,59 @@ const client = { sessionUpdate: async () => {} } as unknown as Parameters<typeof
 const logger = { log: () => {}, error: (...args: unknown[]) => process.stderr.write(`voice: activity: ${args.join(' ')}\n`) }
 const ID = /^[\w-]+$/
 
-// What an agent is doing right now, in a few words, from one ACP session/update.
-export function headline(update: Update): string | undefined {
+// What an agent did, as a kind of step and a few words for it.
+export type Did = { kind: 'think' | 'say' | 'plan' | 'run' | 'read' | 'edit' | 'search' | 'web' | 'agent' | 'tool'; text: string }
+
+// What an agent is doing right now, from one ACP session/update. A thought keeps its own words.
+export function stepOf(update: Update): Did | undefined {
   switch (update.sessionUpdate) {
     case 'tool_call':
       return step(update)
-    case 'agent_message_chunk':
-      return update.content.type === 'text' ? firstLine(update.content.text) : undefined
+    case 'agent_message_chunk': {
+      const text = update.content.type === 'text' ? firstLine(update.content.text) : undefined
+      return text ? { kind: 'say', text } : undefined
+    }
     case 'agent_thought_chunk':
-      return 'Thinking'
-    case 'plan':
-      return update.entries.find(entry => entry.status === 'in_progress')?.content
+      return { kind: 'think', text: (update.content.type === 'text' && plain(update.content.text)) || 'Thinking' }
+    case 'plan': {
+      const text = update.entries.find(entry => entry.status === 'in_progress')?.content
+      return text ? { kind: 'plan', text } : undefined
+    }
   }
 }
 
-function step({ title, kind, rawInput, locations, _meta }: ToolCall) {
+// The same in a few plain words, for a call's agent line, where a thought is just Thinking.
+export function headline(update: Update): string | undefined {
+  const did = stepOf(update)
+  return did?.kind === 'think' ? 'Thinking' : did?.text
+}
+
+function step({ title, kind, rawInput, locations, _meta }: ToolCall): Did | undefined {
   const input = (rawInput ?? {}) as Record<string, string | undefined>
   const tool: string = (_meta as any)?.claudeCode?.toolName ?? title
   const file = locations?.[0]?.path ?? input.file_path ?? input.notebook_path
   switch (kind) {
     case 'execute':
-      return input.description || `Running ${firstLine(input.command ?? title)}`
+      return { kind: 'run', text: input.description || `Running ${firstLine(input.command ?? title)}` }
     case 'read':
-      return file ? `Reading ${basename(file)}` : title
+      return { kind: 'read', text: file ? `Reading ${basename(file)}` : title }
     case 'edit':
-      return `${tool === 'Write' ? 'Writing' : 'Editing'} ${basename(file ?? title)}`
+      return { kind: 'edit', text: `${tool === 'Write' ? 'Writing' : 'Editing'} ${basename(file ?? title)}` }
     case 'search':
-      return input.pattern ? `Searching for ${input.pattern}` : title
+      return { kind: 'search', text: input.pattern ? `Searching for ${input.pattern}` : title }
     case 'fetch':
-      return input.query ? `Searching the web for ${input.query}` : input.url ? `Reading ${new URL(input.url).host}` : title
+      return { kind: 'web', text: input.query ? `Searching the web for ${input.query}` : input.url ? `Reading ${new URL(input.url).host}` : title }
     case 'think':
-      return input.description && `Started an agent: ${input.description}`
+      return input.description ? { kind: 'agent', text: `Started an agent: ${input.description}` } : undefined
   }
   const mcp = tool.match(/^mcp__(.+?)__(.+)$/)
-  if (mcp) return `${mcp[1].split('_').at(-1)!.replace(/^./, letter => letter.toUpperCase())}: ${mcp[2].replaceAll('_', ' ')}`
-  if (input.skill) return `Using the ${input.skill} skill`
-  return title === tool ? undefined : title
+  if (mcp) return { kind: 'tool', text: `${mcp[1].split('_').at(-1)!.replace(/^./, letter => letter.toUpperCase())}: ${mcp[2].replaceAll('_', ' ')}` }
+  if (input.skill) return { kind: 'tool', text: `Using the ${input.skill} skill` }
+  return title === tool ? undefined : { kind: 'tool', text: title }
+}
+
+function plain(text: string) {
+  return text.replace(/\*\*|__|`/g, '').replace(/\s+/g, ' ').trim()
 }
 
 function firstLine(text: string) {

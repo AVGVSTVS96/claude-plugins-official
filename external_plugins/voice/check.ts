@@ -247,7 +247,7 @@ export function vet(verdict: Verdict, ledgers: Record<string, Asked[]>): Verdict
     settle: verdict.settle.filter(ref => open(ref) && !listed.has(`${ref.app} ${ref.thread} ${ref.message}`)).map(ref => ({ ...ref, note: ref.note.slice(0, 60) })),
     fixed: verdict.fixed,
     flagged: verdict.flagged,
-    stuck: verdict.stuck.map((item: Stuck) => ({ ...item, id: item.id.startsWith('check-') ? item.id : `check-${item.id}` })),
+    stuck: verdict.stuck.map((item: Omit<Stuck, 'app'>) => ({ ...item, id: item.id.startsWith('check-') ? item.id : `check-${item.id}` })),
   }
 }
 

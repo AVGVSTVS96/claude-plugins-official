@@ -9,13 +9,13 @@ const REFRESH = 500
 
 // Where a hex thread lives in its own app. Each bot leaves what its links need in its state folder
 // (Discord's server, Telegram's bot name, the channel of every Buzz thread), and T3 Code's own database,
-// read only, says which T3 thread a hex thread is. An app that can't say gives no link.
+// read only, says which T3 thread a hex thread is and what it's called there. An app that can't say gives no link.
 // T3_APP_SCHEME is the T3 Code app's URL scheme: t3code, t3code-preview or t3code-dev.
 export class Links {
   private guild?: string
   private bot?: string
   private channels: Record<string, string> = {}
-  private threads = new Map<string, string>()
+  private threads = new Map<string, { thread: string; title: string }>()
   private environment?: string
   private db?: Database
   private watcher?: ReturnType<typeof watch>
@@ -64,10 +64,15 @@ export class Links {
         return channel && `buzz://message?channel=${channel}&id=${id}`
       }
       case 't3': {
-        const thread = this.threads.get(id)
+        const thread = this.threads.get(id)?.thread
         return thread && this.environment && `${this.scheme}://threads/${this.environment}/${encodeURIComponent(thread)}`
       }
     }
+  }
+
+  // What the thread is called in its own app, where hex knows it by another name: T3 Code's title.
+  title(app: string, id: string): string | undefined {
+    return app === 't3' ? word(this.threads.get(id)?.title) : undefined
   }
 
   private schedule() {
@@ -82,15 +87,15 @@ export class Links {
   private read() {
     try {
       const rows = this.db!
-        .query<{ key: string; thread: string }, []>(
-          `select json_extract(p.payload_json, '$.nativeThreadRef.nativeId') key, json_extract(p.payload_json, '$.appThreadId') thread
+        .query<{ key: string; thread: string; title: string }, []>(
+          `select json_extract(p.payload_json, '$.nativeThreadRef.nativeId') key, json_extract(p.payload_json, '$.appThreadId') thread, t.title
            from orchestration_v2_projection_provider_threads p
            join orchestration_v2_projection_threads t on t.thread_id = json_extract(p.payload_json, '$.appThreadId')
            where p.driver = 'acpRegistry' and t.deleted_at is null
            order by p.updated_at`,
         )
         .all()
-      const threads = new Map(rows.map(row => [row.key, row.thread]))
+      const threads = new Map(rows.map(({ key, thread, title }) => [key, { thread, title }]))
       if (JSON.stringify([...threads]) === JSON.stringify([...this.threads])) return false
       this.threads = threads
       return true

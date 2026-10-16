@@ -66,9 +66,9 @@ test('a question asked with buttons reads as its first line, its context and the
 test('open questions come newest first with a link to each, answered and settled ones drop out', () => {
   ledger([asked(1, 'Ship it?', ['Yes', 'No']), asked(2, 'Rename it?', ['Yes', 'No'], { answer: { label: 'No', at: '', via: 'telegram' } }), asked(3, 'Which color?', ['Mint', 'Coral'])])
   asks = new Asks(state, { t3Database: '/nonexistent', check: why => checks.push(why) })
-  expect(asks.view.asks.map(ask => [ask.question, ask.topic, ask.link])).toEqual([
-    ['Which color?', 'desk', 'https://t.me/c/1234/5/3'],
-    ['Ship it?', 'desk', 'https://t.me/c/1234/5/1'],
+  expect(asks.view.asks.map(ask => [ask.question, ask.app, ask.topic, ask.link])).toEqual([
+    ['Which color?', 'telegram', 'desk', 'https://t.me/c/1234/5/3'],
+    ['Ship it?', 'telegram', 'desk', 'https://t.me/c/1234/5/1'],
   ])
 })
 
@@ -100,6 +100,7 @@ test('the check’s version of a question stands in for every place that asked i
   )
   asks = new Asks(state, { t3Database: '/nonexistent', check: why => checks.push(why) })
   expect(asks.view.asks.map(ask => ask.id)).toEqual([`telegram:${DESK}:9`, 'check:twilio', 'check:read'])
+  expect(asks.view.asks.map(ask => ask.app)).toEqual(['telegram', 'telegram', 'telegram'])
   expect(asks.view.check).toEqual({ at: '2026-10-13T15:00:00.000Z', why: 'a pinned post changed', fixed: 0, flagged: 0 })
 
   await asks.answer('check:twilio', 'Use the app', 'app')
@@ -145,7 +146,7 @@ test('a stuck item with a request goes to General, one without is put away', asy
   expect(await until(() => lines[0])).toEqual({ type: 'inbound', thread: GROUP, content: 'Restore cloud from checkpoint v7.', meta: { user: 'hex app' } })
   await asks.act('runs')
   await until(() => asks.view.stuck.length === 1)
-  expect(asks.view.stuck[0]).toMatchObject({ id: 'disk', sent: expect.any(String) })
+  expect(asks.view.stuck[0]).toMatchObject({ id: 'disk', app: 'hex', sent: expect.any(String) })
   expect(JSON.parse(readFileSync(join(state, 'voice', 'marks.json'), 'utf8')).dismissed.runs).toBeString()
 })
 
@@ -181,7 +182,8 @@ test('T3 Code’s records give what waits on a limit, what never started, what f
     ['broken thread ended in an error', 'Look', 'failed'],
   ])
   expect(stuck.every(item => item.request)).toBe(true)
-  expect(fresh).toEqual([{ id: expect.stringMatching(/^t3-done-/), title: 'finished thread', where: 'T3 · hex', line: 'Done', at: '2026-10-13T10:00:00.000Z' }])
+  expect(fresh).toEqual([{ id: expect.stringMatching(/^t3-done-/), app: 't3', topic: 'hex', title: 'finished thread', where: 'T3 · hex', line: 'Done', at: '2026-10-13T10:00:00.000Z' }])
+  expect(stuck.every(item => item.app === 't3')).toBe(true)
 })
 
 test('a check’s verdict is held to the ledger: real open refs and buttons only, and nothing both settled and listed', () => {

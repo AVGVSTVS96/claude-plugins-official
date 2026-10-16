@@ -33,8 +33,12 @@ function running(session: string, status: 'busy' | 'idle' | 'shell', pid = proce
 }
 
 function step(path: string, name: string, input: object) {
+  said(path, { type: 'tool_use', id: `toolu_${Math.random()}`, name, input })
+}
+
+function said(path: string, content: object) {
   mkdirSync(join(path, '..'), { recursive: true })
-  appendFileSync(path, JSON.stringify({ type: 'assistant', message: { id: `msg_${Math.random()}`, content: [{ type: 'tool_use', id: `toolu_${Math.random()}`, name, input }] } }) + '\n')
+  appendFileSync(path, JSON.stringify({ type: 'assistant', message: { id: `msg_${Math.random()}`, content: [content] } }) + '\n')
 }
 
 async function until(check: () => boolean) {
@@ -54,10 +58,12 @@ const telegram = {
 threads('telegram', telegram)
 threads('buzz', { b1: { name: 'Old news', session: 'ffffffff-old' } })
 job('aaaaaaaa-general', { state: 'done', detail: 'heartbeat ran', updatedAt: ago(5) })
-const asked = ago(40)
+const [published, finished, asked] = [ago(90), ago(60), ago(40)]
 job('bbbbbbbb-autofork', { state: 'blocked', detail: 'needs music', needs: 'Pick a music style, and run `claude setup-token`', updatedAt: ago(20) }, [
-  { at: ago(90), state: 'working', detail: 'Publishing', text: '' },
-  { at: ago(60), state: 'done', detail: '**Published** autofork 0.1.2', text: 'npm is live' },
+  { at: ago(13 * 60), state: 'done', detail: 'Overnight', text: '' },
+  { at: ago(12.5 * 60), state: 'blocked', detail: 'Asked overnight', text: '' },
+  { at: published, state: 'working', detail: 'Publishing', text: '' },
+  { at: finished, state: 'done', detail: '**Published** autofork 0.1.2', text: 'npm is live' },
   { at: asked, state: 'blocked', detail: 'needs music', text: 'Your call' },
   { at: ago(20), state: 'blocked', detail: 'still needs music', text: 'Still yours' },
 ])
@@ -75,12 +81,12 @@ const t3 = join(home, 't3')
 mkdirSync(t3)
 writeFileSync(join(t3, 'environment-id'), 'env-1\n')
 const t3db = new Database(join(t3, 'statev2.sqlite'))
-t3db.run('create table orchestration_v2_projection_threads (thread_id text primary key, deleted_at text)')
+t3db.run('create table orchestration_v2_projection_threads (thread_id text primary key, title text, deleted_at text)')
 t3db.run('create table orchestration_v2_projection_provider_threads (provider_thread_id text primary key, driver text, updated_at text, payload_json text)')
 afterAll(() => t3db.close())
 
-function mapped(key: string, thread: string, { driver = 'acpRegistry', deleted = null as string | null } = {}) {
-  t3db.run('insert or replace into orchestration_v2_projection_threads values (?, ?)', [thread, deleted])
+function mapped(key: string, thread: string, { driver = 'acpRegistry', deleted = null as string | null, title = 'T3 thread' } = {}) {
+  t3db.run('insert or replace into orchestration_v2_projection_threads values (?, ?, ?)', [thread, title, deleted])
   t3db.run('insert or replace into orchestration_v2_projection_provider_threads values (?, ?, ?, ?)', [
     `${driver}:${key}`,
     driver,
@@ -103,6 +109,7 @@ test("each thread is a task from its session's own records, what needs you first
   const autofork = tasks.get('telegram:-1004422245734:908')!
   expect(autofork).toMatchObject({
     where: 'Telegram',
+    place: 'autofork',
     line: 'Pick a music style, and run claude setup-token',
     needs: 'Pick a music style, and run claude setup-token',
     since: asked,
@@ -113,7 +120,15 @@ test("each thread is a task from its session's own records, what needs you first
     ['needs', 'needs music'],
     ['done', 'Published autofork 0.1.2'],
   ])
-  expect(tasks.get('telegram:-1004422245734')).toMatchObject({ where: 'General', link: 'https://t.me/c/4422245734/1' })
+  const window = autofork.track[0]!.at
+  expect(Date.now() - Date.parse(window)).toBeGreaterThanOrEqual(12 * 60 * 60_000)
+  expect(autofork.track).toEqual([
+    { at: window, state: 'needs' },
+    { at: published, state: 'working' },
+    { at: finished, state: 'done' },
+    { at: asked, state: 'needs' },
+  ])
+  expect(tasks.get('telegram:-1004422245734')).toMatchObject({ where: 'General', place: 'General', link: 'https://t.me/c/4422245734/1' })
   expect(tasks.get('telegram:-1004422245734:65')).toMatchObject({ line: 'clips posted', lately: [] })
   expect(tasks.get('buzz:b1')).toBeUndefined()
   expect(tasks.summary).toEqual({ needs: 1, working: 1 })
@@ -129,12 +144,39 @@ test("a working thread's line is its newest step, and each of its agents from th
   step(join(project, 'cccccccc-voiceapp.jsonl'), 'Read', { file_path: '/repo/src/tasks.ts' })
   step(join(project, 'cccccccc-voiceapp.jsonl'), 'Edit', { file_path: '/repo/src/tasks.ts', old_string: 'a', new_string: 'b' })
   await until(() => voiceapp().line === 'Editing tasks.ts')
-  expect(voiceapp().steps.map(step => step.text)).toEqual(['Editing tasks.ts', 'Reading tasks.ts'])
+  expect(voiceapp().steps.map(step => [step.kind, step.text])).toEqual([
+    ['edit', 'Editing tasks.ts'],
+    ['read', 'Reading tasks.ts'],
+  ])
   step(join(project, 'cccccccc-voiceapp', 'subagents', 'agent-agent1.jsonl'), 'Read', { file_path: '/repo/README.md' })
   await until(() => voiceapp().agents[0].line === 'Reading README.md')
   const row = tasks.rows().find(row => row.name === 'voiceapp')!
   expect(row).not.toContainKey('steps')
   expect(row.agents[0]).toEqual({ id: 'agent1', label: 'Build the Tasks view', state: 'working', line: 'Reading README.md' })
+})
+
+test("a working thread's page has its thoughts in their own words and its plan as Claude Code's todo list stands", async () => {
+  const voiceapp = () => tasks.get('telegram:-1004422245734:2583')!
+  const transcript = join(project, 'cccccccc-voiceapp.jsonl')
+  said(transcript, { type: 'thinking', thinking: 'The **list** needs a lane.\n\nThen the rows.', signature: 'x' })
+  step(transcript, 'TodoWrite', {
+    todos: [
+      { content: 'Read the inbox', status: 'completed', activeForm: 'Reading the inbox' },
+      { content: 'Draw the lanes', status: 'in_progress', activeForm: 'Drawing the lanes' },
+      { content: 'Ship it', status: 'pending', activeForm: 'Shipping it' },
+    ],
+  })
+  await until(() => voiceapp().plan.length === 3)
+  expect(voiceapp().plan).toEqual([
+    { text: 'Read the inbox', state: 'done' },
+    { text: 'Drawing the lanes', state: 'running' },
+    { text: 'Ship it', state: 'pending' },
+  ])
+  expect(voiceapp().steps.slice(0, 2).map(step => [step.kind, step.text])).toEqual([
+    ['plan', 'Drawing the lanes'],
+    ['think', 'The list needs a lane. Then the rows.'],
+  ])
+  expect(tasks.rows().find(row => row.name === 'voiceapp')).not.toContainKey('plan')
 })
 
 test('a change to a session wakes the list, and the counts move only when a count does', async () => {
@@ -196,11 +238,12 @@ test("a T3 Code thread links to T3's own thread for it, once T3 has one, and the
     unmapped: { name: 'Unmapped', session: 'd3000005-unmapped' },
   })
   for (const session of ['d3000001-mapped', 'd3000002-later', 'd3000003-gone', 'd3000004-other', 'd3000005-unmapped']) job(session, { state: 'done', detail: 'ok', updatedAt: ago(1) })
-  mapped('mapped', '4a1e7c52-9b3d-4f60-8a2e-5d6c7b8e9f01')
+  mapped('mapped', '4a1e7c52-9b3d-4f60-8a2e-5d6c7b8e9f01', { title: 'Voice app restyle' })
   mapped('gone', 'thread-gone', { deleted: ago(5) })
   mapped('other', 'thread-other', { driver: 'claudeAgent' })
   await until(() => !!tasks.get('t3:mapped')?.link)
-  expect(tasks.get('t3:mapped')!.link).toBe('t3code://threads/env-1/4a1e7c52-9b3d-4f60-8a2e-5d6c7b8e9f01')
+  expect(tasks.get('t3:mapped')).toMatchObject({ link: 't3code://threads/env-1/4a1e7c52-9b3d-4f60-8a2e-5d6c7b8e9f01', place: 'Voice app restyle', name: 'Voice app' })
+  expect(tasks.get('t3:unmapped')!.place).toBe('Unmapped')
   for (const key of ['later', 'gone', 'other', 'unmapped']) expect(tasks.get(`t3:${key}`)!.link).toBeUndefined()
   mapped('later', 'thread:delegated task')
   await until(() => !!tasks.get('t3:later')?.link)

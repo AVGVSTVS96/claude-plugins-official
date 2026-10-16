@@ -15,6 +15,7 @@ export type Ask = {
   id: string
   kind: Kind
   task: string
+  app: string
   topic: string
   at: string
   question: string
@@ -26,7 +27,7 @@ export type Ask = {
 }
 // hex's check rewrites the raw questions into these: one per decision, however many places asked
 // it (refs), in the order that unblocks the most, with its pick and what it costs.
-export type Curated = Omit<Ask, 'topic' | 'link'> & { refs?: Ref[] }
+export type Curated = Omit<Ask, 'app' | 'topic' | 'link'> & { refs?: Ref[] }
 export type Note = { title: string; text: string; did?: string }
 export type CheckResult = {
   at: string
@@ -35,7 +36,7 @@ export type CheckResult = {
   asks: Curated[]
   fixed: Note[]
   flagged: Note[]
-  stuck: Stuck[]
+  stuck: Omit<Stuck, 'app'>[]
   inputs?: string
 }
 export type View = {
@@ -217,7 +218,7 @@ export class Asks extends Changes {
     )
     raw.sort((a, b) => b.at.localeCompare(a.at))
     const checked = this.result?.at ?? ''
-    const stuck = [...this.t3.stuck, ...(this.result?.stuck ?? [])]
+    const stuck = [...this.t3.stuck, ...(this.result?.stuck ?? []).map(item => ({ ...item, app: 'hex' }))]
       .filter(item => !this.marks.dismissed[item.id])
       .map(item => ({ ...item, ...(this.marks.sent[item.id] && { sent: this.marks.sent[item.id] }) }))
     const view: Omit<View, 'version'> = {
@@ -249,6 +250,7 @@ export class Asks extends Changes {
     const ref = refs?.[0]
     return {
       ...rest,
+      app: ref?.app ?? ask.task.split(':')[0]!,
       topic: this.names.get(ask.task) ?? ask.task.split(':').at(-1)!,
       ...(ref && link(ref) && { link: link(ref) }),
     }

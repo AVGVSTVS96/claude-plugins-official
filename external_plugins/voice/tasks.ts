@@ -1,15 +1,17 @@
 import { closeSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, watch, type FSWatcher } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
-import { followTranscript, headline, sizeOf } from './activity.ts'
+import { followTranscript, sizeOf, stepOf, type Did } from './activity.ts'
 import { Changes } from './changes.ts'
 import { Links } from './links.ts'
 
 export type State = 'working' | 'needs' | 'done' | 'failed' | 'idle'
-export type Step = { at: string; text: string }
+export type Step = Did & { at: string }
+export type Planned = { text: string; state: 'done' | 'running' | 'pending' }
 export type Agent = { id: string; label: string; state: 'working' | 'done'; line?: string; steps: Step[] }
 export type Moment = { at: string; state: State; text: string }
-export type Row = Omit<HexTask, 'needs' | 'lately' | 'steps' | 'agents'> & { agents: Omit<Agent, 'steps'>[] }
+export type Turn = { at: string; state: State }
+export type Row = Omit<HexTask, 'needs' | 'lately' | 'steps' | 'plan' | 'agents'> & { agents: Omit<Agent, 'steps'>[] }
 export type Summary = { needs: number; working: number }
 export type HexTask = {
   id: string
@@ -17,6 +19,7 @@ export type HexTask = {
   thread: string
   name: string
   where: string
+  place: string
   state: State
   line: string
   needs?: string
@@ -24,11 +27,13 @@ export type HexTask = {
   at: string
   agents: Agent[]
   steps: Step[]
+  plan: Planned[]
   lately: Moment[]
+  track: Turn[]
   link?: string
 }
 
-type Thread = { app: string; id: string; name: string; session?: string; cwd?: string; link?: string }
+type Thread = { app: string; id: string; name: string; session?: string; cwd?: string; link?: string; title?: string }
 type Session = { id: string; pid: number; status: string; name?: string; cwd?: string; started: number; at: number; parent?: string }
 type Job = {
   state?: string
@@ -39,16 +44,18 @@ type Job = {
   fan?: { id: string; kind: string; label: string; doneAt?: number }[]
 }
 type Entry = { at: string; state: string; detail?: string; text?: string }
-type Follower = { stop: () => void; steps: Step[] }
+type Follower = { stop: () => void; steps: Step[]; plan: Planned[] }
 
 const CLAUDE = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude')
 const TAIL = 256 * 1024
 const LATELY = 5
 const STEPS = 12
 const KEEP = 7 * 24 * 60 * 60_000
+const TRACK = 12 * 60 * 60_000
 const ORDER: State[] = ['needs', 'working', 'done', 'failed', 'idle']
 const RECORDS = new Set(['threads.json', 'guild.json', 'bot.json', 'channels.json'])
 const STATES: Record<string, State> = { working: 'working', blocked: 'needs', done: 'done', failed: 'failed' }
+const PLANNED: Record<string, Planned['state']> = { completed: 'done', in_progress: 'running', pending: 'pending' }
 const APPS: Record<string, string> = { telegram: 'Telegram', discord: 'Discord', buzz: 'Buzz', t3: 'T3 Code', voice: 'Voice', claude: 'Claude Code' }
 const WORK = new Set(['agent', 'workflow'])
 const BUSY = new Set(['busy', 'shell'])
@@ -95,7 +102,7 @@ export class Tasks extends Changes {
   }
 
   rows(): Row[] {
-    return this.tasks.map(({ needs, lately, steps, agents, ...row }) => ({ ...row, agents: agents.map(({ steps, ...agent }) => agent) }))
+    return this.tasks.map(({ needs, lately, steps, plan, agents, ...row }) => ({ ...row, agents: agents.map(({ steps, ...agent }) => agent) }))
   }
 
   close() {
@@ -157,6 +164,7 @@ export class Tasks extends Changes {
         session: typeof thread.session === 'string' ? thread.session : undefined,
         cwd: thread.cwd,
         link: this.links.of(app, id),
+        title: this.links.title(app, id),
       })),
     )
   }
@@ -252,6 +260,7 @@ export class Tasks extends Changes {
     const since =
       state === 'working' && known !== 'working' ? new Date(began).toISOString() : state === 'working' || state === 'needs' ? (streak(timeline, job?.state) ?? at) : at
     const steps = state === 'working' ? this.steps(thread.session!) : []
+    const plan = state === 'working' ? (this.followers.get(thread.session!)?.plan ?? []) : []
     const line = steps[0]?.text ?? needs ?? detail ?? lately[0]?.text ?? ''
     const agents = (
       state === 'working'
@@ -269,6 +278,7 @@ export class Tasks extends Changes {
       thread: thread.id,
       name: thread.name,
       where: where(thread),
+      place: thread.app === 'telegram' && !thread.id.includes(':') ? where(thread) : (thread.title ?? thread.name),
       state,
       line: oneLine(line),
       ...(needs && { needs }),
@@ -276,7 +286,9 @@ export class Tasks extends Changes {
       at,
       agents,
       steps,
+      plan,
       lately: state === 'idle' ? [] : lately,
+      track: track(timeline, Date.now() - TRACK),
       ...(thread.link && { link: thread.link }),
     }
   }
@@ -326,14 +338,15 @@ export class Tasks extends Changes {
     }
     for (const [key, start] of wanted) {
       if (this.followers.has(key)) continue
-      const follower: Follower = { stop: () => {}, steps: [] }
+      const follower: Follower = { stop: () => {}, steps: [], plan: [] }
       this.followers.set(key, follower)
       follower.stop = start(path =>
         followTranscript(path, Math.max(0, sizeOf(path) - TAIL), (entry, updates) => {
           for (const update of updates()) {
-            const text = headline(update)
-            if (!text || text === follower.steps.at(-1)?.text) continue
-            follower.steps.push({ at: entry.timestamp ?? new Date().toISOString(), text: oneLine(text) })
+            if (update.sessionUpdate === 'plan') follower.plan = update.entries.map(entry => ({ text: oneLine(entry.content), state: PLANNED[entry.status] ?? 'pending' }))
+            const did = stepOf(update)
+            if (!did?.text || did.text === follower.steps.at(-1)?.text) continue
+            follower.steps.push({ at: entry.timestamp ?? new Date().toISOString(), kind: did.kind, text: oneLine(did.text) })
             if (follower.steps.length > STEPS) follower.steps.shift()
           }
           this.schedule()
@@ -373,6 +386,18 @@ function streak(timeline: Entry[], state?: string) {
   let since: string | undefined
   for (let i = timeline.length - 1; i >= 0 && timeline[i].state === state; i--) since = timeline[i].at
   return since
+}
+
+// How the job's state moved since `from`, for its lane: the state it was in then, and each change after.
+function track(timeline: Entry[], from: number) {
+  const turns: Turn[] = []
+  for (const entry of timeline) {
+    const state = STATES[entry.state] ?? 'idle'
+    const at = Date.parse(entry.at) < from ? new Date(from).toISOString() : entry.at
+    if (turns.at(-1)?.at === at) turns.pop()
+    if (turns.at(-1)?.state !== state) turns.push({ at, state })
+  }
+  return turns
 }
 
 // A workflow agent's transcript lands in its run's own folder, so it's followed once it's written there.
