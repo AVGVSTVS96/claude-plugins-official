@@ -138,10 +138,10 @@ index 0000000000000000000000000000000000000000..e79abf7a89b423d6461497ea8493bcab
 +}
 diff --git a/hub/hub.test.ts b/hub/hub.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..223b85dbe6cfd35ccb4ec674cd29f05cadd1a35e
+index 0000000000000000000000000000000000000000..ad104d1e01f8fbd8aee8311e3dc64c5e81699678
 --- /dev/null
 +++ b/hub/hub.test.ts
-@@ -0,0 +1,1464 @@
+@@ -0,0 +1,1470 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { connect, createServer, type Socket } from 'net'
 +import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, chmodSync, existsSync } from 'fs'
@@ -1272,6 +1272,12 @@ index 0000000000000000000000000000000000000000..223b85dbe6cfd35ccb4ec674cd29f05c
 +  expect(calls().some(args => args[0] === 'stop')).toBe(false)
 +})
 +
++test('a hub whose state folder is gone makes it again, with a new token', () => {
++  const state = join(dir, 'gone')
++  hub = startHub({ stateDir: state, channel: CHANNEL, server: SERVER, port: listener.port, call: async () => '', state: () => {}, failed: () => {}, hexDir: join(dir, 'hex') })
++  expect(statSync(join(state, 'token')).mode & 0o777).toBe(0o600)
++})
++
 +test('a session records what it started with, and the hub tells a change of arguments or channel from a plain restart', async () => {
 +  start({ registry: { 'chat:7': { name: 'Desk anchors' } }, stale: true, agents: [] })
 +  hub.deliver('chat:7', 'Desk anchors', message)
@@ -1608,7 +1614,7 @@ index 0000000000000000000000000000000000000000..223b85dbe6cfd35ccb4ec674cd29f05c
 +})
 diff --git a/hub/hub.ts b/hub/hub.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..10db19a270a9072b76fd373d7d99c73c5d6bf95c
+index 0000000000000000000000000000000000000000..61e4312d50ba02c806ad516da49ade5d4352840a
 --- /dev/null
 +++ b/hub/hub.ts
 @@ -0,0 +1,789 @@
@@ -1790,10 +1796,10 @@ index 0000000000000000000000000000000000000000..10db19a270a9072b76fd373d7d99c73c
 +  const runs = new Map<string, Run>()
 +  const plugin = channel.replace(/^plugin:/, '')
 +  const path = `/${plugin.split('@')[0]}`
++  mkdirSync(sessionsDir, { recursive: true, mode: 0o700 })
 +  const token = server && tokenOf(stateDir)
 +  const inherited = Object.fromEntries(Object.entries(process.env).filter(([name]) => !PRIVATE.test(name)))
 +  let closed = false
-+  mkdirSync(sessionsDir, { recursive: true, mode: 0o700 })
 +
 +  function read(): Record<string, Saved> {
 +    let text: string

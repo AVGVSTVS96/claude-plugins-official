@@ -4,7 +4,7 @@ id: hub
 summary: Add a client-agnostic hub that gives every chat thread its own Claude Code session and moves threads between clients.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: hub.patch
-patch_sha256: 6539d8f6d27bf9e8dac3a467ac88d0c2d816f33626950927fd9160fccbd2fb8c
+patch_sha256: 3e78ed3a6b5efa7d7a422ae995d303a54d647744565a35479cbae9b1a93abb59
 ---
 
 ## Intent
@@ -228,7 +228,7 @@ channels that drop and come back, sessions that restart in place once and are re
 sessions that outlived the hub, starts that end before their channel connects, unsaved sessions found by their job, a new stream held until
 Claude Code lists its tools again (told again while it drops that), a stream adopted after a
 restart, the declined protocol, requests without the token refused, a restart in place
-writing the current token first, a hooks-only change renewing and unchanged hooks not, owner-only token and
+writing the current token first, a lost state folder made again with a new token, a hooks-only change renewing and unchanged hooks not, owner-only token and
 settings files, sessions whose flags read no settings file stopped and resumed instead of
 respawned, `HEX_CHAT_CAPACITY` parsing, and unbound sessions. Run `scripts/verify`. Live: in an
 isolated `CLAUDE_CONFIG_DIR`, a new thread and a warm DM each get a message and reply on a
