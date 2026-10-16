@@ -4,7 +4,7 @@ id: hub
 summary: Add a client-agnostic hub that gives every chat thread its own Claude Code session and moves threads between clients.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: hub.patch
-patch_sha256: 0c6b3163b33b63eb4078d69aa6930066bb95451589c1c0dfa7e3ac479637a3cd
+patch_sha256: 87dfe0fd4c24ddd5dd9b3abac1543f26a5a0f5b55b137b3eab5566088dd89be2
 ---
 
 ## Intent
@@ -55,11 +55,29 @@ client can add launch arguments per thread, and more of a thread's binding to it
 settings env (`bind`), under the hub's own. `threads.json` keeps a digest of what a
 session started with, so a message to a session whose arguments changed goes to a
 fresh start of it (a session busy with background work keeps running and takes it
-as it is). A client can mark threads fresh: a fresh thread's session is never
-resumed, so a message that finds its session done (Claude reports it idle and its
-turn has ended) starts a new one, and a message while it still works, on its turn,
-a permission prompt or background agents, reaches it as it is. Its settings env
-says `HEX_FRESH`, so the launcher can build what the new session knows. Messages
+as it is). A client can mark threads fresh: their launcher builds what a new
+session knows of the chat (its settings env says `HEX_FRESH`), so a fresh thread
+needs no compaction and never compacts. A fresh thread keeps one session running
+and sends each message straight to it, so no message waits for a session to start,
+while that session is worth it: its context (its last request) holds less than
+`capacity` tokens, 350,000 unless the client or `HEX_CHAT_CAPACITY` sets
+another, and its last request is younger than the cache's life (54 minutes, as
+for the main thread, or a twelfth of that when the transcript shows the request
+wrote the five-minute cache, an API key's default). Past that, its next message would send a full context, or
+its whole context uncached, when a new session sends only the chat's view; so at
+the session's rest, once its context fills (at the rest the Stop hook reports with
+no agents working, since Claude's own status still says busy for about a second)
+or at the moment its cache expires (timed from its last request in the
+transcript), the hub stops it and starts a new
+one at once, which then waits for the next message. A message that finds the
+session spent while it still works, on its turn, a permission prompt or background
+agents, reaches it as it is; one that finds it done goes to a new session. A
+stopped fresh session is never resumed: a start rewrites the view and memory its
+instruction files carry, so a resume would read nothing past the system prompt
+from the cache and would hold the chat twice. A new session waits until its first
+request before any of this counts. A fresh thread
+never stops for being idle. With a `capacity` of 0 (the voice client), every
+message that finds its session done goes to a new one. Messages
 waiting for a new start keep their order. Each session's settings enable only its client's plugin.
 
 A client hands `startHub` its channel (`server`: the instructions and tools
@@ -109,10 +127,11 @@ hex runs General's jobs in General alone, not in every client's main thread.
 A session can ask to `renew`: at its next rest, once its Stop hook reports the
 turn over with no background agents or workflows working (Claude's own status
 lags the hook and counts a running shell as busy, so it isn't asked for a renew
-the session asked for itself), the hub stops it, and a main thread starts over as soon as its process exits,
-as a new session for a fresh thread; any other thread's next message resumes it. A session that connects to a hub
+the session asked for itself), the hub stops it, and a main thread or a fresh thread starts over as soon as its process exits
+(a fresh thread as a new session); any other thread's next message resumes it. A session that connects to a hub
 younger than it (Claude's `startedAt`) renews too, once Claude reports it idle, since it may run
-code an update has since replaced: an update restarts the hub, and each
+code an update has since replaced (its hooks, and the tools and instructions its channel
+gave it when it connected, which a reconnect keeps): an update restarts the hub, and each
 session then moves onto the new code at its own next rest instead of all of
 them waiting for a moment none is busy. Asking to `keep` before then cancels a
 renew (a voice call started in the meantime), even while the hub is still
@@ -153,7 +172,8 @@ instead (`fork`, `--fork-session`).
    quiet session stays warm before it's stopped, how long the main thread
    rests before its cache would expire, how long Claude Code takes to listen
    on a new channel, and how long it keeps reconnecting one before giving up;
-   Claude's own status decides whether a session is still working or running.
+   a fresh thread's session hands over when its cache's life, counted from its
+   last request, runs out; Claude's own status decides whether a session is still working or running.
 7. Bad input fails alone: a malformed line on `hub.sock` is logged and
    dropped, an unreadable `threads.json` is moved aside rather than
    overwritten, a malformed entry in it is dropped, and a launcher that
@@ -171,7 +191,8 @@ fresh one left to reconnect after a hub restart), renews at the rest the Stop ho
 background agents, `renewal` holding for the new session and not for agents or a keep,
 sessions older than the hub renewing at their
 next rest and never during a call, `free` waiting for calls to end, the launcher and its
-environment, failed starts, busy and idle, idle stops, compacting big sessions before they rest, fresh threads, stopping, closing, naming and
+environment, failed starts, busy and idle, idle stops, compacting big sessions before they rest, fresh threads (warm delivery, never resuming, the handover once the context
+fills, even while Claude's status lags, or the cache expires, by its recorded tier, never compacting), stopping, closing, naming and
 handoffs (release, adopt, fork), permission prompts and bad input against a fake `claude`, plus
 channels that drop and come back, sessions that restart in place once and are reported after,
 sessions that outlived the hub, unsaved sessions found by their job, a new stream held until

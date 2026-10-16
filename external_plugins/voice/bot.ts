@@ -15,6 +15,7 @@ const hub = startHub({
   mainName: 'voice',
   hexDir: HEX_DIR,
   fresh: () => true,
+  capacity: 0,
   bind: () => ({ VOICE_SOCKET: SOCKET }),
   launcher: process.env.HEX_LAUNCHER,
   call: async (_, tool) => {
