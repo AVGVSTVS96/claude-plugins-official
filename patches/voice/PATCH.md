@@ -4,16 +4,26 @@ id: voice
 summary: Add a voice channel where OpenAI's gpt-live-1 holds a live call and hands every real request to the Claude Code session.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: voice.patch
-patch_sha256: 5d68b36cd3002470745e701e842f73f052a24fa46b24e37c7029d23dbe4870af
+patch_sha256: f326067bfce8bdc79687e28a359493820d291f9631bc5075004cc03feab25189
 ---
 
 ## Intent
 
-Add `external_plugins/voice`, a channel for live voice calls. It works in
-stock Claude Code and in the hub alike, because it is one plain channel
-plugin with no hub code.
+Add `external_plugins/voice`, a channel for live voice calls. Its call engine
+runs in hex's hub service, and the voice session reaches it over the hub's
+HTTP channel, like every other client's sessions:
 
-- `server.ts` serves a call page on `127.0.0.1` (`VOICE_PORT`, 8790 by
+```
+voice session ── HTTP ──► hub ──► call engine (server.ts) ◄── page, app, Twilio
+```
+
+- `channel.ts` is the channel the hub serves (its instructions and tools), and
+  `.mcp.json` points the session at the hub's port with its thread and token, so
+  no process runs per session: a session's process dying or restarting never
+  takes the call engine with it. `env.ts` reads `~/.claude/channels/voice/.env`
+  without putting it in the service's environment, so its keys never reach a
+  session.
+- `server.ts` is the call engine, started once with the service: it serves a call page on `127.0.0.1` (`VOICE_PORT`, 8790 by
   default). The page's WebRTC offer goes to `POST /session`, which creates a
   `gpt-live-1` session in client delegation mode (`delegation: { type:
   "client" }`) with the key from `~/.claude/channels/voice/.env`, then
@@ -33,27 +43,20 @@ plugin with no hub code.
 - What the voice says first (a phone call's greeting, a topic the app started
   the call on) goes in the session's creation as a `developer` message in
   `session.input`, where GPT-Live has it before the caller speaks.
-- `bot.ts` runs in the hub service (`hub/serve.ts`) and keeps one session,
-  `voice`, always running as its main thread, so the call page is back as
-  soon as the hub restarts it. That session's `server.ts` says hello on the
-  hub socket, which also lets other sessions message it as `inbound`.
-  `voice` is a fresh thread with no capacity (every message that finds its session
-  done goes to a new one), and when a call ends `server.ts` sends the hub
-  `renew`, so every call starts in a new session that reads the call chat.
-  Because that restarts the plugin, `bot.ts` holds `VOICE_PORT` (read from the
-  plugin's `.env` like the plugin does) with `door.ts`, and starts the session
-  with `VOICE_SOCKET` (`state/voice/http.sock`) in its settings env (the hub's
-  `bind`); `server.ts` listens on that socket when it's set, and on the port
-  otherwise, so a plugin started by a hub without the door keeps the port. The door
-  passes each request and websocket on to that socket unchanged, and a request
-  that finds no plugin there waits for the socket to come back (a file change,
-  up to 30 seconds) before answering 503. If the port is still taken (an old
-  plugin during an update), the door binds it once the new plugin's socket appears.
-  A call that comes (`POST /session`, or `/twilio/incoming` for at most 10 seconds,
-  inside Twilio's 15-second webhook limit) while the last call's session winds down
-  to renew waits for the hub's `renewal`, the new session's hello, so a caller who
-  calls right back still gets a new session; a renew held up by background agents
-  doesn't hold the call, which goes to the session there is.
+- `bot.ts` runs in the hub service (`hub/serve.ts`): it starts the hub for one
+  session, `voice`, always running as its main thread, and then the engine,
+  handing it the hub's side (`deliver`, `keep`, `renew`, `renewal`, `session`).
+  A tool call from the session runs in the engine (`tool`). `voice` is a fresh
+  thread with no capacity, so one session takes a whole call: the engine sends
+  `keep` when a call starts and `renew` when it ends, every message between
+  reaches that session however long it sits idle, and the next call starts in
+  a new session that reads the call chat. Steps to the hub go one at a time, in
+  order: a call that comes while the last call's session winds down to renew
+  starts at once, and its words wait for the hub's `renewal` (the new session
+  connecting) before its `keep`, so a caller who calls right back still gets a
+  new session; a renew held up by background agents doesn't hold the call,
+  which goes to the session there is. Other sessions and local programs reach
+  `voice` as `inbound` on its `hub.sock`.
 - `dial` (the `phone` tool, or `POST /phone`) has Twilio ring a number; its
   TwiML comes from `/twilio/<one-time token>/twiml` (trial accounts can't pass
   TwiML inline) and streams the call to `wss://VOICE_PUBLIC_URL/twilio/<token>`. The plugin accepts only a token it issued, opens a `gpt-live-1`
@@ -73,15 +76,14 @@ plugin with no hub code.
   `session/update` notifications with `@agentclientprotocol/claude-agent-acp`
   (as the Buzz and T3 plugins do), and keeps one plain line per task for its
   latest step. `task` takes `agent`, the agentId of the brain's own
-  background subagent. `send` (only in hex, when `HEX_HUB` is set) delivers a
+  background subagent. `send` delivers a
   message to another hex thread through that app's `state/<app>/hub.sock`
   with a one-off `voice_task` meta tag, puts it on the board, follows the
   thread's session from the line that carries the tag (and its background
   agents' transcripts), and marks the task done when a turn ends with none of
   those agents out, failed when it ends on an API error. A renewed session
-  appears in `threads.json` and is followed from its start. Each call's
-  session starts its own plugin, so on start the plugin resumes the last
-  day's unfinished sends from their records, reading each thread from the
+  appears in `threads.json` and is followed from its start. When the service
+  starts, the engine resumes the last day's unfinished sends from their records, reading each thread from the
   start of its session to find the tagged message.
 - `GET /tasks` shows every hex thread as a task with a `link` that opens the
   thread in its own app (`links.ts`): a Telegram topic, General, or the bot for
@@ -100,13 +102,13 @@ plugin with no hub code.
   `/twilio/status/<token>`) as busy, no-answer, failed, or picked up without
   the voice ever joining. `end` takes `no-connect`, `no-answer` and `busy`.
 - When the sideband of a page or app call closes without `session.closed`,
-  the plugin reattaches to the session by id a few times before calling the
+  the engine reattaches to the session by id a few times before calling the
   call dropped; on start it reattaches to the latest call whose record has no
   end, sends Claude a "call resumed" message with the call so far, and closes
   out any other unended record as `dropped`, ending it like any other call: Claude
   is told to name it, and the hub gets `renew`. A new call sends the hub `keep`,
-  which cancels a pending `renew`. The plugin sends its latest `keep` or `renew`
-  again after every hello, since a hello clears what the hub knew of the session.
+  which cancels a pending `renew`. The hub keeps both across its session's
+  channel dropping and coming back, so the engine sends each once.
 - Records keep Claude's exact `say` and `note` text as `moments`, plus
   `why` (from `phone`), `summary` and `waiting` (from `title`), `expires`
   and `usage` (billed seconds, dollars, context ratio from
@@ -125,22 +127,25 @@ plugin with no hub code.
    starting, steering and stopping work stays with Claude.
 2. A transcript fragment that arrives late is still delivered, at its
    timeline position, in the next handoff.
-3. The API key stays in the plugin; the page listens on loopback only, or in
-   hex on a socket in hex's state folder behind the hub's loopback door.
-5. A call's record is never left without an end once the plugin has run again.
-4. Stays on `@modelcontextprotocol/sdk` 1.x, which Claude Code registers
-   channels on.
+3. The API key stays in the engine, out of the service's environment; the
+   page listens on loopback only.
+4. A call's record is never left without an end once the engine has run again.
+5. One call, one session: no message of a call goes to another session, and
+   no call shares its session with the call before it.
 
 ## Verification
 
 `bun test external_plugins/voice` covers transcript order, late fragments,
 the board, call records, step lines, following a sent message to done or
-failed through fake transcripts, and the door (requests and websockets passed
-through unchanged, a request held across a plugin restart, a call held for a
-renewing session and no longer than the wait, a taken port). `scripts/verify` builds `server.ts`. A live check: start
-`claude --channels plugin:voice@hex`, open the page, ask something that needs
-the backend, and see a `<channel source="voice">` handoff arrive and its
-`say` spoken.
+failed through fake transcripts, and the engine against a fake hub and fake
+OpenAI and Twilio (a phone call's words reaching the session only after the
+last call's renew, in order, and its end asking for a renew). `bun test hub`
+covers a call keeping one session and the next getting a new one.
+`scripts/verify` builds `bot.ts` and checks `.mcp.json` is HTTP. Live: in an
+isolated `CLAUDE_CONFIG_DIR`, through hex's launcher, a voice session gets a
+call's handoffs over HTTP, keeps one session across the call's turns, carries
+on through a hub restart with the call resumed, and the next call gets a new
+session.
 
 ## Removal
 

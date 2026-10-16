@@ -138,16 +138,17 @@ index 0000000000000000000000000000000000000000..e79abf7a89b423d6461497ea8493bcab
 +}
 diff --git a/hub/hub.test.ts b/hub/hub.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..ad104d1e01f8fbd8aee8311e3dc64c5e81699678
+index 0000000000000000000000000000000000000000..c224e8f06e883d305c51564039b7411c167d9527
 --- /dev/null
 +++ b/hub/hub.test.ts
-@@ -0,0 +1,1470 @@
+@@ -0,0 +1,1437 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { connect, createServer, type Socket } from 'net'
 +import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, chmodSync, existsSync } from 'fs'
 +import { tmpdir } from 'os'
 +import { join } from 'path'
-+import { free, route, stamp, startHub, tappable, transcribe, type ChannelServer, type Message, type Permission } from './hub.ts'
++import { free, stamp, startHub, tappable, transcribe, type ChannelServer, type Message, type Permission } from './hub.ts'
++import { hangUpAll, http as line, port } from './testing.ts'
 +
 +const CHANNEL = 'plugin:telegram@hex'
 +const SESSION = '0a1b2c3d-0000-4000-8000-000000000000'
@@ -162,9 +163,7 @@ index 0000000000000000000000000000000000000000..ad104d1e01f8fbd8aee8311e3dc64c5e
 +let failures: [string, string][]
 +let prompts: [string, Permission][]
 +const sockets: Socket[] = []
-+const streams: AbortController[] = []
-+let ids = 0
-+const listener = Bun.serve({ hostname: '127.0.0.1', port: 0, idleTimeout: 0, fetch: route })
++const listener = { port: port() }
 +
 +beforeEach(() => {
 +  dir = mkdtempSync(join(tmpdir(), 'hub-'))
@@ -185,7 +184,7 @@ index 0000000000000000000000000000000000000000..ad104d1e01f8fbd8aee8311e3dc64c5e
 +
 +afterEach(() => {
 +  for (const socket of sockets.splice(0)) socket.destroy()
-+  for (const stream of streams.splice(0)) stream.abort()
++  hangUpAll()
 +  hub?.close()
 +  process.env.PATH = process.env.PATH!.split(':').slice(1).join(':')
 +  delete process.env.CLAUDE_CONFIG_DIR
@@ -256,55 +255,10 @@ index 0000000000000000000000000000000000000000..ad104d1e01f8fbd8aee8311e3dc64c5e
 +  return line
 +}
 +
-+// Claude Code's side of one connection to the hub over HTTP, a step at a time. deaf: how many
-+// tools/list_changed it drops, as a session starting cold does before it listens.
++// Claude Code's side of one connection to the hub over HTTP, a step at a time, with the session's
++// hooks on hub.sock.
 +function http(thread?: string, extra: Record<string, string> = {}, deaf = 0) {
-+  const url = `http://127.0.0.1:${listener.port}/telegram`
-+  const headers = { ...(thread && { 'x-hex-channel': CHANNEL, 'x-hex-thread': thread }), authorization: `Bearer ${readFileSync(join(dir, 'token'), 'utf8')}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...extra }
-+  const received: any[] = []
-+  const stream = new AbortController()
-+  streams.push(stream)
-+  let mcp = ''
-+  let lists = 0
-+  const post = (body: object) => fetch(url, { method: 'POST', headers: { ...headers, ...(mcp && { 'mcp-session-id': mcp }) }, body: JSON.stringify({ jsonrpc: '2.0', ...body }) })
-+  const rpc = async (method: string, params: object = {}) => {
-+    if (method === 'tools/list') lists++
-+    return (await post({ id: ++ids, method, params })).json() as Promise<any>
-+  }
-+  return {
-+    received,
-+    listed: () => lists,
-+    post,
-+    rpc,
-+    initialize: async () => (mcp = (await post({ id: ++ids, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'test', version: '0' } } })).headers.get('mcp-session-id')!),
-+    open: async (adopted?: string) => {
-+      if (adopted) mcp = adopted
-+      const response = await fetch(url, { headers: { ...headers, 'mcp-session-id': mcp }, signal: stream.signal })
-+      void listen(response, received, () => void (deaf-- > 0 || rpc('tools/list')))
-+      return response
-+    },
-+    close: () => stream.abort(),
-+    call: async (tool: string, args: object = {}) => (await rpc('tools/call', { name: tool, arguments: args })).result,
-+    ask: (request: object) => post({ method: 'notifications/claude/channel/permission_request', params: request }),
-+    send: (payload: object) => hook(payload),
-+  }
-+}
-+
-+async function listen(response: Response, received: any[], changed: () => void) {
-+  let buffer = ''
-+  try {
-+    for await (const chunk of response.body!) {
-+      buffer += new TextDecoder().decode(chunk)
-+      for (let end = buffer.indexOf('\n\n'); end >= 0; end = buffer.indexOf('\n\n')) {
-+        const data = buffer.slice(0, end).split('\n').find(line => line.startsWith('data: '))
-+        buffer = buffer.slice(end + 2)
-+        if (!data) continue
-+        const { method, params } = JSON.parse(data.slice(6))
-+        if (method === 'notifications/tools/list_changed') changed()
-+        else received.push({ type: method === 'notifications/claude/channel' ? 'inbound' : 'permission', ...params })
-+      }
-+    }
-+  } catch {}
++  return { ...line({ stateDir: dir, path: '/telegram', channel: CHANNEL, thread, extra, deaf }), send: (payload: object) => hook(payload) }
 +}
 +
 +// A line to hub.sock, the way a session's hooks and hex's own tools reach the hub.
@@ -312,24 +266,6 @@ index 0000000000000000000000000000000000000000..ad104d1e01f8fbd8aee8311e3dc64c5e
 +  const socket = connect(join(dir, 'hub.sock'))
 +  sockets.push(socket)
 +  socket.on('connect', () => socket.end(JSON.stringify(payload) + '\n'))
-+}
-+
-+// A session whose plugin runs as its own process and reaches the hub through hub.sock.
-+async function plugin(thread: string, id = SESSION) {
-+  const socket = connect(join(dir, 'hub.sock'))
-+  sockets.push(socket)
-+  const received: any[] = []
-+  let buffer = ''
-+  socket.setEncoding('utf8')
-+  socket.on('data', (chunk: string) => {
-+    buffer += chunk
-+    const lines = buffer.split('\n')
-+    buffer = lines.pop()!
-+    received.push(...lines.map(line => JSON.parse(line)))
-+  })
-+  await new Promise(resolve => socket.on('connect', resolve))
-+  socket.write(JSON.stringify({ type: 'hello', thread, session: id }) + '\n')
-+  return { socket, received, send: (payload: object) => socket.write(JSON.stringify(payload) + '\n') }
 +}
 +
 +// Claude's record of a background job, with the flags it restarts with: they read the thread's
@@ -396,7 +332,7 @@ index 0000000000000000000000000000000000000000..ad104d1e01f8fbd8aee8311e3dc64c5e
 +  expect(args.at(-3)).toBe('--settings')
 +})
 +
-+test('queued messages reach the session when it says hello, and its id is kept', async () => {
++test('queued messages reach the session when it connects, and its id is kept', async () => {
 +  start()
 +  hub.deliver('chat:7', 'Desk anchors', message)
 +  await launched()
@@ -495,10 +431,6 @@ index 0000000000000000000000000000000000000000..ad104d1e01f8fbd8aee8311e3dc64c5e
 +  start()
 +  const { call } = await session('chat:9')
 +  expect(await call('reply', { text: 'yo' })).toEqual({ content: [{ type: 'text', text: 'reply in chat:9' }] })
-+  const legacy = await plugin('chat:10')
-+  legacy.send({ type: 'call', id: 1, tool: 'reply', args: { text: 'yo' } })
-+  await until(() => legacy.received.length)
-+  expect(legacy.received[0]).toEqual({ type: 'result', id: 1, text: 'reply in chat:10' })
 +})
 +
 +test('a permission prompt reaches the client with its thread, and the answer goes back to that session alone', async () => {
@@ -800,12 +732,14 @@ index 0000000000000000000000000000000000000000..ad104d1e01f8fbd8aee8311e3dc64c5e
 +  expect(states.filter(([, busy]) => busy)).toEqual([])
 +})
 +
-+test('a bad line from a session is dropped, and the lines after it still work', async () => {
++test('a bad line on hub.sock is dropped, and the lines after it still work', async () => {
 +  start()
-+  const { socket, received } = await plugin('chat:9')
-+  socket.write('not json\nnull\n' + JSON.stringify({ type: 'call', id: 1, tool: 'reply', args: {} }) + '\n')
++  const { received } = await session('chat:9')
++  const socket = connect(join(dir, 'hub.sock'))
++  sockets.push(socket)
++  socket.on('connect', () => socket.end('not json\nnull\n' + JSON.stringify({ type: 'inbound', thread: 'chat:9', content: 'still here', meta: {} }) + '\n'))
 +  await until(() => received.length)
-+  expect(received[0]).toEqual({ type: 'result', id: 1, text: 'reply in chat:9' })
++  expect(received[0]).toEqual({ type: 'inbound', content: 'still here', meta: {} })
 +})
 +
 +test('an unreadable threads.json is moved aside instead of overwritten, and a malformed thread is dropped', async () => {
@@ -1100,12 +1034,47 @@ index 0000000000000000000000000000000000000000..ad104d1e01f8fbd8aee8311e3dc64c5e
 +  expect(calls().some(args => args[0] === '--bg')).toBe(false)
 +})
 +
++test('a session with no capacity takes every message of a call, idle or not, and the call after it gets a new session', async () => {
++  const old = Bun.spawn(['sleep', '30'])
++  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: old.pid, status: 'idle' }], reconnect: 60_000, fresh: () => true, capacity: 0 })
++  const { received, send } = await session('voice')
++  hub.keep('voice')
++  for (const turn of ['one', 'two', 'three']) {
++    said(20_000)
++    send({ type: 'state', thread: 'voice', busy: false })
++    await Bun.sleep(50)
++    hub.deliver('voice', 'voice', { content: turn, meta: {} })
++    await until(() => received.find(payload => payload.content === turn))
++  }
++  expect(calls().some(args => args[0] === 'stop' || args[0] === '--bg')).toBe(false)
++  hub.deliver('voice', 'voice', { content: 'the call ended', meta: {} })
++  hub.renew('voice')
++  send({ type: 'state', thread: 'voice', busy: true })
++  send({ type: 'state', thread: 'voice', busy: false })
++  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
++  old.kill()
++  expect(await launched()).not.toContain('--resume')
++})
++
++test('a session whose channel comes back before its rest still starts over for the call that ended', async () => {
++  const old = Bun.spawn(['sleep', '30'])
++  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: old.pid, status: 'idle' }], reconnect: 60_000, fresh: () => true, capacity: 0 })
++  const first = await session('voice')
++  first.send({ type: 'state', thread: 'voice', busy: true })
++  hub.renew('voice')
++  first.close()
++  const again = await session('voice')
++  again.send({ type: 'state', thread: 'voice', busy: false })
++  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
++  old.kill()
++})
++
 +test('a thread that asks to renew starts over as a new session once its turn ends', async () => {
 +  const old = Bun.spawn(['sleep', '30'])
 +  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: old.pid, status: 'idle' }], reconnect: 60_000, fresh: () => true, capacity: 0 })
 +  const { send } = await session('voice')
 +  send({ type: 'state', thread: 'voice', busy: true })
-+  send({ type: 'renew', thread: 'voice' })
++  hub.renew('voice')
 +  await Bun.sleep(100)
 +  expect(calls().some(args => args[0] === 'stop' || args[0] === '--bg')).toBe(false)
 +  send({ type: 'state', thread: 'voice', busy: false })
@@ -1118,7 +1087,7 @@ index 0000000000000000000000000000000000000000..ad104d1e01f8fbd8aee8311e3dc64c5e
 +  const old = Bun.spawn(['sleep', '30'])
 +  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: old.pid, status: 'busy' }], reconnect: 60_000, fresh: () => true, capacity: 0 })
 +  const { send } = await session('voice')
-+  send({ type: 'renew', thread: 'voice' })
++  hub.renew('voice')
 +  send({ type: 'state', thread: 'voice', busy: false, background: true })
 +  await Bun.sleep(150)
 +  expect(calls().some(args => args[0] === 'stop' || args[0] === '--bg')).toBe(false)
@@ -1133,7 +1102,7 @@ index 0000000000000000000000000000000000000000..ad104d1e01f8fbd8aee8311e3dc64c5e
 +  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: old.pid, status: 'busy' }], reconnect: 60_000, fresh: () => true, capacity: 0 })
 +  const { send } = await session('voice')
 +  send({ type: 'state', thread: 'voice', busy: true })
-+  send({ type: 'renew', thread: 'voice' })
++  hub.renew('voice')
 +  send({ type: 'state', thread: 'voice', busy: false })
 +  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
 +  old.kill()
@@ -1148,14 +1117,14 @@ index 0000000000000000000000000000000000000000..ad104d1e01f8fbd8aee8311e3dc64c5e
 +  expect(calls().some(args => args[0] === 'stop')).toBe(false)
 +})
 +
-+test('a call that comes while a renew is on its way waits for the new session to say hello', async () => {
++test('a call that comes while a renew is on its way waits for the new session to connect', async () => {
 +  const old = Bun.spawn(['sleep', '30'])
 +  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: old.pid, status: 'busy' }], reconnect: 60_000, fresh: () => true, capacity: 0 })
 +  let through = false
 +  await hub.renewal('voice')
 +  const { send } = await session('voice')
 +  send({ type: 'state', thread: 'voice', busy: true })
-+  send({ type: 'renew', thread: 'voice' })
++  hub.renew('voice')
 +  await Bun.sleep(50)
 +  void hub.renewal('voice').then(() => (through = true))
 +  send({ type: 'state', thread: 'voice', busy: false })
@@ -1173,16 +1142,16 @@ index 0000000000000000000000000000000000000000..ad104d1e01f8fbd8aee8311e3dc64c5e
 +  let through = 0
 +  const { send } = await session('voice')
 +  send({ type: 'state', thread: 'voice', busy: true })
-+  send({ type: 'renew', thread: 'voice' })
++  hub.renew('voice')
 +  await Bun.sleep(50)
 +  void hub.renewal('voice').then(() => through++)
 +  send({ type: 'state', thread: 'voice', busy: false, background: true })
 +  await until(() => through === 1)
 +  send({ type: 'state', thread: 'voice', busy: true })
-+  send({ type: 'renew', thread: 'voice' })
++  hub.renew('voice')
 +  await Bun.sleep(50)
 +  void hub.renewal('voice').then(() => through++)
-+  send({ type: 'keep', thread: 'voice' })
++  hub.keep('voice')
 +  await until(() => through === 2)
 +  expect(calls().some(args => args[0] === 'stop')).toBe(false)
 +})
@@ -1213,8 +1182,8 @@ index 0000000000000000000000000000000000000000..ad104d1e01f8fbd8aee8311e3dc64c5e
 +  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'idle' }], reconnect: 50, fresh: () => true, capacity: 0 })
 +  const { send } = await session('voice')
 +  send({ type: 'state', thread: 'voice', busy: true })
-+  send({ type: 'renew', thread: 'voice' })
-+  send({ type: 'keep', thread: 'voice' })
++  hub.renew('voice')
++  hub.keep('voice')
 +  send({ type: 'state', thread: 'voice', busy: false })
 +  await Bun.sleep(150)
 +  expect(calls().some(args => args[0] === 'stop')).toBe(false)
@@ -1292,35 +1261,38 @@ index 0000000000000000000000000000000000000000..ad104d1e01f8fbd8aee8311e3dc64c5e
 +test('a voice session that started with what the hub no longer gives waits out its call before starting over', async () => {
 +  start({ stale: true, main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'busy', startedAt: 1 }], reconnect: 60_000, fresh: () => true, capacity: 0 })
 +  const { send } = await session('voice')
-+  send({ type: 'keep', thread: 'voice' })
++  hub.keep('voice')
 +  await Bun.sleep(100)
 +  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid: EXITED, status: 'idle', startedAt: 1 }]))
 +  send({ type: 'state', thread: 'voice', busy: false })
 +  await Bun.sleep(150)
 +  expect(calls().some(args => args[0] === 'stop')).toBe(false)
-+  send({ type: 'renew', thread: 'voice' })
++  hub.renew('voice')
 +  send({ type: 'state', thread: 'voice', busy: false })
 +  await until(() => calls().find(args => args[0] === 'stop'))
 +})
 +
-+test('a restart waits for every call to hang up, or for its session to go', async () => {
++test('a restart waits for every call to hang up, even while its session\'s channel is gone', async () => {
 +  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, reconnect: 60_000, fresh: () => true, capacity: 0 })
 +  let freed = false
 +  await free()
 +  const first = await session('voice')
-+  first.send({ type: 'keep', thread: 'voice' })
++  hub.keep('voice')
 +  await Bun.sleep(50)
 +  void free().then(() => (freed = true))
 +  await Bun.sleep(50)
 +  expect(freed).toBe(false)
-+  first.send({ type: 'renew', thread: 'voice' })
++  hub.renew('voice')
 +  await until(() => freed)
 +  freed = false
 +  const second = await session('voice')
-+  second.send({ type: 'keep', thread: 'voice' })
++  hub.keep('voice')
 +  await Bun.sleep(50)
 +  void free().then(() => (freed = true))
 +  second.close()
++  await Bun.sleep(100)
++  expect(freed).toBe(false)
++  hub.renew('voice')
 +  await until(() => freed)
 +})
 +
@@ -1395,11 +1367,6 @@ index 0000000000000000000000000000000000000000..ad104d1e01f8fbd8aee8311e3dc64c5e
 +  expect(calls().some(args => args[0] === 'stop')).toBe(false)
 +  send({ type: 'state', thread: 'chat:7', busy: false })
 +  await until(() => calls().find(args => args[0] === 'stop'))
-+})
-+
-+test("a client's own binding for a thread reaches its session's settings env, under the hub's own", async () => {
-+  start({ main: 'voice', bind: thread => ({ VOICE_SOCKET: `/run/${thread}.sock`, HEX_THREAD: 'not this' }) })
-+  expect(settingsOf(await launched()).env).toMatchObject({ VOICE_SOCKET: '/run/voice.sock', HEX_THREAD: 'voice' })
 +})
 +
 +test('the main thread cannot be closed', () => {
@@ -1614,10 +1581,10 @@ index 0000000000000000000000000000000000000000..ad104d1e01f8fbd8aee8311e3dc64c5e
 +})
 diff --git a/hub/hub.ts b/hub/hub.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..61e4312d50ba02c806ad516da49ade5d4352840a
+index 0000000000000000000000000000000000000000..051cafd82fed1f95cd06bdd5578e74dfc0c68db7
 --- /dev/null
 +++ b/hub/hub.ts
-@@ -0,0 +1,789 @@
+@@ -0,0 +1,778 @@
 +import { createServer } from 'net'
 +import { createHash, randomBytes } from 'crypto'
 +import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync, type FSWatcher } from 'fs'
@@ -1730,8 +1697,8 @@ index 0000000000000000000000000000000000000000..61e4312d50ba02c806ad516da49ade5d
 +  return createHash('sha256').update(JSON.stringify([args, server ?? null, ...(hooks.length ? [hooks.map(read)] : [])])).digest('hex').slice(0, 16)
 +}
 +
-+// A voice call passes through this process (its page and phone line go through the hub's
-+// door), so a restart waits for every thread on a call to hang up.
++// A voice call runs in this process (its call engine holds the caller's audio), so a restart
++// waits for every thread on a call to hang up.
 +const onCall = new Set<Run>()
 +const hungUp: (() => void)[] = []
 +
@@ -1756,12 +1723,11 @@ index 0000000000000000000000000000000000000000..61e4312d50ba02c806ad516da49ade5d
 +  return readFileSync(file, 'utf8').trim()
 +}
 +
-+export function startHub({ stateDir, channel, server, port = PORT, main, mainName = 'main', general = false, call, state, failed, permission, asks, args = () => [], bind = () => ({}), fresh = () => false, limits, hexDir = process.cwd(), launcher = 'claude', hooks = process.env.HEX_HOOKS?.split(':').filter(Boolean) ?? [] }: {
++export function startHub({ stateDir, channel, server, port = PORT, main, mainName = 'main', general = false, call, state, failed, permission, asks, args = () => [], fresh = () => false, limits, hexDir = process.cwd(), launcher = 'claude', hooks = process.env.HEX_HOOKS?.split(':').filter(Boolean) ?? [] }: {
 +  stateDir: string
 +  channel: string
-+  // What the channel serves its sessions over HTTP; a client without one serves them through its
-+  // plugin's own process, on hub.sock.
-+  server?: ChannelServer
++  // What the channel serves its sessions over HTTP.
++  server: ChannelServer
 +  // Where serve.ts listens for every hub's sessions.
 +  port?: number
 +  main?: string
@@ -1774,8 +1740,6 @@ index 0000000000000000000000000000000000000000..61e4312d50ba02c806ad516da49ade5d
 +  permission?: (thread: string, request: Permission) => void
 +  asks?: Asks
 +  args?: (thread: string) => string[]
-+  // More of the thread's binding for its session's settings env, like where its plugin serves.
-+  bind?: (thread: string) => Record<string, string>
 +  // A fresh thread's session is never compacted: its launcher builds what a new session knows
 +  // of the chat, and a new one takes over once the old one's context or cache is spent.
 +  fresh?: (thread: string) => boolean
@@ -1797,7 +1761,7 @@ index 0000000000000000000000000000000000000000..61e4312d50ba02c806ad516da49ade5d
 +  const plugin = channel.replace(/^plugin:/, '')
 +  const path = `/${plugin.split('@')[0]}`
 +  mkdirSync(sessionsDir, { recursive: true, mode: 0o700 })
-+  const token = server && tokenOf(stateDir)
++  const token = tokenOf(stateDir)
 +  const inherited = Object.fromEntries(Object.entries(process.env).filter(([name]) => !PRIVATE.test(name)))
 +  let closed = false
 +
@@ -1921,8 +1885,9 @@ index 0000000000000000000000000000000000000000..61e4312d50ba02c806ad516da49ade5d
 +    return sent >= capacity ? 0 : Math.max(0, (at ?? Date.now()) + (short ? cacheWarm / 12 : cacheWarm) - Date.now())
 +  }
 +
++  // A session on a call takes every message of the call, so a call never changes sessions midway.
 +  function spent(thread: string) {
-+    return fresh(thread) && warmFor(thread) === 0
++    return fresh(thread) && !onCall.has(runOf(thread)) && warmFor(thread) === 0
 +  }
 +
 +  // At a rest the Stop hook reported with no agents working, Claude's own status still says busy
@@ -2070,14 +2035,14 @@ index 0000000000000000000000000000000000000000..61e4312d50ba02c806ad516da49ade5d
 +    return join(sessionsDir, `${encodeURIComponent(thread)}.json`)
 +  }
 +
-+  // A respawn reads the same file, so it gets the hub's current token and binding too.
++  // A respawn reads the same file, so it gets the hub's current token too.
 +  function writeSettings(thread: string) {
 +    const env = {
-+      ...bind(thread),
 +      HEX_CHANNEL: channel,
 +      HEX_THREAD: thread,
 +      HEX_HUB: socketPath,
-+      ...(token ? { HEX_PORT: String(port), HEX_TOKEN: token } : {}),
++      HEX_PORT: String(port),
++      HEX_TOKEN: token,
 +      ...(general && thread === main ? { HEX_MAIN: '1' } : {}),
 +      ...(fresh(thread) ? { HEX_FRESH: '1' } : {}),
 +    }
@@ -2129,7 +2094,7 @@ index 0000000000000000000000000000000000000000..61e4312d50ba02c806ad516da49ade5d
 +
 +  function deliver(thread: string, name: string, message: Message) {
 +    const run = runOf(thread)
-+    if (run.phase.is === 'live') return stale(thread) || spent(thread) ? void refresh(thread, message) : run.phase.line.send({ type: 'inbound', ...message })
++    if (run.phase.is === 'live') return (stale(thread) && !onCall.has(run)) || spent(thread) ? void refresh(thread, message) : run.phase.line.send({ type: 'inbound', ...message })
 +    run.queue.push(message)
 +    void launch(thread, name)
 +  }
@@ -2167,22 +2132,19 @@ index 0000000000000000000000000000000000000000..61e4312d50ba02c806ad516da49ade5d
 +      stop(thread)
 +      await claude.exited(running.pid)
 +    }
-+    if (run.phase.is === 'live' || run.phase.is === 'recovering') {
-+      hangUp(run)
-+      become(run, { is: 'stopped' })
-+    }
++    if (run.phase.is === 'live' || run.phase.is === 'recovering') become(run, { is: 'stopped' })
 +    void launch(thread, threads[thread]!.name, { prompt, quiet })
 +  }
 +
-+  // A session's channel connected: over HTTP (its session is the one the hub started, or the one
-+  // Claude reports running for the thread), or through its plugin's hello, which names it.
-+  function welcome(thread: string, line: Line, session?: string) {
++  // A session's channel connected: its session is the one the hub started, or the one Claude
++  // reports running for the thread. One that only reconnects still owes a renew it asked for.
++  function welcome(thread: string, line: Line) {
 +    const run = runOf(thread)
 +    const job = run.phase.is === 'launching' ? run.phase.job : undefined
 +    become(run, { is: 'live', line })
-+    run.renew = undefined
++    if (run.renew !== 'asked') run.renew = undefined
 +    threads[thread] ??= { name: thread }
-+    const id = session ?? (job && claude.record(job).sessionId)
++    const id = job && claude.record(job).sessionId
 +    if (id) note(thread, id)
 +    for (const message of run.queue.splice(0)) line.send({ type: 'inbound', ...message })
 +    rest(thread)
@@ -2205,7 +2167,6 @@ index 0000000000000000000000000000000000000000..61e4312d50ba02c806ad516da49ade5d
 +    const run = runs.get(thread)
 +    if (run?.phase.is !== 'live' || run.phase.line !== line) return
 +    become(run, { is: 'recovering' })
-+    hangUp(run)
 +    setState(thread, false)
 +    if (run.leaving) return forget(thread)
 +    recover(thread)
@@ -2276,20 +2237,32 @@ index 0000000000000000000000000000000000000000..61e4312d50ba02c806ad516da49ade5d
 +    return runs.get(thread)?.unsaved ?? threads[thread]?.session
 +  }
 +
-+  rmSync(socketPath, { force: true })
-+  const serve = server && endpoint(path.slice(1), channel, token!, server, {
-+      call,
-+      permission: (thread, request) => permission?.(thread, request),
-+      open: (thread, line) => welcome(thread, line),
-+      close: drop,
-+    })
-+  if (serve) channels.set(path, serve)
++  // A thread is on a call from its keep until its renew, which starts the next call in a new session.
++  function keep(thread: string) {
++    const run = runOf(thread)
++    if (run.renew !== 'underway') run.renew = undefined
++    onCall.add(run)
++    letGo(thread)
++  }
 +
++  function renewAsked(thread: string) {
++    const run = runOf(thread)
++    if (run.renew !== 'underway') run.renew = 'asked'
++    hangUp(run)
++  }
++
++  const serve = endpoint(path.slice(1), channel, token, server, {
++    call,
++    permission: (thread, request) => permission?.(thread, request),
++    open: welcome,
++    close: drop,
++  })
++  channels.set(path, serve)
++
++  // Where a session's hooks and hex's own tools reach the hub, one JSON line each.
++  rmSync(socketPath, { force: true })
 +  const sock = createServer(socket => {
-+    let thread = ''
 +    let buffer = ''
-+    const reply = (payload: object) => socket.write(JSON.stringify(payload) + '\n')
-+    const line: Line = { send: reply }
 +    socket.setEncoding('utf8')
 +    socket.on('data', (chunk: string) => {
 +      buffer += chunk
@@ -2299,40 +2272,21 @@ index 0000000000000000000000000000000000000000..61e4312d50ba02c806ad516da49ade5d
 +        try {
 +          handle(JSON.parse(line))
 +        } catch (error) {
-+          process.stderr.write(`hub: dropped a bad line from ${thread || 'a session'}: ${error}\n`)
++          process.stderr.write(`hub: dropped a bad line on ${socketPath}: ${error}\n`)
 +        }
 +      }
 +    })
-+    function handle(request: any) {
-+      if (request.type === 'hello') welcome((thread = request.thread), line, request.session)
-+      if (request.type === 'state') setState(request.thread, request.busy, request.background === true)
-+      if (request.type === 'renew') {
-+        const run = runOf(request.thread)
-+        if (run.renew !== 'underway') run.renew = 'asked'
-+        hangUp(run)
-+      }
-+      if (request.type === 'keep') {
-+        const run = runOf(request.thread)
-+        if (run.renew !== 'underway') run.renew = undefined
-+        onCall.add(run)
-+        letGo(request.thread)
-+      }
-+      if (request.type === 'open') void launch(request.thread, request.name, { prompt: request.prompt })
-+      if (request.type === 'permission_request') permission?.(thread, request)
-+      if (request.type === 'answer') asks?.answer(request.thread, request.message, request.label, request.via)
-+      if (request.type === 'settle') asks?.settle(request.thread, request.message, request.note)
-+      if (request.type === 'reopen') asks?.reopen(request.thread, request.message, request.via)
-+      if (request.type === 'inbound') deliver(request.thread, threads[request.thread]?.name ?? request.thread, { content: request.content, meta: request.meta })
-+      if (request.type === 'call') {
-+        call(thread, request.tool, request.args ?? {}).then(
-+          text => reply({ type: 'result', id: request.id, text }),
-+          error => reply({ type: 'result', id: request.id, error: error instanceof Error ? error.message : String(error) }),
-+        )
-+      }
-+    }
-+    socket.on('close', () => drop(thread, line))
 +    socket.on('error', () => {})
 +  }).listen(socketPath)
++
++  function handle(request: any) {
++    if (request.type === 'state') setState(request.thread, request.busy, request.background === true)
++    if (request.type === 'open') void launch(request.thread, request.name, { prompt: request.prompt })
++    if (request.type === 'answer') asks?.answer(request.thread, request.message, request.label, request.via)
++    if (request.type === 'settle') asks?.settle(request.thread, request.message, request.note)
++    if (request.type === 'reopen') asks?.reopen(request.thread, request.message, request.via)
++    if (request.type === 'inbound') deliver(request.thread, threads[request.thread]?.name ?? request.thread, { content: request.content, meta: request.meta })
++  }
 +
 +  // The main thread is always running: started with the hub, and started again when its session
 +  // is gone.
@@ -2366,6 +2320,8 @@ index 0000000000000000000000000000000000000000..61e4312d50ba02c806ad516da49ade5d
 +    fork: (thread: string, name: string, session: string, prompt: string, cwd?: string) => void launch(thread, name, { prompt, fork: session, cwd }),
 +    main,
 +    renewal,
++    keep,
++    renew: renewAsked,
 +    session: current,
 +    threads: () => Object.keys(threads),
 +    name: (thread: string) => threads[thread]?.name,
@@ -2383,7 +2339,7 @@ index 0000000000000000000000000000000000000000..61e4312d50ba02c806ad516da49ade5d
 +    close: () => {
 +      closed = true
 +      sock.close()
-+      if (serve && channels.get(path) === serve) channels.delete(path)
++      if (channels.get(path) === serve) channels.delete(path)
 +      for (const run of runs.values()) {
 +        become(run, { is: 'stopped' })
 +        clearTimeout(run.rest)
@@ -2618,4 +2574,121 @@ index 0000000000000000000000000000000000000000..13680cbcb640b549f0cc7a61c9082574
 +      this.end(JSON.stringify({ type: 'state', thread: HEX_THREAD, busy, ...(background && { background }) }) + '\n')
 +    })
 +    .on('error', () => {})
++}
+diff --git a/hub/testing.ts b/hub/testing.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..50147a64aaf68c97651c839af590f0cab81bb800
+--- /dev/null
++++ b/hub/testing.ts
+@@ -0,0 +1,111 @@
++import { readFileSync } from 'fs'
++import { join } from 'path'
++import { route } from './hub.ts'
++
++// Claude Code's side of a session's channel to a hub, for tests: it initializes, opens the stream
++// its messages arrive on, lists the tools, and lists them again when told they changed. deaf: how
++// many tools/list_changed it drops, as a session starting cold does before it listens.
++export type Session = ReturnType<typeof http>
++
++let ids = 0
++const streams: AbortController[] = []
++let listener: ReturnType<typeof Bun.serve> | undefined
++
++// The one listener serve.ts opens, for a test's hubs.
++export function port() {
++  listener ??= Bun.serve({ hostname: '127.0.0.1', port: 0, idleTimeout: 0, fetch: route })
++  return listener.port
++}
++
++export function hangUpAll() {
++  for (const stream of streams.splice(0)) stream.abort()
++}
++
++// A client's bot.ts run in its own process the way serve.ts runs it, behind a listener on a free
++// port, which the hub reads from HEX_PORT as it loads.
++export async function service(bot: string, env: Record<string, string | undefined>) {
++  const hub = JSON.stringify(join(import.meta.dir, 'hub.ts'))
++  const script = `const listener = Bun.serve({ hostname: '127.0.0.1', port: 0, idleTimeout: 0, fetch: request => route(request) })
++process.env.HEX_PORT = String(listener.port)
++const { route } = await import(${hub})
++console.log(listener.port)
++await import(${JSON.stringify(bot)})`
++  const child = Bun.spawn(['bun', '-e', script], { env, stdout: 'pipe', stderr: 'ignore' })
++  const reader = child.stdout.getReader()
++  let out = ''
++  while (!out.includes('\n')) {
++    const { value, done } = await reader.read()
++    if (done) throw new Error(`${bot} exited before it listened`)
++    out += new TextDecoder().decode(value)
++  }
++  void (async () => { while (!(await reader.read()).done); })()
++  return { process: child, port: Number(out.split('\n')[0]) }
++}
++
++// at: the port of a hub in another process; this process's own listener by default.
++export function http({ stateDir, path, channel, thread, extra = {}, deaf = 0, at = port() }: { stateDir: string; path: string; channel: string; thread?: string; extra?: Record<string, string>; deaf?: number; at?: number }) {
++  const url = `http://127.0.0.1:${at}${path}`
++  const headers = { ...(thread && { 'x-hex-channel': channel, 'x-hex-thread': thread }), authorization: `Bearer ${readFileSync(join(stateDir, 'token'), 'utf8')}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...extra }
++  const received: any[] = []
++  const stream = new AbortController()
++  streams.push(stream)
++  let mcp = ''
++  let lists = 0
++  const post = (body: object) => fetch(url, { method: 'POST', headers: { ...headers, ...(mcp && { 'mcp-session-id': mcp }) }, body: JSON.stringify({ jsonrpc: '2.0', ...body }) })
++  const rpc = async (method: string, params: object = {}) => {
++    if (method === 'tools/list') lists++
++    return (await post({ id: ++ids, method, params })).json() as Promise<any>
++  }
++  return {
++    received,
++    listed: () => lists,
++    post,
++    rpc,
++    initialize: async () => (mcp = (await post({ id: ++ids, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'test', version: '0' } } })).headers.get('mcp-session-id')!),
++    open: async (adopted?: string) => {
++      if (adopted) mcp = adopted
++      const response = await fetch(url, { headers: { ...headers, 'mcp-session-id': mcp }, signal: stream.signal })
++      void listen(response, received, () => void (deaf-- > 0 || rpc('tools/list')))
++      return response
++    },
++    close: () => stream.abort(),
++    call: async (tool: string, args: object = {}) => (await rpc('tools/call', { name: tool, arguments: args })).result,
++    ask: (request: object) => post({ method: 'notifications/claude/channel/permission_request', params: request }),
++  }
++}
++
++// A session connected and listening, the way it is once Claude Code has started it. Its tool
++// calls answer with the text, or the error, the tool gave.
++export async function connect(options: Parameters<typeof http>[0]) {
++  const line = http(options)
++  await line.initialize()
++  await line.open()
++  await line.rpc('tools/list')
++  for (const end = Date.now() + 3000; line.listed() < 2; await Bun.sleep(10)) if (Date.now() > end) throw new Error('the hub never opened the channel')
++  await Bun.sleep(10)
++  return {
++    ...line,
++    call: async (tool: string, args: object = {}) => {
++      const { content, isError } = await line.call(tool, args)
++      const text: string = content[0].text
++      return isError ? { error: text.replace(`${tool} failed: `, '') } : { text }
++    },
++  }
++}
++
++async function listen(response: Response, received: any[], changed: () => void) {
++  let buffer = ''
++  try {
++    for await (const chunk of response.body!) {
++      buffer += new TextDecoder().decode(chunk)
++      for (let end = buffer.indexOf('\n\n'); end >= 0; end = buffer.indexOf('\n\n')) {
++        const data = buffer.slice(0, end).split('\n').find(line => line.startsWith('data: '))
++        buffer = buffer.slice(end + 2)
++        if (!data) continue
++        const { method, params } = JSON.parse(data.slice(6))
++        if (method === 'notifications/tools/list_changed') changed()
++        else received.push({ type: method === 'notifications/claude/channel' ? 'inbound' : 'permission', ...params })
++      }
++    }
++  } catch {}
 +}

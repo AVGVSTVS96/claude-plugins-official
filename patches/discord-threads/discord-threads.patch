@@ -310,12 +310,13 @@ index ad04f6fa437bfa013f72f71de2b460f3eedeeeee..95f1befddecc9bd7251c7a7d4d363bdf
 +The bot token lives in `~/.claude/channels/hex/discord/.env` as `DISCORD_BOT_TOKEN=…`, and `access.json` there holds `allowFrom`, the Discord user ids allowed to talk to it. The bot needs the Message Content intent, and in its server: View Channels, Send Messages, Send Messages in Threads, Create Public Threads, Manage Threads, Read Message History, Attach Files and Add Reactions.
 diff --git a/external_plugins/discord/bot.test.ts b/external_plugins/discord/bot.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..bf729531be42a2ed97d5a70a88762b6841779dff
+index 0000000000000000000000000000000000000000..c4b5b116620e57c380acdcd113cbb603f8f705be
 --- /dev/null
 +++ b/external_plugins/discord/bot.test.ts
-@@ -0,0 +1,457 @@
+@@ -0,0 +1,443 @@
 +import { beforeAll, expect, mock, test } from 'bun:test'
-+import { connect } from 'net'
++import { connect as netConnect } from 'net'
++import { connect } from '../../hub/testing.ts'
 +import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'fs'
 +import { tmpdir } from 'os'
 +import { join } from 'path'
@@ -475,29 +476,14 @@ index 0000000000000000000000000000000000000000..bf729531be42a2ed97d5a70a88762b68
 +  ;({ received, call } = await session(here.id))
 +})
 +
-+// A session bound to thread, connected once the hub has registered it.
++// A session bound to thread, connected once the hub has registered it, with its hooks on hub.sock.
 +async function session(thread: string) {
-+  const socket = connect(join(state, 'hub.sock'))
-+  const received: any[] = []
-+  let buffer = ''
-+  let next = 0
-+  socket.setEncoding('utf8')
-+  socket.on('data', (chunk: string) => {
-+    buffer += chunk
-+    const lines = buffer.split('\n')
-+    buffer = lines.pop()!
-+    received.push(...lines.map(line => JSON.parse(line)))
-+  })
-+  await new Promise(resolve => socket.on('connect', resolve))
-+  const send = (payload: object) => socket.write(JSON.stringify(payload) + '\n')
-+  send({ type: 'hello', thread, session: crypto.randomUUID() })
-+  const call = (tool: string, args: object): Promise<any> => {
-+    const id = ++next
-+    send({ type: 'call', id, tool, args })
-+    return until(() => received.find(line => line.type === 'result' && line.id === id))
-+  }
-+  await call('list_channels', {})
-+  return { received, call, send }
++  const line = await connect({ stateDir: state, path: '/discord', channel: 'plugin:discord@hex', thread })
++  const hooks = netConnect(join(state, 'hub.sock'))
++  await new Promise(resolve => hooks.on('connect', resolve))
++  const send = (payload: object) => hooks.write(JSON.stringify(payload) + '\n')
++  await line.call('list_channels', {})
++  return { received: line.received, call: line.call, send }
 +}
 +
 +test('a message in a thread names the channel the thread is in', async () => {

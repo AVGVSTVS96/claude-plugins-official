@@ -4,7 +4,7 @@ id: hub
 summary: Add a client-agnostic hub that gives every chat thread its own Claude Code session and moves threads between clients.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: hub.patch
-patch_sha256: 3e78ed3a6b5efa7d7a422ae995d303a54d647744565a35479cbae9b1a93abb59
+patch_sha256: 0bdb9886263e85a81a5b64aac1ac0a2a7ee62ef982173d4c1cf20d147ae2cff3
 ---
 
 ## Intent
@@ -60,8 +60,7 @@ came from the app. A session's permission prompt (`permission_request`) reaches
 the client with the session's thread, and the client's `answer` goes back to
 that session alone (`permission`). A thread can have its own model and effort
 (`configure`), kept in `threads.json` and passed as `--model` and `--effort`, and a
-client can add launch arguments per thread, and more of a thread's binding to its
-settings env (`bind`), under the hub's own. `threads.json` keeps a digest of what a
+client can add launch arguments per thread. `threads.json` keeps a digest of what a
 session started with, so a message to a session whose arguments changed goes to a
 fresh start of it (a session busy with background work keeps running and takes it
 as it is). A client can mark threads fresh: their launcher builds what a new
@@ -86,7 +85,9 @@ instruction files carry, so a resume would read nothing past the system prompt
 from the cache and would hold the chat twice. A new session waits until its first
 request before any of this counts. A fresh thread
 never stops for being idle. With a `capacity` of 0 (the voice client), every
-message that finds its session done goes to a new one. Messages
+message that finds its session done goes to a new one, except on a call: from
+`keep` to `renew` one session takes every message of the call, idle or not, and
+its renew waits for the call to end. Messages
 waiting for a new start keep their order. Each session's settings enable only its client's plugin.
 
 A client hands `startHub` its channel (`server`: the instructions and tools
@@ -114,10 +115,10 @@ localhost. The token goes in `Authorization` because Claude Code takes a
 refusal then as a failed connection; with any other header it records the
 server in `mcp-needs-auth-cache.json` and skips it for 15 minutes, which no
 restart in place clears. A session with no thread (its env has none, or
-another channel's) gets no messages and acts on no thread. A client with no
-`server` keeps its plugin's own process, which reaches the hub on `hub.sock`
-and says hello; sessions started before the hub served over HTTP do the same
-until they next start.
+another channel's) gets no messages and acts on no thread. Every client has a
+`server`, so HTTP is the one way a session reaches the hub; `hub.sock` only
+takes hooks' `state` and local programs' lines (`inbound`, `open`, `answer`,
+`settle`, `reopen`).
 
 A thread whose session runs needs its channel. When it drops, when the hub
 starts, when a message finds its session running without one, and after a
@@ -126,7 +127,7 @@ dropped HTTP server at about 0, 1, 3, 7 and 15 seconds, then gives up for
 good). After that, a session still running that started before then restarts
 in place (`claude respawn`, which keeps its conversation and runs a turn it was
 on again) when its flags read the thread's settings file, which the hub writes
-again first, so the session comes back with the current token and binding, and otherwise stops
+again first, so the session comes back with the current token and thread, and otherwise stops
 and resumes, since a respawn would start it without its binding; one that
 started since gets the same time, and one that restarted
 and still has no channel is reported as a failed start, as is a session the
@@ -160,9 +161,11 @@ with another digest renews too, once Claude reports it idle, and its next messag
 goes to a fresh start, so an update that changes them moves each session onto
 it at its own next rest, while a crash or a plain restart of the hub leaves
 every session running, a warm DM included. A thread with no digest started with
-none of its own arguments, before the hub kept one. Asking to `keep` before then cancels a
+none of its own arguments, before the hub kept one. A client in the same process
+calls `keep` and `renew` on the hub it started: `keep` before the rest cancels a
 renew (a voice call started in the meantime), even while the hub is still
-asking Claude whether the session is working. `renewal` resolves once a renew on
+asking Claude whether the session is working, and a renew asked for survives
+the session's channel dropping and coming back before its rest. `renewal` resolves once a renew on
 its way is through (the new session connects) or off, at once when none is, and
 doesn't wait on one held up by background agents, so a client can hold a new
 call for the new session. A fresh thread whose session outlived the hub (a
@@ -170,9 +173,9 @@ hub restart), saved or not, is left to reconnect instead of starting a new one, 
 runs twice and a warm session is never left running unwatched.
 
 `hub/serve.ts` is the service: it runs every client (Telegram, Discord,
-Buzz, T3 Code) in one process and owns its one HTTP listener, which hands each
+Buzz, T3 Code, voice) in one process and owns its one HTTP listener, which hands each
 request to the hub serving that path (`route`). A thread is on a call from its `keep` until its
-`renew` or until its session disconnects, and a voice call passes through this
+`renew`, whatever happens to its session's channel meanwhile, and a voice call's audio runs in this
 process, so on SIGHUP the service exits once no thread is on a call (`free`), and
 whatever runs it starts it again on the current code, inside Claude Code's
 first retry, so sessions carry on where they were. Each chat client registers in `clients` with a `place` that opens a
@@ -213,13 +216,14 @@ instead (`fork`, `--fork-session`).
 
 ## Verification
 
-`bun test hub` drives sessions over HTTP the way Claude Code connects (and a
-plugin's own process on `hub.sock`): routing, queueing, resume, folders, running sessions, the main
+`bun test hub` drives sessions over HTTP the way Claude Code connects
+(`hub/testing.ts`, which the clients' tests share): routing, queueing, resume, folders, running sessions, the main
 thread (started with the hub, kept running, revived, `HEX_MAIN` only for General, renewed at once, a
 fresh one left to reconnect after a hub restart), renews at the rest the Stop hook reports and after
 background agents, `renewal` holding for the new session and not for agents or a keep,
 sessions started with another digest renewing at their
-next rest and never during a call, a plain hub restart leaving them running, `free` waiting for calls to end, the launcher and its
+next rest and never during a call, a plain hub restart leaving them running, `free` waiting for calls to end
+even with the session's channel gone, one session taking a whole call and the next call a new one, a renew asked for kept across a reconnect, the launcher and its
 environment, failed starts, busy and idle, idle stops, compacting big sessions before they rest, fresh threads (warm delivery, never resuming, the handover once the context
 fills, even while Claude's status lags, or the cache expires, by its recorded tier, never compacting, a warm session from before a hub
 restart found by its job instead of started twice), stopping, closing, naming and
