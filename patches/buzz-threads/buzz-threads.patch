@@ -25,15 +25,19 @@ index 0000000000000000000000000000000000000000..c2658d7d1b31848c3b71960543cb0368
 +node_modules/
 diff --git a/external_plugins/buzz/.mcp.json b/external_plugins/buzz/.mcp.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..d8d99712ee9fd87d5a4a8b2fa0fa58bea34b5757
+index 0000000000000000000000000000000000000000..d3640cf7d4106a130168887a55ea75db81abe1e2
 --- /dev/null
 +++ b/external_plugins/buzz/.mcp.json
-@@ -0,0 +1,8 @@
+@@ -0,0 +1,12 @@
 +{
 +  "mcpServers": {
 +    "buzz": {
-+      "command": "bun",
-+      "args": ["run", "--cwd", "${CLAUDE_PLUGIN_ROOT}", "--shell=bun", "--silent", "start"]
++      "type": "http",
++      "url": "http://127.0.0.1:${HEX_PORT:-8789}/buzz",
++      "headers": {
++        "X-Hex-Channel": "${HEX_CHANNEL:-}",
++        "X-Hex-Thread": "${HEX_THREAD:-}"
++      }
 +    }
 +  }
 +}
@@ -46,7 +50,7 @@ index 0000000000000000000000000000000000000000..214c29d1395919ce175f26d140526368
 +registry=https://registry.npmjs.org/
 diff --git a/external_plugins/buzz/README.md b/external_plugins/buzz/README.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..2668335b15774c30864c3b1b345c6a7a256c3352
+index 0000000000000000000000000000000000000000..5e5e8fe6f09e0e676cce9318da78b2bc681317ef
 --- /dev/null
 +++ b/external_plugins/buzz/README.md
 @@ -0,0 +1,10 @@
@@ -55,7 +59,7 @@ index 0000000000000000000000000000000000000000..2668335b15774c30864c3b1b345c6a7a
 +A channel for [Buzz](https://github.com/block/buzz), where every Buzz thread is its own Claude Code session, Claude-tag style: tag the agent in a channel and it starts a thread on your message, with a fresh session working inside it. Inside a thread, or in a DM, you just talk. It works with any Buzz relay, no Buzz changes needed. Its intent, invariants and design live in [`patches/buzz-threads/PATCH.md`](../../patches/buzz-threads/PATCH.md).
 +
 +- `bot.ts` holds the one relay connection (`relay.ts`). It runs in the hub service (`bun hub/serve.ts`) next to Telegram and Discord, so a conversation can move between them. It starts sessions in `HEX_DIR` through `HEX_LAUNCHER`, like Discord.
-+- `server.ts` is the channel each session loads. A session learns its thread and its hub from `HEX_THREAD` and `HEX_HUB`.
++- `channel.ts` is the channel the hub serves each session over HTTP, so no process runs per session. `.mcp.json` points a session at the hub (`HEX_PORT`, 8789 by default) with its thread (`HEX_THREAD`) in a header.
 +- `activity.ts` and `memory.ts` fill Buzz Desktop's activity and memory panels, and share files with Agent Files where the relay supports it.
 +- `provider.ts` is `buzz-backend-hex`, the Buzz Desktop provider that deploys the agent's key here over SSH.
 +
@@ -790,7 +794,7 @@ index 0000000000000000000000000000000000000000..e7f5fdf660dd123b4dd66c8d9946b647
 +}
 diff --git a/external_plugins/buzz/bot.test.ts b/external_plugins/buzz/bot.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..70f4d75ce157c9ac6f753d03cbd9cc15e7e3108e
+index 0000000000000000000000000000000000000000..d862aae045c82e27feadf3b6694f542c5d88d051
 --- /dev/null
 +++ b/external_plugins/buzz/bot.test.ts
 @@ -0,0 +1,745 @@
@@ -1035,7 +1039,7 @@ index 0000000000000000000000000000000000000000..70f4d75ce157c9ac6f753d03cbd9cc15
 +
 +  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^(BUZZ_|HEX_|TELEGRAM_|DISCORD_)/.test(name)))
 +  const bot = Bun.spawn(['bun', join(import.meta.dir, 'bot.ts')], {
-+    env: { ...env, BUZZ_STATE_DIR: state, HEX_DIR: join(dir, 'hex'), CLAUDE_CONFIG_DIR: join(dir, 'config'), PATH: `${dir}:${process.env.PATH}` },
++    env: { ...env, HEX_PORT: '0', BUZZ_STATE_DIR: state, HEX_DIR: join(dir, 'hex'), CLAUDE_CONFIG_DIR: join(dir, 'config'), PATH: `${dir}:${process.env.PATH}` },
 +    stdout: 'ignore',
 +    stderr: 'ignore',
 +  })
@@ -1541,10 +1545,10 @@ index 0000000000000000000000000000000000000000..70f4d75ce157c9ac6f753d03cbd9cc15
 +})
 diff --git a/external_plugins/buzz/bot.ts b/external_plugins/buzz/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..91a9de2dc6667c2540950c54f71479b54f04d602
+index 0000000000000000000000000000000000000000..5c6804c39e952daf7a5e9cdcbac7c13cc60a08b8
 --- /dev/null
 +++ b/external_plugins/buzz/bot.ts
-@@ -0,0 +1,882 @@
+@@ -0,0 +1,884 @@
 +#!/usr/bin/env bun
 +import { readFileSync, writeFileSync, mkdirSync, statSync, realpathSync, chmodSync, renameSync } from 'fs'
 +import { createHash } from 'crypto'
@@ -1554,6 +1558,7 @@ index 0000000000000000000000000000000000000000..91a9de2dc6667c2540950c54f71479b5
 +import { decode } from 'nostr-tools/nip19'
 +import { hexToBytes } from 'nostr-tools/utils'
 +import { startHub, clients, move, tappable, title, type Message } from '../../hub/hub.ts'
++import { server } from './channel.ts'
 +import { connectRelay } from './relay.ts'
 +import { startActivity } from './activity.ts'
 +import { startMemory } from './memory.ts'
@@ -2180,6 +2185,7 @@ index 0000000000000000000000000000000000000000..91a9de2dc6667c2540950c54f71479b5
 +  const hub = startHub({
 +    stateDir: STATE_DIR,
 +    channel: 'plugin:buzz@hex',
++    server,
 +    call,
 +    state: showState,
 +    fresh: thread => channels.get(thread)?.dm ?? false,
@@ -2429,10 +2435,10 @@ index 0000000000000000000000000000000000000000..91a9de2dc6667c2540950c54f71479b5
 +}
 diff --git a/external_plugins/buzz/bun.lock b/external_plugins/buzz/bun.lock
 new file mode 100644
-index 0000000000000000000000000000000000000000..d41282c3b554c88f9b17cf864f33b222577b84ea
+index 0000000000000000000000000000000000000000..57c3d503f8892b150a414802c4f3077c51eebeec
 --- /dev/null
 +++ b/external_plugins/buzz/bun.lock
-@@ -0,0 +1,259 @@
+@@ -0,0 +1,258 @@
 +{
 +  "lockfileVersion": 2,
 +  "configVersion": 1,
@@ -2441,7 +2447,6 @@ index 0000000000000000000000000000000000000000..d41282c3b554c88f9b17cf864f33b222
 +      "name": "claude-channel-buzz",
 +      "dependencies": {
 +        "@agentclientprotocol/claude-agent-acp": "^0.86.0",
-+        "@modelcontextprotocol/sdk": "^1.0.0",
 +        "nostr-tools": "^2.25.2",
 +      },
 +    },
@@ -2702,6 +2707,219 @@ index 0000000000000000000000000000000000000000..7112054b720266b866c74bc3b48350f6
 +# only its transcript converter is used here.
 +[install]
 +optional = false
+diff --git a/external_plugins/buzz/channel.ts b/external_plugins/buzz/channel.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..cd0dc032eff9e0170fe3c26aa8a4a2207c20b2ab
+--- /dev/null
++++ b/external_plugins/buzz/channel.ts
+@@ -0,0 +1,207 @@
++import type { ChannelServer } from '../../hub/hub.ts'
++
++const titleProperty = { type: 'string', description: 'One word, like a chat name ("Anchors", "Frontier").' }
++
++// What each session's channel says and offers; the hub serves it over HTTP.
++export const server: ChannelServer = {
++  title: 'Buzz',
++  instructions: [
++    'The sender reads Buzz, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat. Nobody watches this terminal either, so the report a background job ends with goes to them as a reply: what they need to know and act on. Once it\'s sent, end the turn without repeating it here.',
++    '',
++    'This session is one Buzz thread or direct message, the place for deeper work. Buzz renders Markdown, so answers can be longer and structured: headings, lists, and code blocks with a language. Its messages arrive as <channel source="buzz" chat_id="..." message_id="..." user="..." ts="...">, and everything you send with these tools lands back in that same thread. If the tag has new_thread="true", name this thread with rename_thread. If you were tagged into a thread that was already going, reply_to_* is the message it hangs off ("(tagged you)" alone means: read that message) and fetch_messages shows the rest. In a forum channel each post is its own thread: comments on it arrive here, and your replies post as comments on it. If the tag has attachment_count, the attachments attribute lists name/type/size — call download_attachment(message_id) to fetch them. If the tag has reply_to_message_id, the sender replied to that earlier message: reply_to_text is its text and reply_to_attachments lists its files (download_attachment with that id). edited="true" means the sender edited the message with that message_id and this is its new text. A reaction arrives as "(reaction: 👍)", or "(reaction removed: 👍)" with reaction_removed="true", with reaction_to_message_id, reaction_to_user and reaction_to_text naming the message it is on. deleted="true" means the sender deleted the message with that message_id; deleted_text is what it said. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply.',
++    '',
++    'reply accepts file paths (files: ["/abs/path.png"]) for attachments, and buttons (up to 10 short labels) to offer choices the user taps: a tap arrives with button="true" and button_message_id, and the chosen label as its text. Use react to add emoji reactions (remove: true takes yours off), edit_message for interim progress updates, and delete_message to take back a message you sent. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',
++    '',
++    'Each channel has one shared canvas, a Markdown document the user opens from the channel\'s details: canvas() reads it with its revision, and canvas(text, revision) replaces it, refused if someone changed it since that revision. presence tells you whether the user is online, away or offline.',
++    '',
++    'new_thread opens another thread with its own fresh session and hands it your prompt. Use it for work the user will want to follow or talk to on its own. handoff moves this whole conversation to another app, such as telegram, when the user asks: you stop here and continue there with your memory.',
++    '',
++    "fetch_messages pulls real Buzz history, from this thread by default. The tag's channel attribute names the channel this thread is in: fetch_messages(channel) reads that channel's top-level messages, a message with a thread shows its reply count, and fetch_messages(thread: that message's id) reads the thread. When the user refers to earlier work or talk in the channel, read it rather than saying you can't see it. search_messages finds older messages by their words.",
++  ].join('\n'),
++  tools: [
++    {
++      name: 'reply',
++      _meta: { 'anthropic/alwaysLoad': true },
++      description: 'Reply in this Buzz thread, or post in another one by name. Optionally pass reply_to (message_id) for threading, and files (absolute paths) to attach images or other files.',
++      inputSchema: {
++        type: 'object',
++        properties: {
++          text: { type: 'string' },
++          thread: { type: 'string', description: 'Thread name to post in instead of this thread.' },
++          reply_to: {
++            type: 'string',
++            description: 'Message ID to thread under. Use message_id from the inbound <channel> block, or an id from fetch_messages.',
++          },
++          files: {
++            type: 'array',
++            items: { type: 'string' },
++            description: 'Absolute file paths to attach: images, MP4 video, PDFs or other files, but not audio. Max 100MB each.',
++          },
++          buttons: {
++            type: 'array',
++            items: { type: 'string' },
++            description: 'Choices the user can tap, at most 10, like ["Yes", "No"]. They show as a numbered list under the text.',
++          },
++        },
++        required: ['text'],
++      },
++    },
++    {
++      name: 'react',
++      _meta: { 'anthropic/alwaysLoad': true },
++      description: 'Add an emoji reaction to a Buzz message, or take yours off.',
++      inputSchema: {
++        type: 'object',
++        properties: {
++          message_id: { type: 'string' },
++          emoji: { type: 'string' },
++          remove: { type: 'boolean', description: 'Take your reaction with this emoji off instead.' },
++        },
++        required: ['message_id', 'emoji'],
++      },
++    },
++    {
++      name: 'delete_message',
++      description: 'Delete a message the bot sent.',
++      inputSchema: {
++        type: 'object',
++        properties: {
++          message_id: { type: 'string' },
++        },
++        required: ['message_id'],
++      },
++    },
++    {
++      name: 'edit_message',
++      description: 'Edit a message the bot previously sent. Useful for interim progress updates. Edits don\'t trigger push notifications — send a new reply when a long task completes so the user\'s device pings.',
++      inputSchema: {
++        type: 'object',
++        properties: {
++          message_id: { type: 'string' },
++          text: { type: 'string' },
++        },
++        required: ['message_id', 'text'],
++      },
++    },
++    {
++      name: 'download_attachment',
++      description: 'Download attachments from a message in this thread to the local inbox. Use after the inbound meta or fetch_messages shows a message has attachments. Returns file paths ready to Read.',
++      inputSchema: {
++        type: 'object',
++        properties: {
++          message_id: { type: 'string' },
++        },
++        required: ['message_id'],
++      },
++    },
++    {
++      name: 'fetch_messages',
++      description: 'Fetch recent messages from this thread, or from a channel or another thread. Returns oldest-first with message IDs. In a channel, a message that has a thread shows its reply count and last reply; pass its id as thread to read the thread.',
++      inputSchema: {
++        type: 'object',
++        properties: {
++          channel: { type: 'string', description: 'Channel to read instead of this thread, by name ("open-source") or id.' },
++          thread: { type: 'string', description: 'Thread to read instead of this thread: the id of the message it hangs off, or its name.' },
++          before: { type: 'string', description: 'Message ID: only messages older than it. Pass the oldest ID you have to page back.' },
++          limit: { type: 'number', description: 'Max messages (default 20, max 100).' },
++        },
++      },
++    },
++    {
++      name: 'search_messages',
++      description: 'Search the Buzz channels you are in for messages containing words, best matches first. Each row names its channel, and the thread a reply belongs to, for fetch_messages.',
++      inputSchema: {
++        type: 'object',
++        properties: {
++          query: { type: 'string' },
++          channel: { type: 'string', description: 'Only search this channel, by name or id.' },
++          limit: { type: 'number', description: 'Max messages (default 20, max 100).' },
++        },
++        required: ['query'],
++      },
++    },
++    {
++      name: 'canvas',
++      description: 'Read this channel\'s canvas, or replace it by passing text. Reading returns its Markdown and revision.',
++      inputSchema: {
++        type: 'object',
++        properties: {
++          text: { type: 'string', description: 'The whole new canvas, in Markdown.' },
++          revision: { type: 'string', description: 'The revision you read: the save is refused if the canvas changed since.' },
++          channel: { type: 'string', description: 'Channel whose canvas to use instead of this one, by name or id.' },
++        },
++      },
++    },
++    {
++      name: 'presence',
++      description: 'Whether the user is online, away or offline in Buzz right now.',
++      inputSchema: { type: 'object', properties: {} },
++    },
++    {
++      name: 'list_channels',
++      description: 'List the Buzz channels you are in, with their IDs. Direct messages are marked.',
++      inputSchema: { type: 'object', properties: {} },
++    },
++    {
++      name: 'create_channel',
++      description: 'Create a Buzz channel. You own it and the user is added to it, so it shows up for them; open threads in it with new_thread.',
++      inputSchema: {
++        type: 'object',
++        properties: {
++          name: { type: 'string', description: 'Channel name, like "research" or "open source".' },
++          about: { type: 'string', description: 'One line on what the channel is for.' },
++          type: { type: 'string', enum: ['stream', 'forum'], description: 'stream (default): a chat like #general. forum: every thread is a post.' },
++          private: { type: 'boolean', description: 'Only members can see it. Default: open to the workspace.' },
++        },
++        required: ['name'],
++      },
++    },
++    {
++      name: 'rename_thread',
++      description: 'Name this thread. Buzz threads have no titles, so the name is for your thread list and handoffs; a thread you opened with new_thread also shows it as its first message.',
++      inputSchema: {
++        type: 'object',
++        properties: {
++          title: titleProperty,
++        },
++        required: ['title'],
++      },
++    },
++    {
++      name: 'close_thread',
++      description: 'Close a thread whose work is done and stop its session once it is idle. Defaults to this thread. Tagging the bot in it again starts a fresh session.',
++      inputSchema: {
++        type: 'object',
++        properties: {
++          thread: { type: 'string', description: 'Thread name to close instead of this thread.' },
++        },
++      },
++    },
++    {
++      name: 'new_thread',
++      description: 'Open a new thread, start a fresh session for it, and give that session the prompt as its first message. The title is the thread\'s first message in Buzz.',
++      inputSchema: {
++        type: 'object',
++        properties: {
++          title: titleProperty,
++          prompt: { type: 'string', description: "The user's request and the context the new session can't find itself: it starts from this prompt alone." },
++          about: { type: 'string', description: 'One line the user sees first in the new thread, saying what it is for and where it came from.' },
++          channel: { type: 'string', description: 'Channel to open it in, by name. Defaults to this thread\'s channel.' },
++        },
++        required: ['title', 'prompt', 'about'],
++      },
++    },
++    {
++      name: 'handoff',
++      description: 'Move this conversation to another app when the user asks. It opens a thread there, and this session stops here once the turn ends and resumes there with its full memory. The title defaults to this thread\'s name.',
++      inputSchema: {
++        type: 'object',
++        properties: {
++          to: { type: 'string', enum: ['telegram', 'discord'] },
++          title: titleProperty,
++        },
++        required: ['to'],
++      },
++    },
++  ],
++}
 diff --git a/external_plugins/buzz/memory.test.ts b/external_plugins/buzz/memory.test.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..4f09a0dcd4f8e3ea554ece8a4733419424b16afc
@@ -3452,21 +3670,17 @@ index 0000000000000000000000000000000000000000..a6c5eed7f5047133511a54bc1525d496
 +}
 diff --git a/external_plugins/buzz/package.json b/external_plugins/buzz/package.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..8bb1fba6c561275f64b992d0ac793cb797678699
+index 0000000000000000000000000000000000000000..fc63b5adbd92a19292e7f7d9b64846f12293dfae
 --- /dev/null
 +++ b/external_plugins/buzz/package.json
-@@ -0,0 +1,14 @@
+@@ -0,0 +1,10 @@
 +{
 +  "name": "claude-channel-buzz",
 +  "version": "0.1.0",
 +  "license": "Apache-2.0",
 +  "type": "module",
-+  "scripts": {
-+    "start": "bun install --no-summary 1>&2 && bun server.ts"
-+  },
 +  "dependencies": {
 +    "@agentclientprotocol/claude-agent-acp": "^0.86.0",
-+    "@modelcontextprotocol/sdk": "^1.0.0",
 +    "nostr-tools": "^2.25.2"
 +  }
 +}
@@ -3946,301 +4160,3 @@ index 0000000000000000000000000000000000000000..44eff7405c67b2f404d4fa71ba85c228
 +    },
 +  }
 +}
-diff --git a/external_plugins/buzz/server.ts b/external_plugins/buzz/server.ts
-new file mode 100644
-index 0000000000000000000000000000000000000000..0666dcf4a1fe6123b98a7e9c227ccd5d23e89a8b
---- /dev/null
-+++ b/external_plugins/buzz/server.ts
-@@ -0,0 +1,292 @@
-+#!/usr/bin/env bun
-+import { Server } from '@modelcontextprotocol/sdk/server/index.js'
-+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
-+import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
-+import { connect, type Socket } from 'net'
-+
-+const SOCKET = process.env.HEX_HUB
-+const THREAD = process.env.HEX_CHANNEL?.startsWith('plugin:buzz@') ? process.env.HEX_THREAD : undefined
-+
-+const mcp = new Server(
-+  { name: 'buzz', version: '1.0.0' },
-+  {
-+    capabilities: { tools: {}, experimental: { 'claude/channel': {} } },
-+    instructions: [
-+      'The sender reads Buzz, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat. Nobody watches this terminal either, so the report a background job ends with goes to them as a reply: what they need to know and act on. Once it\'s sent, end the turn without repeating it here.',
-+      '',
-+      'This session is one Buzz thread or direct message, the place for deeper work. Buzz renders Markdown, so answers can be longer and structured: headings, lists, and code blocks with a language. Its messages arrive as <channel source="buzz" chat_id="..." message_id="..." user="..." ts="...">, and everything you send with these tools lands back in that same thread. If the tag has new_thread="true", name this thread with rename_thread. If you were tagged into a thread that was already going, reply_to_* is the message it hangs off ("(tagged you)" alone means: read that message) and fetch_messages shows the rest. In a forum channel each post is its own thread: comments on it arrive here, and your replies post as comments on it. If the tag has attachment_count, the attachments attribute lists name/type/size — call download_attachment(message_id) to fetch them. If the tag has reply_to_message_id, the sender replied to that earlier message: reply_to_text is its text and reply_to_attachments lists its files (download_attachment with that id). edited="true" means the sender edited the message with that message_id and this is its new text. A reaction arrives as "(reaction: 👍)", or "(reaction removed: 👍)" with reaction_removed="true", with reaction_to_message_id, reaction_to_user and reaction_to_text naming the message it is on. deleted="true" means the sender deleted the message with that message_id; deleted_text is what it said. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply.',
-+      '',
-+      'reply accepts file paths (files: ["/abs/path.png"]) for attachments, and buttons (up to 10 short labels) to offer choices the user taps: a tap arrives with button="true" and button_message_id, and the chosen label as its text. Use react to add emoji reactions (remove: true takes yours off), edit_message for interim progress updates, and delete_message to take back a message you sent. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',
-+      '',
-+      'Each channel has one shared canvas, a Markdown document the user opens from the channel\'s details: canvas() reads it with its revision, and canvas(text, revision) replaces it, refused if someone changed it since that revision. presence tells you whether the user is online, away or offline.',
-+      '',
-+      'new_thread opens another thread with its own fresh session and hands it your prompt. Use it for work the user will want to follow or talk to on its own. handoff moves this whole conversation to another app, such as telegram, when the user asks: you stop here and continue there with your memory.',
-+      '',
-+      "fetch_messages pulls real Buzz history, from this thread by default. The tag's channel attribute names the channel this thread is in: fetch_messages(channel) reads that channel's top-level messages, a message with a thread shows its reply count, and fetch_messages(thread: that message's id) reads the thread. When the user refers to earlier work or talk in the channel, read it rather than saying you can't see it. search_messages finds older messages by their words.",
-+    ].join('\n'),
-+  },
-+)
-+
-+const titleProperty = { type: 'string', description: 'One word, like a chat name ("Anchors", "Frontier").' }
-+
-+mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
-+  tools: [
-+    {
-+      name: 'reply',
-+      _meta: { 'anthropic/alwaysLoad': true },
-+      description: 'Reply in this Buzz thread, or post in another one by name. Optionally pass reply_to (message_id) for threading, and files (absolute paths) to attach images or other files.',
-+      inputSchema: {
-+        type: 'object',
-+        properties: {
-+          text: { type: 'string' },
-+          thread: { type: 'string', description: 'Thread name to post in instead of this thread.' },
-+          reply_to: {
-+            type: 'string',
-+            description: 'Message ID to thread under. Use message_id from the inbound <channel> block, or an id from fetch_messages.',
-+          },
-+          files: {
-+            type: 'array',
-+            items: { type: 'string' },
-+            description: 'Absolute file paths to attach: images, MP4 video, PDFs or other files, but not audio. Max 100MB each.',
-+          },
-+          buttons: {
-+            type: 'array',
-+            items: { type: 'string' },
-+            description: 'Choices the user can tap, at most 10, like ["Yes", "No"]. They show as a numbered list under the text.',
-+          },
-+        },
-+        required: ['text'],
-+      },
-+    },
-+    {
-+      name: 'react',
-+      _meta: { 'anthropic/alwaysLoad': true },
-+      description: 'Add an emoji reaction to a Buzz message, or take yours off.',
-+      inputSchema: {
-+        type: 'object',
-+        properties: {
-+          message_id: { type: 'string' },
-+          emoji: { type: 'string' },
-+          remove: { type: 'boolean', description: 'Take your reaction with this emoji off instead.' },
-+        },
-+        required: ['message_id', 'emoji'],
-+      },
-+    },
-+    {
-+      name: 'delete_message',
-+      description: 'Delete a message the bot sent.',
-+      inputSchema: {
-+        type: 'object',
-+        properties: {
-+          message_id: { type: 'string' },
-+        },
-+        required: ['message_id'],
-+      },
-+    },
-+    {
-+      name: 'edit_message',
-+      description: 'Edit a message the bot previously sent. Useful for interim progress updates. Edits don\'t trigger push notifications — send a new reply when a long task completes so the user\'s device pings.',
-+      inputSchema: {
-+        type: 'object',
-+        properties: {
-+          message_id: { type: 'string' },
-+          text: { type: 'string' },
-+        },
-+        required: ['message_id', 'text'],
-+      },
-+    },
-+    {
-+      name: 'download_attachment',
-+      description: 'Download attachments from a message in this thread to the local inbox. Use after the inbound meta or fetch_messages shows a message has attachments. Returns file paths ready to Read.',
-+      inputSchema: {
-+        type: 'object',
-+        properties: {
-+          message_id: { type: 'string' },
-+        },
-+        required: ['message_id'],
-+      },
-+    },
-+    {
-+      name: 'fetch_messages',
-+      description: 'Fetch recent messages from this thread, or from a channel or another thread. Returns oldest-first with message IDs. In a channel, a message that has a thread shows its reply count and last reply; pass its id as thread to read the thread.',
-+      inputSchema: {
-+        type: 'object',
-+        properties: {
-+          channel: { type: 'string', description: 'Channel to read instead of this thread, by name ("open-source") or id.' },
-+          thread: { type: 'string', description: 'Thread to read instead of this thread: the id of the message it hangs off, or its name.' },
-+          before: { type: 'string', description: 'Message ID: only messages older than it. Pass the oldest ID you have to page back.' },
-+          limit: { type: 'number', description: 'Max messages (default 20, max 100).' },
-+        },
-+      },
-+    },
-+    {
-+      name: 'search_messages',
-+      description: 'Search the Buzz channels you are in for messages containing words, best matches first. Each row names its channel, and the thread a reply belongs to, for fetch_messages.',
-+      inputSchema: {
-+        type: 'object',
-+        properties: {
-+          query: { type: 'string' },
-+          channel: { type: 'string', description: 'Only search this channel, by name or id.' },
-+          limit: { type: 'number', description: 'Max messages (default 20, max 100).' },
-+        },
-+        required: ['query'],
-+      },
-+    },
-+    {
-+      name: 'canvas',
-+      description: 'Read this channel\'s canvas, or replace it by passing text. Reading returns its Markdown and revision.',
-+      inputSchema: {
-+        type: 'object',
-+        properties: {
-+          text: { type: 'string', description: 'The whole new canvas, in Markdown.' },
-+          revision: { type: 'string', description: 'The revision you read: the save is refused if the canvas changed since.' },
-+          channel: { type: 'string', description: 'Channel whose canvas to use instead of this one, by name or id.' },
-+        },
-+      },
-+    },
-+    {
-+      name: 'presence',
-+      description: 'Whether the user is online, away or offline in Buzz right now.',
-+      inputSchema: { type: 'object', properties: {} },
-+    },
-+    {
-+      name: 'list_channels',
-+      description: 'List the Buzz channels you are in, with their IDs. Direct messages are marked.',
-+      inputSchema: { type: 'object', properties: {} },
-+    },
-+    {
-+      name: 'create_channel',
-+      description: 'Create a Buzz channel. You own it and the user is added to it, so it shows up for them; open threads in it with new_thread.',
-+      inputSchema: {
-+        type: 'object',
-+        properties: {
-+          name: { type: 'string', description: 'Channel name, like "research" or "open source".' },
-+          about: { type: 'string', description: 'One line on what the channel is for.' },
-+          type: { type: 'string', enum: ['stream', 'forum'], description: 'stream (default): a chat like #general. forum: every thread is a post.' },
-+          private: { type: 'boolean', description: 'Only members can see it. Default: open to the workspace.' },
-+        },
-+        required: ['name'],
-+      },
-+    },
-+    {
-+      name: 'rename_thread',
-+      description: 'Name this thread. Buzz threads have no titles, so the name is for your thread list and handoffs; a thread you opened with new_thread also shows it as its first message.',
-+      inputSchema: {
-+        type: 'object',
-+        properties: {
-+          title: titleProperty,
-+        },
-+        required: ['title'],
-+      },
-+    },
-+    {
-+      name: 'close_thread',
-+      description: 'Close a thread whose work is done and stop its session once it is idle. Defaults to this thread. Tagging the bot in it again starts a fresh session.',
-+      inputSchema: {
-+        type: 'object',
-+        properties: {
-+          thread: { type: 'string', description: 'Thread name to close instead of this thread.' },
-+        },
-+      },
-+    },
-+    {
-+      name: 'new_thread',
-+      description: 'Open a new thread, start a fresh session for it, and give that session the prompt as its first message. The title is the thread\'s first message in Buzz.',
-+      inputSchema: {
-+        type: 'object',
-+        properties: {
-+          title: titleProperty,
-+          prompt: { type: 'string', description: "The user's request and the context the new session can't find itself: it starts from this prompt alone." },
-+          about: { type: 'string', description: 'One line the user sees first in the new thread, saying what it is for and where it came from.' },
-+          channel: { type: 'string', description: 'Channel to open it in, by name. Defaults to this thread\'s channel.' },
-+        },
-+        required: ['title', 'prompt', 'about'],
-+      },
-+    },
-+    {
-+      name: 'handoff',
-+      description: 'Move this conversation to another app when the user asks. It opens a thread there, and this session stops here once the turn ends and resumes there with its full memory. The title defaults to this thread\'s name.',
-+      inputSchema: {
-+        type: 'object',
-+        properties: {
-+          to: { type: 'string', enum: ['telegram', 'discord'] },
-+          title: titleProperty,
-+        },
-+        required: ['to'],
-+      },
-+    },
-+  ],
-+}))
-+
-+let hub: Socket | undefined
-+let nextId = 0
-+const pending = new Map<number, { resolve: (text: string) => void; reject: (error: Error) => void }>()
-+
-+function request(tool: string, args: Record<string, unknown>): Promise<string> {
-+  if (!THREAD) return Promise.reject(new Error('this session is not bound to a Buzz thread (HEX_THREAD is unset)'))
-+  if (!hub) return Promise.reject(new Error('the Buzz hub is not running'))
-+  const id = ++nextId
-+  const socket = hub
-+  return new Promise((resolve, reject) => {
-+    pending.set(id, { resolve, reject })
-+    socket.write(JSON.stringify({ type: 'call', id, tool, args }) + '\n')
-+  })
-+}
-+
-+mcp.setRequestHandler(CallToolRequestSchema, async req => {
-+  try {
-+    const text = await request(req.params.name, req.params.arguments ?? {})
-+    return { content: [{ type: 'text', text }] }
-+  } catch (err) {
-+    const msg = err instanceof Error ? err.message : String(err)
-+    return { content: [{ type: 'text', text: `${req.params.name} failed: ${msg}` }], isError: true }
-+  }
-+})
-+
-+function connectHub(): void {
-+  const socket = connect(SOCKET!)
-+  let buffer = ''
-+  socket.setEncoding('utf8')
-+  socket.on('connect', () => {
-+    hub = socket
-+    // Claude Code starts listening for channel notifications ~30ms after its last
-+    // request to this server (tools/list) and never signals it; notifications
-+    // before that are dropped. Saying hello flushes queued messages, so wait.
-+    setTimeout(() => socket.write(JSON.stringify({ type: 'hello', thread: THREAD, session: process.env.CLAUDE_CODE_SESSION_ID }) + '\n'), 1000)
-+  })
-+  socket.on('data', (chunk: string) => {
-+    buffer += chunk
-+    for (let end = buffer.indexOf('\n'); end >= 0; end = buffer.indexOf('\n')) {
-+      const event = JSON.parse(buffer.slice(0, end))
-+      buffer = buffer.slice(end + 1)
-+      if (event.type === 'inbound') {
-+        mcp.notification({
-+          method: 'notifications/claude/channel',
-+          params: { content: event.content, meta: event.meta },
-+        }).catch(err => process.stderr.write(`buzz channel: failed to deliver inbound to Claude: ${err}\n`))
-+      }
-+      if (event.type === 'result') {
-+        const waiter = pending.get(event.id)
-+        pending.delete(event.id)
-+        if (event.error) waiter?.reject(new Error(event.error))
-+        else waiter?.resolve(event.text)
-+      }
-+    }
-+  })
-+  socket.on('close', () => {
-+    if (hub === socket) hub = undefined
-+    for (const waiter of pending.values()) waiter.reject(new Error('the Buzz hub disconnected'))
-+    pending.clear()
-+    setTimeout(connectHub, 2000)
-+  })
-+  socket.on('error', () => {})
-+}
-+
-+mcp.oninitialized = () => {
-+  if (THREAD && SOCKET) connectHub()
-+}
-+
-+await mcp.connect(new StdioServerTransport())
-+
-+process.stdin.on('end', () => process.exit(0))
-+process.stdin.on('close', () => process.exit(0))

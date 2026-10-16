@@ -4,21 +4,22 @@ id: telegram-topics
 summary: Rework the Telegram channel so every forum topic in a group is its own Claude Code session, through the thread hub.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: telegram-topics.patch
-patch_sha256: be4b1369a0fad5a08c63f2da0d246f69f1f3fab9866a81d7a6cb57714532943c
+patch_sha256: d6f172bf93413ff96b57a0ee42c193676e2330e09e73444d70b5a51a2702d365
 ---
 
 ## Intent
 
 Split upstream's single-session `server.ts` in two, so one bot connection
-serves a session per forum topic through `hub/`:
+serves a session per forum topic through `hub/`, and no process runs per session:
 
 - `bot.ts` takes upstream's bot half: polling, the allowlist, attachments
   and the Telegram calls. It runs in the hub service (`hub/serve.ts`), embeds
   the hub, and maps each forum topic, or a plain chat, to a thread.
-- `server.ts` keeps upstream's tools and instructions as the channel every
-  session loads. It learns its thread and its hub's socket from the session's
-  env (`HEX_THREAD`, `HEX_HUB`), connects only when
-  `HEX_CHANNEL` names this plugin, and forwards its calls there.
+- `channel.ts` keeps upstream's tools and instructions as the channel the hub
+  serves every session over HTTP. `.mcp.json` points the session there
+  (`HEX_PORT`, 8789 by default) with its `HEX_CHANNEL` and `HEX_THREAD` in
+  headers, in place of upstream's `bun server.ts`: Claude Code never restarts
+  a stdio server that dies, and reconnects to an HTTP one.
 
 On top of upstream:
 
@@ -101,9 +102,9 @@ On top of upstream:
    they take no `chat_id`.
 3. Messages to a forum's General go without a topic id; only chat actions
    use topic 1, which Telegram needs to show typing inside General.
-4. A session says hello a second after connecting: Claude Code starts
-   listening for channel notifications about 30ms after its last request to
-   the server and never signals it.
+4. A session's channel opens a second after it lists the tools: Claude Code
+   starts listening for channel notifications some tens of milliseconds after
+   that and never signals it.
 5. Deliberately dropped from upstream, never ported back: pairing and
    `/telegram:access` (single user; `access.json` holds `allowFrom`), bot
    commands, upstream's permission relay to every allowlisted DM (prompts go
@@ -115,7 +116,7 @@ On top of upstream:
 
 ## Verification
 
-Both halves build and the hub and Telegram tests pass. Run `scripts/verify`.
+The bot builds, `.mcp.json` is an HTTP server, and the hub and Telegram tests pass. Run `scripts/verify`.
 
 ## Removal
 

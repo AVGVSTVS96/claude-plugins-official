@@ -4,7 +4,7 @@ A channel that serves the agent to [T3 Code](https://github.com/pingdotgg/t3code
 
 - `bot.ts` runs in the hub service (`bun hub/serve.ts`) next to Telegram, Discord and Buzz. It embeds the hub and serves ACP on `acp.sock`: `session/new` opens a thread in the request's `cwd`, `session/prompt` delivers the message and streams the turn back, `session/cancel` or T3 quitting mid-turn stops it, `session/resume` picks a thread up again after T3 restarts, and `session/set_config_option` sets the thread's model and effort from T3's pickers.
 - `transcript.ts` turns a session's Claude Code transcript into ACP `session/update` notifications: text, thinking, tool calls and their results. A turn ends when the session's work does: background agents keep it open, and the turns their results start stream into it, until a Stop hook reports no background agent still working.
-- `server.ts` is the channel each session loads. It only delivers T3's messages: the session's own output is what T3 shows, so it has no reply tool.
+- `channel.ts` is the channel the hub serves each session over HTTP (`.mcp.json`). It only delivers T3's messages: the session's own output is what T3 shows, so it has no reply tool.
 - `acp.ts` is what T3 starts. It relays stdio to `acp.sock`, so T3 reaches the agent that's already running instead of starting one.
 
 State lives in `~/.claude/channels/hex/t3/` (or `T3_STATE_DIR`): `threads.json`, the sockets, and `inbox/`, where pasted images and files land for the session to read.

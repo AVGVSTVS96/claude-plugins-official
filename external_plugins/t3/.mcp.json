@@ -1,8 +1,12 @@
 {
   "mcpServers": {
     "t3": {
-      "command": "bun",
-      "args": ["run", "--cwd", "${CLAUDE_PLUGIN_ROOT}", "--shell=bun", "--silent", "start"]
+      "type": "http",
+      "url": "http://127.0.0.1:${HEX_PORT:-8789}/t3",
+      "headers": {
+        "X-Hex-Channel": "${HEX_CHANNEL:-}",
+        "X-Hex-Thread": "${HEX_THREAD:-}"
+      }
     }
   }
 }

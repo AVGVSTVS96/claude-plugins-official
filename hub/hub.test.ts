@@ -3,11 +3,12 @@ import { connect, createServer, type Socket } from 'net'
 import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, chmodSync, existsSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { free, startHub, tappable, transcribe, type Message, type Permission } from './hub.ts'
+import { free, startHub, tappable, transcribe, type ChannelServer, type Message, type Permission } from './hub.ts'
 
 const CHANNEL = 'plugin:telegram@hex'
 const SESSION = '0a1b2c3d-0000-4000-8000-000000000000'
 const message: Message = { content: 'hi', meta: { chat_id: '1' } }
+const SERVER: ChannelServer = { title: 'Telegram', instructions: 'Messages arrive as <channel source="telegram">.', tools: [{ name: 'reply', description: 'Reply.', inputSchema: { type: 'object' } }], permission: true }
 // Above Linux's highest pid, so a session's process is always already gone.
 const EXITED = 4_194_305
 
@@ -17,6 +18,8 @@ let states: [string, boolean][]
 let failures: [string, string][]
 let prompts: [string, Permission][]
 const sockets: Socket[] = []
+const streams: AbortController[] = []
+let ids = 0
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'hub-'))
@@ -35,11 +38,12 @@ exit 0
 
 afterEach(() => {
   for (const socket of sockets.splice(0)) socket.destroy()
+  for (const stream of streams.splice(0)) stream.abort()
   hub?.close()
   process.env.PATH = process.env.PATH!.split(':').slice(1).join(':')
 })
 
-function start(options: { main?: string; general?: boolean; idleStop?: number; cacheWarm?: number; compactAbove?: number; relaunch?: number; launcher?: string; registry?: object; agents?: object[]; fresh?: (thread: string) => boolean; bind?: (thread: string) => Record<string, string> } = {}) {
+function start(options: { main?: string; general?: boolean; idleStop?: number; cacheWarm?: number; compactAbove?: number; reconnect?: number; listening?: number; launcher?: string; registry?: object; agents?: object[]; fresh?: (thread: string) => boolean; bind?: (thread: string) => Record<string, string> } = {}) {
   if (options.registry) writeFileSync(join(dir, 'threads.json'), JSON.stringify(options.registry))
   if (options.agents) writeFileSync(join(dir, 'agents'), JSON.stringify(options.agents))
   const seen: [string, boolean][] = (states = [])
@@ -48,6 +52,9 @@ function start(options: { main?: string; general?: boolean; idleStop?: number; c
   hub = startHub({
     stateDir: dir,
     channel: CHANNEL,
+    server: SERVER,
+    port: 0,
+    listening: options.listening ?? 0,
     main: options.main,
     general: options.general,
     call: async (thread, tool) => `${tool} in ${thread}`,
@@ -60,7 +67,7 @@ function start(options: { main?: string; general?: boolean; idleStop?: number; c
     idleStop: options.idleStop,
     cacheWarm: options.cacheWarm,
     compactAbove: options.compactAbove,
-    relaunch: options.relaunch,
+    reconnect: options.reconnect,
     launcher: options.launcher,
     fresh: options.fresh,
     bind: options.bind,
@@ -85,7 +92,71 @@ function launched() {
   return until(() => calls().find(args => args[0] === '--bg'))
 }
 
+// A session connecting the way Claude Code does over HTTP: it initializes, opens the stream its
+// messages arrive on, and lists the tools. Claude's job record has its id from the start.
 async function session(thread: string, id = SESSION) {
+  writeFileSync(join(dir, 'jobs', 'job12345', 'state.json'), JSON.stringify({ state: 'working', sessionId: id }))
+  const line = http(thread)
+  await line.initialize()
+  await line.open()
+  await line.rpc('tools/list')
+  await Bun.sleep(10)
+  return line
+}
+
+// Claude Code's side of one connection to the hub over HTTP, a step at a time.
+function http(thread?: string, extra: Record<string, string> = {}) {
+  const url = `http://127.0.0.1:${hub.port}/telegram`
+  const headers = { ...(thread && { 'x-hex-channel': CHANNEL, 'x-hex-thread': thread }), 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...extra }
+  const received: any[] = []
+  const stream = new AbortController()
+  streams.push(stream)
+  let mcp = ''
+  const post = (body: object) => fetch(url, { method: 'POST', headers: { ...headers, ...(mcp && { 'mcp-session-id': mcp }) }, body: JSON.stringify({ jsonrpc: '2.0', ...body }) })
+  const rpc = async (method: string, params: object = {}) => (await post({ id: ++ids, method, params })).json() as Promise<any>
+  return {
+    received,
+    post,
+    rpc,
+    initialize: async () => (mcp = (await post({ id: ++ids, method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'test', version: '0' } } })).headers.get('mcp-session-id')!),
+    open: async (adopted?: string) => {
+      if (adopted) mcp = adopted
+      const response = await fetch(url, { headers: { ...headers, 'mcp-session-id': mcp }, signal: stream.signal })
+      void listen(response, received)
+      return response
+    },
+    close: () => stream.abort(),
+    call: async (tool: string, args: object = {}) => (await rpc('tools/call', { name: tool, arguments: args })).result,
+    ask: (request: object) => post({ method: 'notifications/claude/channel/permission_request', params: request }),
+    send: (payload: object) => hook(payload),
+  }
+}
+
+async function listen(response: Response, received: any[]) {
+  let buffer = ''
+  try {
+    for await (const chunk of response.body!) {
+      buffer += new TextDecoder().decode(chunk)
+      for (let end = buffer.indexOf('\n\n'); end >= 0; end = buffer.indexOf('\n\n')) {
+        const data = buffer.slice(0, end).split('\n').find(line => line.startsWith('data: '))
+        buffer = buffer.slice(end + 2)
+        if (!data) continue
+        const { method, params } = JSON.parse(data.slice(6))
+        received.push({ type: method === 'notifications/claude/channel' ? 'inbound' : 'permission', ...params })
+      }
+    }
+  } catch {}
+}
+
+// A line to hub.sock, the way a session's hooks and hex's own tools reach the hub.
+function hook(payload: object) {
+  const socket = connect(join(dir, 'hub.sock'))
+  sockets.push(socket)
+  socket.on('connect', () => socket.end(JSON.stringify(payload) + '\n'))
+}
+
+// A session whose plugin runs as its own process and reaches the hub through hub.sock.
+async function plugin(thread: string, id = SESSION) {
   const socket = connect(join(dir, 'hub.sock'))
   sockets.push(socket)
   const received: any[] = []
@@ -100,6 +171,13 @@ async function session(thread: string, id = SESSION) {
   await new Promise(resolve => socket.on('connect', resolve))
   socket.write(JSON.stringify({ type: 'hello', thread, session: id }) + '\n')
   return { socket, received, send: (payload: object) => socket.write(JSON.stringify(payload) + '\n') }
+}
+
+// Claude's record of a background job, with the flags it restarts with: the thread's binding is in them.
+function bound(job: string, thread: string, id = SESSION, channel = CHANNEL) {
+  mkdirSync(join(dir, 'jobs', job), { recursive: true })
+  const settings = JSON.stringify({ enabledPlugins: {}, env: { HEX_CHANNEL: channel, HEX_THREAD: thread } })
+  writeFileSync(join(dir, 'jobs', job, 'state.json'), JSON.stringify({ state: 'working', sessionId: id, respawnFlags: ['--channels', channel, '--settings', settings] }))
 }
 
 function saved(id = SESSION, folder = join(dir, 'hex')) {
@@ -140,7 +218,7 @@ test('a message for a new thread starts a session bound to that thread', async (
   const args = await launched()
   expect(args.slice(0, 5)).toEqual(['--bg', '--channels', CHANNEL, '--name', 'Desk anchors'])
   expect(args).not.toContain('--resume')
-  expect(settingsOf(args).env).toEqual({ HEX_CHANNEL: CHANNEL, HEX_THREAD: 'chat:7', HEX_HUB: join(dir, 'hub.sock') })
+  expect(settingsOf(args).env).toEqual({ HEX_CHANNEL: CHANNEL, HEX_THREAD: 'chat:7', HEX_HUB: join(dir, 'hub.sock'), HEX_PORT: String(hub.port) })
   expect(states).toEqual([['chat:7', true]])
 })
 
@@ -167,7 +245,7 @@ test('a stopped thread has its job record cleared, then resumes under the same i
   start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } }, agents: [] })
   hub.deliver('chat:7', 'Desk anchors', message)
   const args = await launched()
-  expect(calls().slice(0, 2)).toEqual([['agents', '--json'], ['rm', SESSION.slice(0, 8)]])
+  expect(calls().filter(args => args[0] !== 'agents')[0]).toEqual(['rm', SESSION.slice(0, 8)])
   expect(args).toContain('--resume')
   expect(args[args.indexOf('--resume') + 1]).toBe(SESSION)
 })
@@ -177,7 +255,7 @@ test('a thread whose session is still running is never relaunched', async () => 
   hub.deliver('chat:7', 'Desk anchors', message)
   await until(() => calls().length)
   await Bun.sleep(100)
-  expect(calls()).toEqual([['agents', '--json']])
+  expect(calls().every(args => args[0] === 'agents')).toBe(true)
   const { received } = await session('chat:7')
   await until(() => received.length)
   expect(received[0].content).toBe('hi')
@@ -204,7 +282,7 @@ test('a running main thread is left to reconnect, and gets its messages when it 
   hub.deliver('chat', 'hex', message)
   await until(() => calls().length)
   await Bun.sleep(100)
-  expect(calls()).toEqual([['agents', '--json']])
+  expect(calls().every(args => args[0] === 'agents')).toBe(true)
   expect(registry().chat.name).toBe('hex')
   const { received } = await session('chat')
   await until(() => received.length)
@@ -212,13 +290,13 @@ test('a running main thread is left to reconnect, and gets its messages when it 
 })
 
 test('a main thread whose session is gone is resumed again, and is never stopped for being idle', async () => {
-  start({ main: 'chat', registry: { chat: { name: 'hex', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42 }], relaunch: 50, idleStop: 20 })
-  const { socket, send } = await session('chat')
+  start({ main: 'chat', registry: { chat: { name: 'hex', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42 }], reconnect: 50, idleStop: 20 })
+  const { close, send } = await session('chat')
   send({ type: 'state', thread: 'chat', busy: false })
   await Bun.sleep(100)
   expect(calls().filter(args => args[0] === 'stop')).toEqual([])
   writeFileSync(join(dir, 'agents'), '[]')
-  socket.destroy()
+  close()
   const args = await launched()
   expect(args[args.indexOf('--resume') + 1]).toBe(SESSION)
 })
@@ -227,17 +305,17 @@ test('a session that dies before its conversation is saved leaves the thread on 
   const OLD = SESSION
   const NEW = '4460ed71-0000-4000-8000-000000000000'
   saved(OLD)
-  start({ main: 'chat', registry: { chat: { name: 'hex', session: OLD } }, agents: [], relaunch: 50 })
+  start({ main: 'chat', registry: { chat: { name: 'hex', session: OLD } }, agents: [], reconnect: 50 })
   await launched()
-  const { socket } = await session('chat', NEW)
+  const { close } = await session('chat', NEW)
   await Bun.sleep(50)
   expect(registry().chat.session).toBe(OLD)
-  socket.destroy()
+  close()
   await until(() => calls().filter(args => args[0] === '--bg').length === 2)
   const args = calls().filter(args => args[0] === '--bg')[1]!
   expect(args[args.indexOf('--resume') + 1]).toBe(OLD)
   const back = await session('chat', OLD)
-  back.socket.destroy()
+  back.close()
   await until(() => calls().filter(args => args[0] === '--bg').length === 3)
   const next = await session('chat', NEW)
   saved(NEW)
@@ -249,10 +327,12 @@ test('a session that dies before its conversation is saved leaves the thread on 
 
 test('tool calls act on the calling session\'s own thread', async () => {
   start()
-  const { send, received } = await session('chat:9')
-  send({ type: 'call', id: 1, tool: 'reply', args: { text: 'yo' } })
-  await until(() => received.length)
-  expect(received[0]).toEqual({ type: 'result', id: 1, text: 'reply in chat:9' })
+  const { call } = await session('chat:9')
+  expect(await call('reply', { text: 'yo' })).toEqual({ content: [{ type: 'text', text: 'reply in chat:9' }] })
+  const legacy = await plugin('chat:10')
+  legacy.send({ type: 'call', id: 1, tool: 'reply', args: { text: 'yo' } })
+  await until(() => legacy.received.length)
+  expect(legacy.received[0]).toEqual({ type: 'result', id: 1, text: 'reply in chat:10' })
 })
 
 test('a permission prompt reaches the client with its thread, and the answer goes back to that session alone', async () => {
@@ -260,7 +340,7 @@ test('a permission prompt reaches the client with its thread, and the answer goe
   const desk = await session('chat:9')
   const other = await session('chat:10')
   const request = { request_id: 'abcde', tool_name: 'Bash', description: 'List files', input_preview: '{"command":"ls"}' }
-  desk.send({ type: 'permission_request', ...request })
+  await desk.ask(request)
   const [thread, asked] = await until(() => prompts[0])
   expect(thread).toBe('chat:9')
   expect(asked).toMatchObject(request)
@@ -270,9 +350,143 @@ test('a permission prompt reaches the client with its thread, and the answer goe
   expect(other.received).toEqual([])
 })
 
+test('a dropped channel that comes back while Claude Code reconnects it leaves its session running', async () => {
+  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } }, reconnect: 100 })
+  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid: 42, startedAt: Date.now() }]))
+  const first = await session('chat:7')
+  first.close()
+  await Bun.sleep(30)
+  const back = await session('chat:7')
+  await Bun.sleep(200)
+  expect(calls().filter(args => args[0] !== 'agents')).toEqual([])
+  hub.deliver('chat:7', 'Desk anchors', message)
+  await until(() => back.received.length)
+})
+
+test('a session still running once its channel stays gone restarts in place, and gets what waited when it reconnects', async () => {
+  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } }, reconnect: 50 })
+  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid: 42, startedAt: Date.now() }]))
+  const { close } = await session('chat:7')
+  close()
+  expect(await until(() => calls().find(args => args[0] === 'respawn'))).toEqual(['respawn', SESSION.slice(0, 8)])
+  hub.deliver('chat:7', 'Desk anchors', message)
+  const back = await session('chat:7')
+  await until(() => back.received.length)
+  expect(back.received[0].content).toBe('hi')
+  await Bun.sleep(150)
+  expect(calls().filter(args => args[0] === 'respawn').length).toBe(1)
+  expect(failures).toEqual([])
+})
+
+test('a session that restarts in place and still gets no channel is reported, not restarted again', async () => {
+  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } }, reconnect: 50 })
+  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid: 42, startedAt: Date.now() }]))
+  const { close } = await session('chat:7')
+  close()
+  await until(() => calls().find(args => args[0] === 'respawn'))
+  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid: 43, startedAt: Date.now() - 10 }]))
+  expect(await until(() => failures[0])).toEqual(['chat:7', 'its session runs, but its channel never connects'])
+  expect(calls().filter(args => args[0] === 'respawn').length).toBe(1)
+})
+
+test('a session that outlived the hub and never reconnects restarts in place', async () => {
+  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, startedAt: 1 }], reconnect: 50 })
+  expect(await until(() => calls().find(args => args[0] === 'respawn'))).toEqual(['respawn', SESSION.slice(0, 8)])
+})
+
+test('a session found by the job it was started for restarts in place, though its conversation is not saved', async () => {
+  bound('job99999', 'chat:7', '0a1b2c3d-0000-4000-8000-000000000009')
+  start({ registry: { 'chat:7': { name: 'Desk anchors' } }, agents: [{ id: 'job99999', sessionId: '0a1b2c3d-0000-4000-8000-000000000009', pid: 42, startedAt: 1 }], reconnect: 50 })
+  expect(await until(() => calls().find(args => args[0] === 'respawn'))).toEqual(['respawn', 'job99999'])
+})
+
+test('a message for a thread whose new session runs but has no conversation saved yet waits for that session instead of starting another', async () => {
+  const NEW = '0a1b2c3d-0000-4000-8000-000000000009'
+  bound('job99999', 'chat:7', NEW)
+  start({ registry: { 'chat:7': { name: 'Desk anchors' } }, agents: [{ id: 'job99999', sessionId: NEW, pid: 42, startedAt: Date.now() + 60_000 }], reconnect: 60_000 })
+  hub.deliver('chat:7', 'Desk anchors', message)
+  await Bun.sleep(50)
+  const { received } = await session('chat:7', NEW)
+  await until(() => received.length)
+  expect(calls().some(args => args[0] === '--bg')).toBe(false)
+})
+
+test('a message for a running session with no channel waits for it, and starts it again once it has ended', async () => {
+  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, startedAt: Date.now() + 60_000 }], reconnect: 50 })
+  hub.deliver('chat:7', 'Desk anchors', message)
+  await Bun.sleep(30)
+  expect(calls().some(args => args[0] === '--bg')).toBe(false)
+  writeFileSync(join(dir, 'agents'), '[]')
+  const args = await launched()
+  expect(args[args.indexOf('--resume') + 1]).toBe(SESSION)
+  const { received } = await session('chat:7')
+  await until(() => received.length)
+  expect(received[0].content).toBe('hi')
+})
+
+test("a new session's channel opens a while after it has listed the tools, since Claude Code drops what comes before it listens", async () => {
+  start({ listening: 150 })
+  hub.deliver('chat:7', 'Desk anchors', message)
+  await launched()
+  writeFileSync(join(dir, 'jobs', 'job12345', 'state.json'), JSON.stringify({ state: 'working', sessionId: SESSION }))
+  const line = http('chat:7')
+  await line.initialize()
+  await line.open()
+  await Bun.sleep(50)
+  expect(line.received).toEqual([])
+  await line.rpc('tools/list')
+  await Bun.sleep(100)
+  expect(line.received).toEqual([])
+  await until(() => line.received.length)
+  expect(line.received).toEqual([{ type: 'inbound', ...message }])
+})
+
+test('a stream back from before the hub restarted carries on under its old id, without initializing again', async () => {
+  start()
+  const line = http('chat:7')
+  const response = await line.open(crypto.randomUUID())
+  expect(response.status).toBe(200)
+  await Bun.sleep(20)
+  hub.deliver('chat:7', 'Desk anchors', message)
+  await until(() => line.received.length)
+  expect(calls().some(args => args[0] === '--bg')).toBe(false)
+  expect(await line.call('reply', { text: 'yo' })).toEqual({ content: [{ type: 'text', text: 'reply in chat:7' }] })
+})
+
+test('the hub declines the newest protocol, whose sessions get no channel, and offers one that has it', async () => {
+  start()
+  const line = http('chat:7')
+  expect((await line.rpc('server/discover')).error.code).toBe(-32601)
+  const { result } = await line.rpc('initialize', { protocolVersion: '2026-07-28', capabilities: {}, clientInfo: { name: 'test', version: '0' } })
+  expect(result.protocolVersion).toBe('2025-11-25')
+  expect(result.capabilities.experimental).toEqual({ 'claude/channel': {}, 'claude/channel/permission': {} })
+  expect(result.instructions).toBe(SERVER.instructions)
+})
+
+test('a request from a web page, or by a name other than localhost, is refused', async () => {
+  start()
+  expect((await http('chat:7', { origin: 'https://example.com' }).post({ id: 1, method: 'ping' })).status).toBe(403)
+  expect((await http('chat:7', { host: 'example.com' }).post({ id: 1, method: 'ping' })).status).toBe(403)
+  expect((await http('chat:7').post({ id: 1, method: 'ping' })).status).toBe(200)
+})
+
+test("a session with no thread, or another channel's, gets no messages and acts on no thread", async () => {
+  start()
+  const unbound = http()
+  await unbound.initialize()
+  expect(await unbound.call('reply', { text: 'yo' })).toEqual({ content: [{ type: 'text', text: 'reply failed: this session is not bound to a Telegram thread (HEX_THREAD is unset)' }], isError: true })
+  const other = http(undefined, { 'x-hex-channel': 'plugin:discord@hex', 'x-hex-thread': 'chat:7' })
+  await other.initialize()
+  await other.open()
+  await other.rpc('tools/list')
+  hub.deliver('chat:7', 'Desk anchors', message)
+  await Bun.sleep(50)
+  expect(other.received).toEqual([])
+})
+
 test('busy and idle from session hooks reach the client, and a dropped session is idle', async () => {
   start()
-  const { socket } = await session('chat:9')
+  const { close } = await session('chat:9')
   const hook = (busy: boolean) => connect(join(dir, 'hub.sock')).on('connect', function () {
     this.end(JSON.stringify({ type: 'state', thread: 'chat:9', busy }) + '\n')
   })
@@ -280,7 +494,7 @@ test('busy and idle from session hooks reach the client, and a dropped session i
   await until(() => states.length === 1)
   hook(false)
   await until(() => states.length === 2)
-  socket.destroy()
+  close()
   await until(() => states.length === 3)
   expect(states).toEqual([['chat:9', true], ['chat:9', false], ['chat:9', false]])
 })
@@ -328,7 +542,7 @@ test('an idle thread with a big conversation compacts while its cache is warm, w
   first.send({ type: 'state', thread: 'chat:7', busy: false })
   expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
   writeFileSync(join(dir, 'agents'), '[]')
-  first.socket.destroy()
+  first.close()
   old.kill()
   const args = await launched()
   expect(args[args.indexOf('--resume') + 1]).toBe(SESSION)
@@ -356,9 +570,9 @@ test('an idle thread with a small conversation, or one leaving, stops without co
 
 test('the main thread compacts a big conversation before its cache goes cold, and otherwise keeps running', async () => {
   const old = Bun.spawn(['sleep', '30'])
-  start({ main: 'chat', cacheWarm: 50, compactAbove: 150_000, relaunch: 60_000, registry: { chat: { name: 'hex', session: SESSION } }, agents: [{ sessionId: SESSION, pid: old.pid, status: 'idle', startedAt: Date.now() + 60_000 }] })
+  start({ main: 'chat', cacheWarm: 50, compactAbove: 150_000, reconnect: 60_000, registry: { chat: { name: 'hex', session: SESSION } }, agents: [{ sessionId: SESSION, pid: old.pid, status: 'idle', startedAt: Date.now() + 60_000 }] })
   said(100_000)
-  const { send, socket } = await session('chat')
+  const { send, close } = await session('chat')
   send({ type: 'state', thread: 'chat', busy: false })
   await Bun.sleep(200)
   expect(calls().some(args => args[0] === 'stop')).toBe(false)
@@ -366,7 +580,7 @@ test('the main thread compacts a big conversation before its cache goes cold, an
   send({ type: 'state', thread: 'chat', busy: false })
   expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
   writeFileSync(join(dir, 'agents'), '[]')
-  socket.destroy()
+  close()
   old.kill()
   const args = await launched()
   expect(args[args.indexOf('--resume') + 1]).toBe(SESSION)
@@ -376,7 +590,7 @@ test('the main thread compacts a big conversation before its cache goes cold, an
 
 test('a bad line from a session is dropped, and the lines after it still work', async () => {
   start()
-  const { socket, received } = await session('chat:9')
+  const { socket, received } = await plugin('chat:9')
   socket.write('not json\nnull\n' + JSON.stringify({ type: 'call', id: 1, tool: 'reply', args: {} }) + '\n')
   await until(() => received.length)
   expect(received[0]).toEqual({ type: 'result', id: 1, text: 'reply in chat:9' })
@@ -450,12 +664,12 @@ test('a session that connects ends the watch, so a later failed state is ignored
 
 test('stopping a thread ends its session now, and its next message resumes it', async () => {
   start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } } })
-  const { socket, send } = await session('chat:7')
+  const { close, send } = await session('chat:7')
   send({ type: 'state', thread: 'chat:7', busy: true })
   await until(() => states.length)
   hub.stop('chat:7')
   expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
-  socket.destroy()
+  close()
   await until(() => states.length === 2)
   writeFileSync(join(dir, 'agents'), '[]')
   hub.deliver('chat:7', 'Desk anchors', message)
@@ -487,7 +701,7 @@ test('a fresh thread starts a new session instead of resuming its last, and says
   const args = await launched()
   expect(args).not.toContain('--resume')
   expect(calls().some(args => args[0] === 'rm')).toBe(false)
-  expect(settingsOf(args).env).toEqual({ HEX_CHANNEL: CHANNEL, HEX_THREAD: 'dm', HEX_HUB: join(dir, 'hub.sock'), HEX_FRESH: '1' })
+  expect(settingsOf(args).env).toEqual({ HEX_CHANNEL: CHANNEL, HEX_THREAD: 'dm', HEX_HUB: join(dir, 'hub.sock'), HEX_PORT: String(hub.port), HEX_FRESH: '1' })
   const NEXT = '0a1b2c3d-0000-4000-8000-000000000001'
   saved(NEXT)
   const { received } = await session('dm', NEXT)
@@ -529,8 +743,8 @@ test('a fresh thread keeps its session while it waits on a permission prompt or 
   expect(calls().some(args => args[0] === 'stop' || args[0] === '--bg')).toBe(false)
 })
 
-test('a thread that asks to renew starts over as a new session once its turn ends, without waiting out the main thread\'s relaunch delay', async () => {
-  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: EXITED, status: 'idle' }], relaunch: 60_000, fresh: () => true })
+test('a thread that asks to renew starts over as a new session once its turn ends', async () => {
+  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: EXITED, status: 'idle' }], reconnect: 60_000, fresh: () => true })
   const { send } = await session('voice')
   send({ type: 'state', thread: 'voice', busy: true })
   send({ type: 'renew', thread: 'voice' })
@@ -542,7 +756,7 @@ test('a thread that asks to renew starts over as a new session once its turn end
 })
 
 test('a renew waits out background agents the turn ended with, then starts over at the next idle', async () => {
-  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: EXITED, status: 'busy' }], relaunch: 60_000, fresh: () => true })
+  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: EXITED, status: 'busy' }], reconnect: 60_000, fresh: () => true })
   const { send } = await session('voice')
   send({ type: 'renew', thread: 'voice' })
   send({ type: 'state', thread: 'voice', busy: false, background: true })
@@ -554,7 +768,7 @@ test('a renew waits out background agents the turn ended with, then starts over 
 })
 
 test('a renew goes through at a rest the Stop hook reports, though Claude still calls the session busy (its status lags, and a running shell counts)', async () => {
-  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: EXITED, status: 'busy' }], relaunch: 60_000, fresh: () => true })
+  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: EXITED, status: 'busy' }], reconnect: 60_000, fresh: () => true })
   const { send } = await session('voice')
   send({ type: 'state', thread: 'voice', busy: true })
   send({ type: 'renew', thread: 'voice' })
@@ -572,13 +786,13 @@ test('a session older than the hub that runs a shell renews only once Claude rep
 })
 
 test('a call that comes while a renew is on its way waits for the new session to say hello', async () => {
-  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: EXITED, status: 'busy' }], relaunch: 60_000, fresh: () => true })
+  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: EXITED, status: 'busy' }], reconnect: 60_000, fresh: () => true })
   let through = false
   await hub.renewal('voice')
   const { send } = await session('voice')
   send({ type: 'state', thread: 'voice', busy: true })
   send({ type: 'renew', thread: 'voice' })
-  await until(() => calls().some(args => args[0] === 'agents'))
+  await Bun.sleep(50)
   void hub.renewal('voice').then(() => (through = true))
   send({ type: 'state', thread: 'voice', busy: false })
   await launched()
@@ -589,7 +803,7 @@ test('a call that comes while a renew is on its way waits for the new session to
 })
 
 test('a call waits for no renew held up by background agents, or called off by a call already in the session', async () => {
-  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'busy' }], relaunch: 60_000, fresh: () => true })
+  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'busy' }], reconnect: 60_000, fresh: () => true })
   let through = 0
   const { send } = await session('voice')
   send({ type: 'state', thread: 'voice', busy: true })
@@ -608,7 +822,7 @@ test('a call waits for no renew held up by background agents, or called off by a
 })
 
 test('a fresh main thread still running when the hub starts is left to reconnect instead of getting a second session', async () => {
-  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'idle' }], relaunch: 150, fresh: () => true })
+  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'idle' }], reconnect: 150, fresh: () => true })
   await Bun.sleep(50)
   await session('voice')
   await Bun.sleep(250)
@@ -616,7 +830,8 @@ test('a fresh main thread still running when the hub starts is left to reconnect
 })
 
 test('a fresh main thread whose newest session is still running but not yet saved is left to reconnect too', async () => {
-  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: '0a1b2c3d-0000-4000-8000-000000000009', pid: 43, name: 'hex', cwd: join(dir, 'hex') }], relaunch: 150, fresh: () => true })
+  bound('job99999', 'voice', '0a1b2c3d-0000-4000-8000-000000000009')
+  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ id: 'job99999', sessionId: '0a1b2c3d-0000-4000-8000-000000000009', pid: 43 }], reconnect: 150, fresh: () => true })
   await Bun.sleep(50)
   await session('voice', '0a1b2c3d-0000-4000-8000-000000000009')
   await Bun.sleep(250)
@@ -624,12 +839,12 @@ test('a fresh main thread whose newest session is still running but not yet save
 })
 
 test('a fresh main thread whose session is gone when the hub starts gets a new one at once', async () => {
-  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [], relaunch: 60_000, fresh: () => true })
+  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [], reconnect: 60_000, fresh: () => true })
   expect(await launched()).not.toContain('--resume')
 })
 
 test('a thread that asked to renew keeps running when it asks to keep before its turn ends (a new call started)', async () => {
-  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'idle' }], relaunch: 50, fresh: () => true })
+  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'idle' }], reconnect: 50, fresh: () => true })
   const { send } = await session('voice')
   send({ type: 'state', thread: 'voice', busy: true })
   send({ type: 'renew', thread: 'voice' })
@@ -652,7 +867,7 @@ test('a session older than the hub stops at its next rest, so its next message r
 
 test('a main thread whose session is older than the hub starts over as soon as it rests', async () => {
   const old = Bun.spawn(['sleep', '30'])
-  start({ main: 'chat', registry: { chat: { name: 'hex', session: SESSION } }, agents: [{ sessionId: SESSION, pid: old.pid, status: 'idle', startedAt: 1 }], relaunch: 60_000 })
+  start({ main: 'chat', registry: { chat: { name: 'hex', session: SESSION } }, agents: [{ sessionId: SESSION, pid: old.pid, status: 'idle', startedAt: 1 }], reconnect: 60_000 })
   await session('chat')
   expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
   writeFileSync(join(dir, 'agents'), '[]')
@@ -669,7 +884,7 @@ test('a session the hub started, or one younger than it, keeps running', async (
 })
 
 test('a voice session older than the hub waits out its call before starting over', async () => {
-  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'busy', startedAt: 1 }], relaunch: 60_000, fresh: () => true })
+  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'busy', startedAt: 1 }], reconnect: 60_000, fresh: () => true })
   const { send } = await session('voice')
   send({ type: 'keep', thread: 'voice' })
   await Bun.sleep(100)
@@ -683,7 +898,7 @@ test('a voice session older than the hub waits out its call before starting over
 })
 
 test('a restart waits for every call to hang up, or for its session to go', async () => {
-  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, relaunch: 60_000, fresh: () => true })
+  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, reconnect: 60_000, fresh: () => true })
   let freed = false
   await free()
   const first = await session('voice')
@@ -699,18 +914,18 @@ test('a restart waits for every call to hang up, or for its session to go', asyn
   second.send({ type: 'keep', thread: 'voice' })
   await Bun.sleep(50)
   void free().then(() => (freed = true))
-  second.socket.destroy()
+  second.close()
   await until(() => freed)
 })
 
 test('closing an idle thread stops its session right away, then forgets the thread', async () => {
   start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } } })
-  const { socket } = await session('chat:7')
+  const { close } = await session('chat:7')
   await Bun.sleep(50)
   void hub.retire('chat:7')
   expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
   expect(registry()['chat:7']).toBeDefined()
-  socket.destroy()
+  close()
   await until(() => !registry()['chat:7'])
 })
 
@@ -811,11 +1026,11 @@ exec claude "$@"
   hub.open('t3:1', 'project', undefined, project)
   await launched()
   saved(SESSION, project)
-  const { socket } = await session('t3:1')
+  const { close } = await session('t3:1')
   await until(() => existsSync(join(dir, 'threads.json')) && registry()['t3:1'])
   expect(registry()['t3:1']).toEqual({ name: 'project', cwd: project, session: SESSION })
   expect(hub.cwd('t3:1')).toBe(project)
-  socket.destroy()
+  close()
   await until(() => states.some(([thread, busy]) => thread === 't3:1' && !busy))
   hub.deliver('t3:1', 'project', message)
   await until(() => readFileSync(join(dir, 'cwd'), 'utf8').split('\n').length > 2)
@@ -835,7 +1050,7 @@ test('a thread in the hex folder keeps no folder of its own', async () => {
 
 test('releasing an idle thread stops its session, then forgets it once the socket closes', async () => {
   start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } } })
-  const { socket } = await session('chat:7')
+  const { close } = await session('chat:7')
   await Bun.sleep(50)
   let released: string | undefined
   void hub.release('chat:7').then(id => (released = id))
@@ -843,14 +1058,14 @@ test('releasing an idle thread stops its session, then forgets it once the socke
   await Bun.sleep(50)
   expect(released).toBeUndefined()
   expect(registry()['chat:7']).toBeDefined()
-  socket.destroy()
+  close()
   expect(await until(() => released)).toBe(SESSION)
   expect(registry()['chat:7']).toBeUndefined()
 })
 
 test('releasing a busy thread waits for its next idle', async () => {
   start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } } })
-  const { socket, send } = await session('chat:7')
+  const { close, send } = await session('chat:7')
   send({ type: 'state', thread: 'chat:7', busy: true })
   await until(() => states.length)
   let released: string | undefined
@@ -859,7 +1074,7 @@ test('releasing a busy thread waits for its next idle', async () => {
   expect(calls().some(args => args[0] === 'stop')).toBe(false)
   send({ type: 'state', thread: 'chat:7', busy: false })
   await until(() => calls().find(args => args[0] === 'stop'))
-  socket.destroy()
+  close()
   expect(await until(() => released)).toBe(SESSION)
   expect(registry()['chat:7']).toBeUndefined()
 })
@@ -881,7 +1096,7 @@ test('an adopted thread clears the old job record, then resumes its session with
   start({ agents: [] })
   hub.adopt('chat:7', 'Desk anchors', SESSION, 'carry on')
   const args = await launched()
-  expect(calls().slice(0, 2)).toEqual([['agents', '--json'], ['rm', SESSION.slice(0, 8)]])
+  expect(calls().filter(args => args[0] !== 'agents')[0]).toEqual(['rm', SESSION.slice(0, 8)])
   expect(args[args.indexOf('--resume') + 1]).toBe(SESSION)
   expect(args.at(-1)).toBe('carry on')
   expect(registry()['chat:7']).toEqual({ name: 'Desk anchors', session: SESSION })

@@ -1,27 +1,4 @@
-#!/usr/bin/env bun
-import { Server } from '@modelcontextprotocol/sdk/server/index.js'
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
-import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
-import { connect, type Socket } from 'net'
-
-const SOCKET = process.env.HEX_HUB
-const THREAD = process.env.HEX_CHANNEL?.startsWith('plugin:telegram@') ? process.env.HEX_THREAD : undefined
-
-const mcp = new Server(
-  { name: 'telegram', version: '1.0.0' },
-  {
-    capabilities: { tools: {}, experimental: { 'claude/channel': {}, 'claude/channel/permission': {} } },
-    instructions: [
-      'The sender reads Telegram, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat. Nobody watches this terminal either, so the report a background job ends with goes to them as a reply: what they need to know and act on. Once it\'s sent, end the turn without repeating it here.',
-      '',
-      'This session is one Telegram thread: a forum topic, a group\'s General, or a direct chat. Its messages arrive as <channel source="telegram" chat_id="..." message_id="..." user="..." ts="...">, and everything you send with these tools lands back in that same thread. If the tag has an image_path attribute, Read that file — it is a photo the sender attached. If the tag has attachment_file_id, call download_attachment with that file_id to fetch the file, then Read the returned path. If the tag has reply_to_message_id, the sender replied to that earlier message: reply_to_text is its text or caption, reply_to_quote the part they highlighted, reply_to_image_path a photo it carried (Read it), and reply_to_attachment_file_id a file it carried (download_attachment). edited="true" means the sender edited the message with that message_id and this is its new text; forwarded_from names who a forwarded message came from. A photo album arrives as one message: image_path and the attachment_* attributes then list one value per file, separated by "; ". A reaction arrives as (reaction: 👍) or (reaction removed: 👍), with reaction, reaction_removed="true" when taken off, and reaction_to_message_id, reaction_to_user and reaction_to_text for the message it was on. A button tap arrives as the button\'s label with button="true" and button_message_id, and a poll vote as (vote: ...) or (vote removed), with vote (the chosen options), vote_removed="true", poll_message_id and poll (its question). Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply.',
-      '',
-      'For formatted replies use format: "markdown" and write ordinary Markdown (code blocks, diagrams, bold, links, lists, tables), no escaping needed. reply accepts file paths (files: ["/abs/path.png"]) for attachments, silent: true to send without a notification, and buttons: ["Yes", "No"] for tappable choices. Use react to add or remove emoji reactions, edit_message for interim progress updates or to change a file\'s caption or the file itself, and delete_message, pin, forward and poll as their names say. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',
-      '',
-      'new_thread opens a new forum topic with its own fresh session and hands it your prompt; the topic starts with the user\'s request and your replies since, forwarded. Use it for work the user will want to follow or talk to on its own. It only works in a group with topics, and rename_thread changes a topic\'s name or icon. With app: "discord" or "buzz" it opens a Discord or Buzz thread instead, the place for deep, long-form work. handoff moves this whole conversation to Discord or Buzz when the user asks: you stop here and continue there with your memory (from General, a copy continues there and you stay).',
-    ].join('\n'),
-  },
-)
+import type { ChannelServer } from '../../hub/hub.ts'
 
 const titleProperty = { type: 'string', description: 'One word, like a chat name ("Anchors", "Frontier").' }
 
@@ -31,7 +8,19 @@ const formatProperty = {
   description: "Rendering mode. 'markdown' takes ordinary Markdown with no escaping: code blocks, inline code, bold, italic, links, strikethrough, lists, tables, headings. 'markdownv2' is Telegram's own syntax, where the caller escapes special chars. Default: 'text' (plain).",
 }
 
-mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
+// What each session's channel says and offers; the hub serves it over HTTP.
+export const server: ChannelServer = {
+  title: 'Telegram',
+  permission: true,
+  instructions: [
+    'The sender reads Telegram, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat. Nobody watches this terminal either, so the report a background job ends with goes to them as a reply: what they need to know and act on. Once it\'s sent, end the turn without repeating it here.',
+    '',
+    'This session is one Telegram thread: a forum topic, a group\'s General, or a direct chat. Its messages arrive as <channel source="telegram" chat_id="..." message_id="..." user="..." ts="...">, and everything you send with these tools lands back in that same thread. If the tag has an image_path attribute, Read that file — it is a photo the sender attached. If the tag has attachment_file_id, call download_attachment with that file_id to fetch the file, then Read the returned path. If the tag has reply_to_message_id, the sender replied to that earlier message: reply_to_text is its text or caption, reply_to_quote the part they highlighted, reply_to_image_path a photo it carried (Read it), and reply_to_attachment_file_id a file it carried (download_attachment). edited="true" means the sender edited the message with that message_id and this is its new text; forwarded_from names who a forwarded message came from. A photo album arrives as one message: image_path and the attachment_* attributes then list one value per file, separated by "; ". A reaction arrives as (reaction: 👍) or (reaction removed: 👍), with reaction, reaction_removed="true" when taken off, and reaction_to_message_id, reaction_to_user and reaction_to_text for the message it was on. A button tap arrives as the button\'s label with button="true" and button_message_id, and a poll vote as (vote: ...) or (vote removed), with vote (the chosen options), vote_removed="true", poll_message_id and poll (its question). Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply.',
+    '',
+    'For formatted replies use format: "markdown" and write ordinary Markdown (code blocks, diagrams, bold, links, lists, tables), no escaping needed. reply accepts file paths (files: ["/abs/path.png"]) for attachments, silent: true to send without a notification, and buttons: ["Yes", "No"] for tappable choices. Use react to add or remove emoji reactions, edit_message for interim progress updates or to change a file\'s caption or the file itself, and delete_message, pin, forward and poll as their names say. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',
+    '',
+    'new_thread opens a new forum topic with its own fresh session and hands it your prompt; the topic starts with the user\'s request and your replies since, forwarded. Use it for work the user will want to follow or talk to on its own. It only works in a group with topics, and rename_thread changes a topic\'s name or icon. With app: "discord" or "buzz" it opens a Discord or Buzz thread instead, the place for deep, long-form work. handoff moves this whole conversation to Discord or Buzz when the user asks: you stop here and continue there with your memory (from General, a copy continues there and you stay).',
+  ].join('\n'),
   tools: [
     {
       name: 'reply',
@@ -203,87 +192,4 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
   ],
-}))
-
-let hub: Socket | undefined
-let nextId = 0
-const pending = new Map<number, { resolve: (text: string) => void; reject: (error: Error) => void }>()
-
-function request(tool: string, args: Record<string, unknown>): Promise<string> {
-  if (!THREAD) return Promise.reject(new Error('this session is not bound to a Telegram thread (HEX_THREAD is unset)'))
-  if (!hub) return Promise.reject(new Error('the Telegram hub is not running'))
-  const id = ++nextId
-  const socket = hub
-  return new Promise((resolve, reject) => {
-    pending.set(id, { resolve, reject })
-    socket.write(JSON.stringify({ type: 'call', id, tool, args }) + '\n')
-  })
 }
-
-mcp.setRequestHandler(CallToolRequestSchema, async req => {
-  try {
-    const text = await request(req.params.name, req.params.arguments ?? {})
-    return { content: [{ type: 'text', text }] }
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
-    return { content: [{ type: 'text', text: `${req.params.name} failed: ${msg}` }], isError: true }
-  }
-})
-
-mcp.fallbackNotificationHandler = async ({ method, params }) => {
-  if (method === 'notifications/claude/channel/permission_request') hub?.write(JSON.stringify({ type: 'permission_request', ...params }) + '\n')
-}
-
-function connectHub(): void {
-  const socket = connect(SOCKET!)
-  let buffer = ''
-  socket.setEncoding('utf8')
-  socket.on('connect', () => {
-    hub = socket
-    // Claude Code starts listening for channel notifications ~30ms after its last
-    // request to this server (tools/list) and never signals it; notifications
-    // before that are dropped. Saying hello flushes queued messages, so wait.
-    setTimeout(() => socket.write(JSON.stringify({ type: 'hello', thread: THREAD, session: process.env.CLAUDE_CODE_SESSION_ID }) + '\n'), 1000)
-  })
-  socket.on('data', (chunk: string) => {
-    buffer += chunk
-    for (let end = buffer.indexOf('\n'); end >= 0; end = buffer.indexOf('\n')) {
-      const event = JSON.parse(buffer.slice(0, end))
-      buffer = buffer.slice(end + 1)
-      if (event.type === 'inbound') {
-        mcp.notification({
-          method: 'notifications/claude/channel',
-          params: { content: event.content, meta: event.meta },
-        }).catch(err => process.stderr.write(`telegram channel: failed to deliver inbound to Claude: ${err}\n`))
-      }
-      if (event.type === 'permission') {
-        mcp.notification({
-          method: 'notifications/claude/channel/permission',
-          params: { request_id: event.request_id, behavior: event.behavior },
-        }).catch(err => process.stderr.write(`telegram channel: failed to deliver a permission answer to Claude: ${err}\n`))
-      }
-      if (event.type === 'result') {
-        const waiter = pending.get(event.id)
-        pending.delete(event.id)
-        if (event.error) waiter?.reject(new Error(event.error))
-        else waiter?.resolve(event.text)
-      }
-    }
-  })
-  socket.on('close', () => {
-    if (hub === socket) hub = undefined
-    for (const waiter of pending.values()) waiter.reject(new Error('the Telegram hub disconnected'))
-    pending.clear()
-    setTimeout(connectHub, 2000)
-  })
-  socket.on('error', () => {})
-}
-
-mcp.oninitialized = () => {
-  if (THREAD && SOCKET) connectHub()
-}
-
-await mcp.connect(new StdioServerTransport())
-
-process.stdin.on('end', () => process.exit(0))
-process.stdin.on('close', () => process.exit(0))

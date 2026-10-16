@@ -19,7 +19,7 @@ beforeEach(async () => {
   project = join(dir, 'project')
   for (const path of [project, join(dir, 'hex', '.claude'), join(dir, 'state'), join(dir, 'config', 'jobs', 'job12345'), join(dir, '.t3', 'scratch', 'chat')]) mkdirSync(path, { recursive: true })
   writeFileSync(join(dir, '.claude.json'), '{"projects":{}}')
-  script('claude', `jq -cn '$ARGS.positional' --args -- "$@" >> "${dir}/claude"
+  script('claude', `jq -cn '$ARGS.positional' --args -- "$@" >> "${dir}/calls"
 [ "$1 $2" = "agents --json" ] && { cat "${dir}/agents" 2>/dev/null || echo '[]'; }
 [ "$1" = stop ] && [ -f "${dir}/agents" ] && pid=$(jq '.[0].pid' "${dir}/agents") && rm "${dir}/agents" && kill "$pid"
 exit 0`)
@@ -33,6 +33,7 @@ echo "backgrounded · job12345 · test"`)
       HOME: dir,
       PATH: `${dir}:${process.env.PATH}`,
       T3_STATE_DIR: join(dir, 'state'),
+      HEX_PORT: '0',
       HEX_DIR: join(dir, 'hex'),
       HEX_LAUNCHER: join(dir, 'launch'),
       CLAUDE_CONFIG_DIR: join(dir, 'config'),
@@ -170,7 +171,7 @@ test('/compact stops a running session, resumes it with the command once it has 
   updates.length = 0
   const answer = agent.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: '/compact' }, { type: 'text', text: 'T3 context' }] })
   await until(() => lines('launched').some(line => line.includes('"/compact"')))
-  expect(lines('claude')).toContain(JSON.stringify(['stop', SESSION.slice(0, 8)]))
+  expect(lines('calls')).toContain(JSON.stringify(['stop', SESSION.slice(0, 8)]))
   expect(JSON.parse(lines('launched').at(-1)!)).toEqual(expect.arrayContaining(['--resume', SESSION, '/compact']))
   hex.write(
     { type: 'user', message: { content: '/compact' } },
@@ -222,7 +223,7 @@ test('a session gets T3\'s MCP servers, and starts again with them when they cha
   await agent.request('session/resume', { sessionId, cwd: project, mcpServers: [t3Tools('two')] })
   agent.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'again' }] }).catch(() => {})
   await until(() => lines('launched').some(line => line.includes('two')))
-  expect(lines('claude')).toContain(JSON.stringify(['stop', SESSION.slice(0, 8)]))
+  expect(lines('calls')).toContain(JSON.stringify(['stop', SESSION.slice(0, 8)]))
   expect(hex.inbound.map(message => message.content)).toEqual(['hi'])
   const fresh = await session(sessionId)
   await until(() => fresh.inbound.length)
@@ -243,7 +244,7 @@ test('a turn whose T3 connection closes stops its session, and a reconnected T3 
   const pid = Number(Bun.spawnSync(['sh', '-c', 'sleep 60 >/dev/null 2>&1 & echo $!']).stdout.toString())
   writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid, status: 'busy' }]))
   first.socket.destroy()
-  await until(() => lines('claude').includes(JSON.stringify(['stop', SESSION.slice(0, 8)])) && !existsSync(join(dir, 'agents')))
+  await until(() => lines('calls').includes(JSON.stringify(['stop', SESSION.slice(0, 8)])) && !existsSync(join(dir, 'agents')))
   const second = await t3()
   await second.agent.request('session/resume', { sessionId, cwd: project, mcpServers: [t3Tools('two')] })
   second.agent.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'hi' }] }).catch(() => {})
@@ -283,7 +284,7 @@ test('a thread offers T3 model and effort pickers, and its session starts again 
   await until(() => lines('launched').length === 2)
   const again = JSON.parse(lines('launched')[1]!)
   expect([again[again.indexOf('--model') + 1], again[again.indexOf('--effort') + 1], again[again.indexOf('--resume') + 1]]).toEqual(['claude-fable-5-1', 'xhigh', SESSION])
-  expect(lines('claude')).toContain(JSON.stringify(['stop', SESSION.slice(0, 8)]))
+  expect(lines('calls')).toContain(JSON.stringify(['stop', SESSION.slice(0, 8)]))
   const fresh = await session(sessionId)
   await until(() => fresh.inbound.length)
   expect(fresh.inbound[0]).toMatchObject({ type: 'inbound', content: 'again' })
@@ -305,8 +306,8 @@ test('cancelling stops the session and answers the prompt as cancelled', async (
   await until(() => hex.inbound.length)
   await agent.notify('session/cancel', { sessionId })
   expect(await answer).toEqual({ stopReason: 'cancelled' })
-  await until(() => lines('claude').some(line => line.startsWith('["stop"')))
-  expect(lines('claude')).toContain(JSON.stringify(['stop', SESSION.slice(0, 8)]))
+  await until(() => lines('calls').some(line => line.startsWith('["stop"')))
+  expect(lines('calls')).toContain(JSON.stringify(['stop', SESSION.slice(0, 8)]))
 })
 
 test('a chat with no project works in hex\'s folder, and a project folder is trusted for good', async () => {

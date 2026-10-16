@@ -4,22 +4,22 @@ id: discord-threads
 summary: Rework the Discord channel so every thread in a server is its own Claude Code session, Claude-tag style, through the thread hub.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: discord-threads.patch
-patch_sha256: f1a181edba4ba2b49cbf6785e9a3edc86b7319722b71675c7f7db6c8dd83522f
+patch_sha256: 0da3b75571b22f31ecb6c9ee7579ddb6b3e892520b1223567a11e990a60e8637
 ---
 
 ## Intent
 
 Split upstream's single-session `server.ts` in two, the same way
 `telegram-topics` splits Telegram's, so one gateway connection serves a
-session per Discord thread through `hub/`:
+session per Discord thread through `hub/`, and no process runs per session:
 
 - `bot.ts` takes upstream's gateway half: the allowlist, attachments and the
   Discord calls. It runs in the hub service (`hub/serve.ts`), embeds the hub,
   and maps each thread to its own session by the thread's channel id.
-- `server.ts` keeps upstream's tools and instructions as the channel every
-  session loads. It learns its thread and its hub's socket from the session's
-  env (`HEX_THREAD`, `HEX_HUB`), connects only when
-  `HEX_CHANNEL` names this plugin, and forwards its calls there.
+- `channel.ts` keeps upstream's tools and instructions as the channel the hub
+  serves every session over HTTP. `.mcp.json` points the session there
+  (`HEX_PORT`, 8789 by default) with its `HEX_CHANNEL` and `HEX_THREAD` in
+  headers, in place of upstream's `bun server.ts`.
 
 Discord is the place for deeper work, Claude-tag style:
 
@@ -104,7 +104,7 @@ Discord is the place for deeper work, Claude-tag style:
 
 ## Verification
 
-Both halves build and the hub tests pass. `bun test external_plugins/discord`
+The bot builds, `.mcp.json` is an HTTP server, and the hub tests pass. `bun test external_plugins/discord`
 runs the tools and gateway events against a fake Discord client: channel
 paging, thread drill-in, search, the channel named on arrival, refusal of
 hidden channels, DMs and other servers, reactions, deletes, button taps,

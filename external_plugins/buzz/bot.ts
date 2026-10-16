@@ -7,6 +7,7 @@ import { finalizeEvent, type Event } from 'nostr-tools/pure'
 import { decode } from 'nostr-tools/nip19'
 import { hexToBytes } from 'nostr-tools/utils'
 import { startHub, clients, move, tappable, title, type Message } from '../../hub/hub.ts'
+import { server } from './channel.ts'
 import { connectRelay } from './relay.ts'
 import { startActivity } from './activity.ts'
 import { startMemory } from './memory.ts'
@@ -633,6 +634,7 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
   const hub = startHub({
     stateDir: STATE_DIR,
     channel: 'plugin:buzz@hex',
+    server,
     call,
     state: showState,
     fresh: thread => channels.get(thread)?.dm ?? false,
