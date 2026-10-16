@@ -450,8 +450,9 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
     return join(sessionsDir, `${encodeURIComponent(thread)}.json`)
   }
 
-  // A respawn reads the same file, so it gets the hub's current token and binding too.
-  function writeSettings(thread: string) {
+  // A respawn reads the same file, so it gets the hub's current token and binding too. It runs
+  // without the launcher, so the file keeps what the launcher added and renews only the hub's keys.
+  function writeSettings(thread: string, launched: ReturnType<typeof claude.settingsOf> = {}) {
     const env = {
       ...bind(thread),
       HEX_CHANNEL: channel,
@@ -461,7 +462,7 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
       ...(general && thread === main ? { HEX_MAIN: '1' } : {}),
       ...(fresh(thread) ? { HEX_FRESH: '1' } : {}),
     }
-    writeFileSync(settingsOf(thread), JSON.stringify({ enabledPlugins: { [plugin]: true }, env }), { mode: 0o600 })
+    writeFileSync(settingsOf(thread), JSON.stringify({ ...launched, enabledPlugins: { ...launched?.enabledPlugins, [plugin]: true }, env: { ...launched?.env, ...env } }), { mode: 0o600 })
   }
 
   async function start(thread: string, prompt?: string, fork?: string) {
@@ -632,7 +633,7 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
     if (run.phase.is === 'launching') run.phase.respawned = true
     else become(run, { is: 'launching', respawned: true })
     const phase = run.phase
-    writeSettings(thread)
+    writeSettings(thread, claude.settingsOf(running))
     await claude.respawn(running)
     if (run.phase === phase) recover(thread)
   }

@@ -1,9 +1,9 @@
 diff --git a/hub/claude.ts b/hub/claude.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..e79abf7a89b423d6461497ea8493bcab33029024
+index 0000000000000000000000000000000000000000..e0b95f53c2ffb8a4e9b73b09b454dbb00a0e0915
 --- /dev/null
 +++ b/hub/claude.ts
-@@ -0,0 +1,132 @@
+@@ -0,0 +1,134 @@
 +import { execFile, spawn } from 'child_process'
 +import { closeSync, fstatSync, openSync, readFileSync, readSync, watch } from 'fs'
 +import { homedir } from 'os'
@@ -92,14 +92,16 @@ index 0000000000000000000000000000000000000000..e79abf7a89b423d6461497ea8493bcab
 +
 +// Claude keeps the flags a session started with, since it respawns from them, so the settings
 +// file it was given says what it serves.
-+export function envOf(agent: Agent): Record<string, string> | undefined {
++export function settingsOf(agent: Agent): { enabledPlugins?: object; env?: Record<string, string> } | undefined {
 +  const flags = record(job(agent)).respawnFlags ?? []
 +  try {
-+    return JSON.parse(readFileSync(flags[flags.lastIndexOf('--settings') + 1]!, 'utf8')).env
++    return JSON.parse(readFileSync(flags[flags.lastIndexOf('--settings') + 1]!, 'utf8'))
 +  } catch {
 +    return undefined
 +  }
 +}
++
++export const envOf = (agent: Agent) => settingsOf(agent)?.env
 +
 +export function transcript(cwd: string, session: string) {
 +  return join(home(), 'projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'), `${session}.jsonl`)
@@ -138,10 +140,10 @@ index 0000000000000000000000000000000000000000..e79abf7a89b423d6461497ea8493bcab
 +}
 diff --git a/hub/hub.test.ts b/hub/hub.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..ad104d1e01f8fbd8aee8311e3dc64c5e81699678
+index 0000000000000000000000000000000000000000..68cc2a31cfa97199704bfc7983b6f595173599f0
 --- /dev/null
 +++ b/hub/hub.test.ts
-@@ -0,0 +1,1470 @@
+@@ -0,0 +1,1481 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { connect, createServer, type Socket } from 'net'
 +import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, chmodSync, existsSync } from 'fs'
@@ -544,6 +546,17 @@ index 0000000000000000000000000000000000000000..ad104d1e01f8fbd8aee8311e3dc64c5e
 +  await Bun.sleep(150)
 +  expect(calls().filter(args => args[0] === 'respawn').length).toBe(1)
 +  expect(failures).toEqual([])
++})
++
++test('a session that restarts in place keeps what its launcher added to its settings, and gets the hub\'s current token', async () => {
++  bound('chat:7')
++  const file = join(dir, 'sessions', 'chat%3A7.json')
++  writeFileSync(file, JSON.stringify({ model: 'claude-sonnet-5-5', claudeMdExcludes: ['/rules.md'], enabledPlugins: { 'other@hex': true }, env: { HEX_CHANNEL: CHANNEL, HEX_THREAD: 'chat:7', HEX_TOKEN: 'old', HEX_WAKE: '/wake.md' } }))
++  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, startedAt: 1 }], reconnect: 50 })
++  await until(() => calls().find(args => args[0] === 'respawn'))
++  const settings = JSON.parse(readFileSync(file, 'utf8'))
++  expect(settings).toMatchObject({ model: 'claude-sonnet-5-5', claudeMdExcludes: ['/rules.md'], enabledPlugins: { 'other@hex': true, 'telegram@hex': true }, env: { HEX_WAKE: '/wake.md', HEX_THREAD: 'chat:7' } })
++  expect(settings.env.HEX_TOKEN).toBe(readFileSync(join(dir, 'token'), 'utf8'))
 +})
 +
 +test('a session that restarts in place and still gets no channel is reported, not restarted again', async () => {
@@ -1614,10 +1627,10 @@ index 0000000000000000000000000000000000000000..ad104d1e01f8fbd8aee8311e3dc64c5e
 +})
 diff --git a/hub/hub.ts b/hub/hub.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..61e4312d50ba02c806ad516da49ade5d4352840a
+index 0000000000000000000000000000000000000000..6e9f45b7a734ce2cd9489b8c3b985bf9dd785b76
 --- /dev/null
 +++ b/hub/hub.ts
-@@ -0,0 +1,789 @@
+@@ -0,0 +1,790 @@
 +import { createServer } from 'net'
 +import { createHash, randomBytes } from 'crypto'
 +import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync, type FSWatcher } from 'fs'
@@ -2070,8 +2083,9 @@ index 0000000000000000000000000000000000000000..61e4312d50ba02c806ad516da49ade5d
 +    return join(sessionsDir, `${encodeURIComponent(thread)}.json`)
 +  }
 +
-+  // A respawn reads the same file, so it gets the hub's current token and binding too.
-+  function writeSettings(thread: string) {
++  // A respawn reads the same file, so it gets the hub's current token and binding too. It runs
++  // without the launcher, so the file keeps what the launcher added and renews only the hub's keys.
++  function writeSettings(thread: string, launched: ReturnType<typeof claude.settingsOf> = {}) {
 +    const env = {
 +      ...bind(thread),
 +      HEX_CHANNEL: channel,
@@ -2081,7 +2095,7 @@ index 0000000000000000000000000000000000000000..61e4312d50ba02c806ad516da49ade5d
 +      ...(general && thread === main ? { HEX_MAIN: '1' } : {}),
 +      ...(fresh(thread) ? { HEX_FRESH: '1' } : {}),
 +    }
-+    writeFileSync(settingsOf(thread), JSON.stringify({ enabledPlugins: { [plugin]: true }, env }), { mode: 0o600 })
++    writeFileSync(settingsOf(thread), JSON.stringify({ ...launched, enabledPlugins: { ...launched?.enabledPlugins, [plugin]: true }, env: { ...launched?.env, ...env } }), { mode: 0o600 })
 +  }
 +
 +  async function start(thread: string, prompt?: string, fork?: string) {
@@ -2252,7 +2266,7 @@ index 0000000000000000000000000000000000000000..61e4312d50ba02c806ad516da49ade5d
 +    if (run.phase.is === 'launching') run.phase.respawned = true
 +    else become(run, { is: 'launching', respawned: true })
 +    const phase = run.phase
-+    writeSettings(thread)
++    writeSettings(thread, claude.settingsOf(running))
 +    await claude.respawn(running)
 +    if (run.phase === phase) recover(thread)
 +  }

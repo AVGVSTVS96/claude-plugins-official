@@ -4,7 +4,7 @@ id: hub
 summary: Add a client-agnostic hub that gives every chat thread its own Claude Code session and moves threads between clients.
 baseline: ea10b213686c90bb1984b2016937310e05336cf3
 patch_file: hub.patch
-patch_sha256: 3e78ed3a6b5efa7d7a422ae995d303a54d647744565a35479cbae9b1a93abb59
+patch_sha256: 5d0b4dd02a05eebcae81eccf086b8c213a144286d0214cb21441239bc742e6b6
 ---
 
 ## Intent
@@ -126,7 +126,10 @@ dropped HTTP server at about 0, 1, 3, 7 and 15 seconds, then gives up for
 good). After that, a session still running that started before then restarts
 in place (`claude respawn`, which keeps its conversation and runs a turn it was
 on again) when its flags read the thread's settings file, which the hub writes
-again first, so the session comes back with the current token and binding, and otherwise stops
+again first, so the session comes back with the current token and binding. The hub
+owns that file's plugin and binding keys and a launcher may add its own at start
+(hex's adds its chat prompt's settings and a call's model); a respawn runs without the
+launcher, so the hub renews only its own keys and the launcher's stay. Otherwise it stops
 and resumes, since a respawn would start it without its binding; one that
 started since gets the same time, and one that restarted
 and still has no channel is reported as a failed start, as is a session the

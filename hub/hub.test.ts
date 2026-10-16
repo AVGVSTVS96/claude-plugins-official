@@ -402,6 +402,17 @@ test('a session still running once its channel stays gone restarts in place, and
   expect(failures).toEqual([])
 })
 
+test('a session that restarts in place keeps what its launcher added to its settings, and gets the hub\'s current token', async () => {
+  bound('chat:7')
+  const file = join(dir, 'sessions', 'chat%3A7.json')
+  writeFileSync(file, JSON.stringify({ model: 'claude-sonnet-5-5', claudeMdExcludes: ['/rules.md'], enabledPlugins: { 'other@hex': true }, env: { HEX_CHANNEL: CHANNEL, HEX_THREAD: 'chat:7', HEX_TOKEN: 'old', HEX_WAKE: '/wake.md' } }))
+  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, startedAt: 1 }], reconnect: 50 })
+  await until(() => calls().find(args => args[0] === 'respawn'))
+  const settings = JSON.parse(readFileSync(file, 'utf8'))
+  expect(settings).toMatchObject({ model: 'claude-sonnet-5-5', claudeMdExcludes: ['/rules.md'], enabledPlugins: { 'other@hex': true, 'telegram@hex': true }, env: { HEX_WAKE: '/wake.md', HEX_THREAD: 'chat:7' } })
+  expect(settings.env.HEX_TOKEN).toBe(readFileSync(join(dir, 'token'), 'utf8'))
+})
+
 test('a session that restarts in place and still gets no channel is reported, not restarted again', async () => {
   bound('chat:7')
   start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } }, reconnect: 50 })

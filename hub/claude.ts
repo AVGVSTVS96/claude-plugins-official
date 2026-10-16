@@ -86,14 +86,16 @@ export function watchJob(id: string, change: () => void) {
 
 // Claude keeps the flags a session started with, since it respawns from them, so the settings
 // file it was given says what it serves.
-export function envOf(agent: Agent): Record<string, string> | undefined {
+export function settingsOf(agent: Agent): { enabledPlugins?: object; env?: Record<string, string> } | undefined {
   const flags = record(job(agent)).respawnFlags ?? []
   try {
-    return JSON.parse(readFileSync(flags[flags.lastIndexOf('--settings') + 1]!, 'utf8')).env
+    return JSON.parse(readFileSync(flags[flags.lastIndexOf('--settings') + 1]!, 'utf8'))
   } catch {
     return undefined
   }
 }
+
+export const envOf = (agent: Agent) => settingsOf(agent)?.env
 
 export function transcript(cwd: string, session: string) {
   return join(home(), 'projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'), `${session}.jsonl`)
