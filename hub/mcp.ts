@@ -110,7 +110,9 @@ export function endpoint(name: string, channel: string, token: string, server: C
   }
 
   return async (request: Request): Promise<Response> => {
-    if (request.headers.has('origin') || !['127.0.0.1', 'localhost'].includes(new URL(request.url).hostname) || request.headers.get('x-hex-token') !== token) return new Response('Forbidden', { status: 403 })
+    // The token comes as Authorization: Claude Code then takes a refusal as a failed connection,
+    // where with any other header it marks the server as needing a login for 15 minutes.
+    if (request.headers.has('origin') || !['127.0.0.1', 'localhost'].includes(new URL(request.url).hostname) || request.headers.get('authorization') !== `Bearer ${token}`) return new Response('Forbidden', { status: 403 })
     const thread = threadOf(request)
     const session = request.headers.get('mcp-session-id')
     if (request.method === 'GET') return stream(thread, session)

@@ -102,10 +102,12 @@ function capacity(tokens?: string) {
   return Number(tokens)
 }
 
-// What a session reads only as it starts: its launch arguments and its channel's instructions and
-// tools. threads.json keeps a digest of what each thread's session started with.
-export function stamp(args: string[], server?: ChannelServer) {
-  return createHash('sha256').update(JSON.stringify([args, server ?? null])).digest('hex').slice(0, 16)
+// What a session reads only as it starts: its launch arguments, its channel's instructions and
+// tools, and the hooks its launcher loads. threads.json keeps a digest of what each thread's
+// session started with.
+export function stamp(args: string[], server?: ChannelServer, hooks: string[] = []) {
+  const read = (file: string) => (existsSync(file) ? readFileSync(file, 'utf8') : null)
+  return createHash('sha256').update(JSON.stringify([args, server ?? null, ...(hooks.length ? [hooks.map(read)] : [])])).digest('hex').slice(0, 16)
 }
 
 // A voice call passes through this process (its page and phone line go through the hub's
@@ -134,7 +136,7 @@ function tokenOf(stateDir: string) {
   return readFileSync(file, 'utf8').trim()
 }
 
-export function startHub({ stateDir, channel, server, port = PORT, main, mainName = 'main', general = false, call, state, failed, permission, asks, args = () => [], bind = () => ({}), fresh = () => false, limits, hexDir = process.cwd(), launcher = 'claude' }: {
+export function startHub({ stateDir, channel, server, port = PORT, main, mainName = 'main', general = false, call, state, failed, permission, asks, args = () => [], bind = () => ({}), fresh = () => false, limits, hexDir = process.cwd(), launcher = 'claude', hooks = process.env.HEX_HOOKS?.split(':').filter(Boolean) ?? [] }: {
   stateDir: string
   channel: string
   // What the channel serves its sessions over HTTP; a client without one serves them through its
@@ -160,6 +162,9 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
   limits?: Partial<Limits>
   hexDir?: string
   launcher?: string
+  // The hooks files the launcher's plugins load (HEX_HOOKS, colon-separated): a change to one
+  // renews sessions like a change to the channel does.
+  hooks?: string[]
 }) {
   const { idleStop, cacheWarm, compactAbove, reconnect, capacity } = { ...LIMITS, ...limits }
   const registry = join(stateDir, 'threads.json')
@@ -429,7 +434,7 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
   // plain restart of the hub leaves every session running. A thread with no record started its
   // session with none of its own arguments, before the hub kept one.
   function stale(thread: string) {
-    return (threads[thread]?.launched ?? stamp([], server)) !== stamp(extra(thread), server)
+    return (threads[thread]?.launched ?? stamp([], server)) !== stamp(extra(thread), server, hooks)
   }
 
   function configure(thread: string, settings: Settings) {
@@ -445,8 +450,8 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
     return join(sessionsDir, `${encodeURIComponent(thread)}.json`)
   }
 
-  async function start(thread: string, prompt?: string, fork?: string) {
-    const known = threads[thread]!
+  // A respawn reads the same file, so it gets the hub's current token and binding too.
+  function writeSettings(thread: string) {
     const env = {
       ...bind(thread),
       HEX_CHANNEL: channel,
@@ -457,8 +462,13 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
       ...(fresh(thread) ? { HEX_FRESH: '1' } : {}),
     }
     writeFileSync(settingsOf(thread), JSON.stringify({ enabledPlugins: { [plugin]: true }, env }), { mode: 0o600 })
+  }
+
+  async function start(thread: string, prompt?: string, fork?: string) {
+    const known = threads[thread]!
+    writeSettings(thread)
     const launchArgs = extra(thread)
-    const launched = stamp(launchArgs, server)
+    const launched = stamp(launchArgs, server, hooks)
     if (known.launched !== launched) {
       known.launched = launched
       save()
@@ -622,6 +632,7 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
     if (run.phase.is === 'launching') run.phase.respawned = true
     else become(run, { is: 'launching', respawned: true })
     const phase = run.phase
+    writeSettings(thread)
     await claude.respawn(running)
     if (run.phase === phase) recover(thread)
   }

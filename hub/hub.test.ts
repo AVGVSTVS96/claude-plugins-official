@@ -48,7 +48,7 @@ afterEach(() => {
 })
 
 // stale: the registry's sessions started with what the hub no longer gives a session, as after an update.
-function start(options: { main?: string; general?: boolean; idleStop?: number; cacheWarm?: number; compactAbove?: number; reconnect?: number; launcher?: string; registry?: Record<string, any>; stale?: boolean; agents?: object[]; fresh?: (thread: string) => boolean; capacity?: number; bind?: (thread: string) => Record<string, string> } = {}) {
+function start(options: { main?: string; general?: boolean; idleStop?: number; cacheWarm?: number; compactAbove?: number; reconnect?: number; launcher?: string; registry?: Record<string, any>; stale?: boolean; agents?: object[]; fresh?: (thread: string) => boolean; capacity?: number; bind?: (thread: string) => Record<string, string>; hooks?: string[] } = {}) {
   const { idleStop, cacheWarm, compactAbove, reconnect, capacity } = options
   if (options.registry) writeFileSync(join(dir, 'threads.json'), JSON.stringify(options.stale ? before(options.registry) : options.registry))
   if (options.agents) writeFileSync(join(dir, 'agents'), JSON.stringify(options.agents))
@@ -71,6 +71,7 @@ function start(options: { main?: string; general?: boolean; idleStop?: number; c
     launcher: options.launcher,
     fresh: options.fresh,
     bind: options.bind,
+    hooks: options.hooks,
     mainName: 'hex',
   })
 }
@@ -115,7 +116,7 @@ async function session(thread: string, id = SESSION) {
 // tools/list_changed it drops, as a session starting cold does before it listens.
 function http(thread?: string, extra: Record<string, string> = {}, deaf = 0) {
   const url = `http://127.0.0.1:${listener.port}/telegram`
-  const headers = { ...(thread && { 'x-hex-channel': CHANNEL, 'x-hex-thread': thread }), 'x-hex-token': readFileSync(join(dir, 'token'), 'utf8'), 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...extra }
+  const headers = { ...(thread && { 'x-hex-channel': CHANNEL, 'x-hex-thread': thread }), authorization: `Bearer ${readFileSync(join(dir, 'token'), 'utf8')}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...extra }
   const received: any[] = []
   const stream = new AbortController()
   streams.push(stream)
@@ -391,6 +392,7 @@ test('a session still running once its channel stays gone restarts in place, and
   const { close } = await session('chat:7')
   close()
   expect(await until(() => calls().find(args => args[0] === 'respawn'))).toEqual(['respawn', SESSION.slice(0, 8)])
+  expect(JSON.parse(readFileSync(join(dir, 'sessions', 'chat%3A7.json'), 'utf8')).env.HEX_TOKEN).toBe(readFileSync(join(dir, 'token'), 'utf8'))
   hub.deliver('chat:7', 'Desk anchors', message)
   const back = await session('chat:7')
   await until(() => back.received.length)
@@ -527,8 +529,8 @@ test('a request from a web page, or by a name other than localhost, is refused',
 
 test("a request without the hub's token is refused, and the token is the owner's alone", async () => {
   start()
-  expect((await http('chat:7', { 'x-hex-token': 'guess' }).post({ id: 1, method: 'ping' })).status).toBe(403)
-  const { 'x-hex-token': _, ...anonymous } = { 'x-hex-token': '' }
+  expect((await http('chat:7', { authorization: 'Bearer guess' }).post({ id: 1, method: 'ping' })).status).toBe(403)
+  const { authorization: _, ...anonymous } = { authorization: '' }
   expect((await fetch(`http://127.0.0.1:${listener.port}/telegram`, { method: 'POST', headers: { 'content-type': 'application/json', ...anonymous }, body: '{"jsonrpc":"2.0","id":1,"method":"ping"}' })).status).toBe(403)
   expect(statSync(join(dir, 'token')).mode & 0o777).toBe(0o600)
   hub.deliver('chat:7', 'Desk anchors', message)
@@ -1083,6 +1085,29 @@ test('a session that started with what the hub no longer gives stops at its next
   send({ type: 'state', thread: 'chat:7', busy: false })
   expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
   expect(calls().some(args => args[0] === '--bg')).toBe(false)
+})
+
+test('a change to only the hooks a session loads renews it at its next rest', async () => {
+  const hooks = join(dir, 'hooks.json')
+  writeFileSync(hooks, '{"hooks":{}}')
+  const launched = stamp([], SERVER, [hooks])
+  expect(stamp([], SERVER, [hooks])).toBe(launched)
+  writeFileSync(hooks, '{"hooks":{"Stop":[]}}')
+  expect(stamp([], SERVER, [hooks])).not.toBe(launched)
+  start({ hooks: [hooks], registry: { 'chat:7': { name: 'Desk anchors', session: SESSION, launched } }, agents: [{ sessionId: SESSION, pid: 42, status: 'idle', startedAt: 1 }] })
+  const { send } = await session('chat:7')
+  send({ type: 'state', thread: 'chat:7', busy: false })
+  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
+})
+
+test('a session whose hooks are unchanged keeps running across a hub restart', async () => {
+  const hooks = join(dir, 'hooks.json')
+  writeFileSync(hooks, '{"hooks":{}}')
+  start({ hooks: [hooks], registry: { 'chat:7': { name: 'Desk anchors', session: SESSION, launched: stamp([], SERVER, [hooks]) } }, agents: [{ sessionId: SESSION, pid: 42, status: 'idle', startedAt: 1 }] })
+  const { send } = await session('chat:7')
+  send({ type: 'state', thread: 'chat:7', busy: false })
+  await Bun.sleep(150)
+  expect(calls().some(args => args[0] === 'stop')).toBe(false)
 })
 
 test('a main thread whose session started with what the hub no longer gives starts over as soon as it rests', async () => {
