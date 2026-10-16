@@ -4,7 +4,7 @@ id: hub
 summary: Add a client-agnostic hub that gives every chat thread its own Claude Code session and moves threads between clients.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: hub.patch
-patch_sha256: e100fc4d64dc30dba1b577cfdd635f4042e89a3c10e2a8e85f37cbe1e1ac9f5a
+patch_sha256: aea1b9fc8495bc6e96c0bc4101682e6843084df6fb731bbf4c04778a7d006dfb
 ---
 
 ## Intent
@@ -17,12 +17,21 @@ each session's channel itself, and queues messages for a thread whose session
 isn't running. It starts that session with
 `claude --bg` through the client's launcher (`claude` unless one is given, so
 hex can add its own plugins and flags), or resumes it with
-`--resume`, and passes the channel, the thread, the socket path and the
-channel's port through the session's `--settings` env. The launcher runs in the hex folder
+`--resume`, and passes the channel, the thread, the socket path, the
+channel's port and the hub's token through the session's settings env, in a file
+of its own (`sessions/<thread>.json`, owner-only) that `--settings` names, so
+none of it shows in a process's arguments and `claude respawn` reads the
+thread's current binding. The launcher runs in the hex folder
 without any `*_BOT_TOKEN`, `HEX_*` or `BUZZ_*` in its environment: Claude's
 background daemon may start from it, and every later session inherits the
-daemon's environment, so a thread's binding lives only in its `--settings`. It watches each start
+daemon's environment, so a thread's binding lives only in its settings. It watches each start
 through Claude's job record and reports a failed start with its reason.
+Everything the hub asks of Claude Code (`agents`, `stop`, `rm`, `respawn`, a
+`--bg` start, job records and transcripts) goes through `hub/claude.ts`, which
+reads `CLAUDE_CONFIG_DIR` the way Claude does. Each thread the hub runs is one
+record whose phase says where its session stands: stopped, launching (started,
+its channel not yet connected), recovering (running without its channel) or
+live.
 Sessions report busy and idle through hooks that run `hub/state.ts`, and an
 idle report says when the turn stopped with background agents or workflows still
 working (the Stop hook's `background_tasks`; Claude Code counts those, not shells
@@ -61,7 +70,7 @@ needs no compaction and never compacts. A fresh thread keeps one session running
 and sends each message straight to it, so no message waits for a session to start,
 while that session is worth it: its context (its last request) holds less than
 `capacity` tokens, 350,000 unless the client or `HEX_CHAT_CAPACITY` sets
-another, and its last request is younger than the cache's life (54 minutes, as
+another (0 is taken as it is; anything but a number stops the service from starting), and its last request is younger than the cache's life (54 minutes, as
 for the main thread, or a twelfth of that when the transcript shows the request
 wrote the five-minute cache, an API key's default). Past that, its next message would send a full context, or
 its whole context uncached, when a new session sends only the chat's view; so at
@@ -84,18 +93,24 @@ A client hands `startHub` its channel (`server`: the instructions and tools
 each session gets), and the hub serves it over MCP's Streamable HTTP on
 `127.0.0.1`, one port for every client in the process (`HEX_PORT`, 8789 by
 default) under the client's plugin name (`/telegram`). The client's plugin is
-then only an `.mcp.json` of `"type": "http"` whose headers carry the session's
-`HEX_CHANNEL` and `HEX_THREAD`, so no process runs per session: Claude Code
+then only an `.mcp.json` of `"type": "http"` whose URL takes the session's
+`HEX_PORT` and whose headers carry its `HEX_CHANNEL`, `HEX_THREAD` and
+`HEX_TOKEN`, so no process runs per session: Claude Code
 never restarts a stdio server that dies (anthropics/claude-code#43177), so a
 `pkill -x bun` left General deaf and mute for a day, while it reconnects to
 an HTTP one on its own. The hub declines `server/discover`, so Claude Code
 settles on a revision whose stream can carry channel messages, and takes any
 session id it's given, so a session that connected before the hub restarted
-carries on without initializing again. A new session's stream opens a second
-after it lists the tools, since Claude Code starts listening for channel
-messages some tens of milliseconds after that, says nothing when it does, and
-drops what comes before. A request with an `Origin` header or a host other
-than localhost is refused, and a session with no thread (its env has none, or
+carries on without initializing again. Claude Code drops channel messages that
+come before it listens and says nothing when it starts, but it registers its
+channel handler in the same step as its `tools/list_changed` handler, so the hub
+declares `tools.listChanged`, tells a new session its tools changed once its
+stream is open and it has listed them (again every 250 ms, since a session
+starting cold drops it until it listens), and opens the channel when the
+session lists them again. Any local user can reach the port, so the hub makes
+a token once (`token` in its state folder, owner-only) and refuses a request
+without it, one with an `Origin` header, or one by a host other than
+localhost, and a session with no thread (its env has none, or
 another channel's) gets no messages and acts on no thread. A client with no
 `server` keeps its plugin's own process, which reaches the hub on `hub.sock`
 and says hello; sessions started before the hub served over HTTP do the same
@@ -107,7 +122,9 @@ start, the hub gives Claude Code 20 seconds to reconnect it (it retries a
 dropped HTTP server at about 0, 1, 3, 7 and 15 seconds, then gives up for
 good). After that, a session still running that started before then restarts
 in place (`claude respawn`, which keeps its conversation and runs a turn it was
-on again), one that started since gets the same time, and one that restarted
+on again) when its flags read the thread's settings file, and otherwise stops
+and resumes, since a respawn would start it without its binding; one that
+started since gets the same time, and one that restarted
 and still has no channel is reported as a failed start, as is a session the
 hub started or restarted that ended before its channel connected, so a thread
 never waits on a start that is gone. A gone main thread
@@ -130,12 +147,15 @@ A session can ask to `renew`: at its next rest, once its Stop hook reports the
 turn over with no background agents or workflows working (Claude's own status
 lags the hook and counts a running shell as busy, so it isn't asked for a renew
 the session asked for itself), the hub stops it, and a main thread or a fresh thread starts over as soon as its process exits
-(a fresh thread as a new session); any other thread's next message resumes it. A session that connects to a hub
-younger than it (Claude's `startedAt`) renews too, once Claude reports it idle, since it may run
-code an update has since replaced (its hooks, and the tools and instructions its channel
-gave it when it connected, which a reconnect keeps): an update restarts the hub, and each
-session then moves onto the new code at its own next rest instead of all of
-them waiting for a moment none is busy. Asking to `keep` before then cancels a
+(a fresh thread as a new session); any other thread's next message resumes it.
+`threads.json` keeps a digest (`stamp`) of what each thread's session started
+with: its launch arguments and the channel's instructions and tools, which a
+session reads only as it starts and a reconnect keeps. A session that connects
+with another digest renews too, once Claude reports it idle, and its next message
+goes to a fresh start, so an update that changes them moves each session onto
+it at its own next rest, while a crash or a plain restart of the hub leaves
+every session running, a warm DM included. A thread with no digest started with
+none of its own arguments, before the hub kept one. Asking to `keep` before then cancels a
 renew (a voice call started in the meantime), even while the hub is still
 asking Claude whether the session is working. `renewal` resolves once a renew on
 its way is through (the new session connects) or off, at once when none is, and
@@ -145,7 +165,8 @@ hub restart), saved or not, is left to reconnect instead of starting a new one, 
 runs twice and a warm session is never left running unwatched.
 
 `hub/serve.ts` is the service: it runs every client (Telegram, Discord,
-Buzz, T3 Code) in one process. A thread is on a call from its `keep` until its
+Buzz, T3 Code) in one process and owns its one HTTP listener, which hands each
+request to the hub serving that path (`route`). A thread is on a call from its `keep` until its
 `renew` or until its session disconnects, and a voice call passes through this
 process, so on SIGHUP the service exits once no thread is on a call (`free`), and
 whatever runs it starts it again on the current code, inside Claude Code's
@@ -172,8 +193,9 @@ instead (`fork`, `--fork-session`).
 6. No timer stands in for state: a start settles on the session's channel
    connecting or its job's `failed` state. The only delays are how long a
    quiet session stays warm before it's stopped, how long the main thread
-   rests before its cache would expire, how long Claude Code takes to listen
-   on a new channel, and how long it keeps reconnecting one before giving up;
+   rests before its cache would expire, how often a new session that hasn't
+   listed its tools again is told they changed, and how long Claude Code keeps
+   reconnecting a channel before giving up;
    a fresh thread's session hands over when its cache's life, counted from its
    last request, runs out; Claude's own status decides whether a session is still working or running.
 7. Bad input fails alone: a malformed line on `hub.sock` is logged and
@@ -191,18 +213,22 @@ plugin's own process on `hub.sock`): routing, queueing, resume, folders, running
 thread (started with the hub, kept running, revived, `HEX_MAIN` only for General, renewed at once, a
 fresh one left to reconnect after a hub restart), renews at the rest the Stop hook reports and after
 background agents, `renewal` holding for the new session and not for agents or a keep,
-sessions older than the hub renewing at their
-next rest and never during a call, `free` waiting for calls to end, the launcher and its
+sessions started with another digest renewing at their
+next rest and never during a call, a plain hub restart leaving them running, `free` waiting for calls to end, the launcher and its
 environment, failed starts, busy and idle, idle stops, compacting big sessions before they rest, fresh threads (warm delivery, never resuming, the handover once the context
 fills, even while Claude's status lags, or the cache expires, by its recorded tier, never compacting, a warm session from before a hub
 restart found by its job instead of started twice), stopping, closing, naming and
 handoffs (release, adopt, fork), permission prompts and bad input against a fake `claude`, plus
 channels that drop and come back, sessions that restart in place once and are reported after,
 sessions that outlived the hub, starts that end before their channel connects, unsaved sessions found by their job, a new stream held until
-Claude Code listens, a stream adopted after a restart, the declined protocol, refused requests
-and unbound sessions. Run `scripts/verify`. Live: a session in an isolated `CLAUDE_CONFIG_DIR`
-gets a message and replies, carries on through hub restarts (also a few seconds after it
-connected and mid-turn), and restarts in place after a 35-second outage.
+Claude Code lists its tools again (told again while it drops that), a stream adopted after a
+restart, the declined protocol, requests without the token refused, owner-only token and
+settings files, sessions whose flags read no settings file stopped and resumed instead of
+respawned, `HEX_CHAT_CAPACITY` parsing, and unbound sessions. Run `scripts/verify`. Live: in an
+isolated `CLAUDE_CONFIG_DIR`, a new thread and a warm DM each get a message and reply on a
+cold start without a restart, the DM's next message goes straight to the same session, both
+carry on through a hub restart with no renew, and both restart in place with their token after
+a 30-second outage.
 
 ## Removal
 

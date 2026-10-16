@@ -4,7 +4,7 @@ id: t3-acp
 summary: Serve the agent to T3 Code as an ACP agent, where every T3 thread is its own Claude Code session in that thread's project, through the thread hub.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: t3-acp.patch
-patch_sha256: b6fdd6a95a8040458777b629e6c07c4ace4b7ca5ba9f601f70c883f78289a457
+patch_sha256: 144b2857e48b3d1a74ba8bb863bda8f346be65ddbce7fc52189087590d165d8e
 ---
 
 ## Intent

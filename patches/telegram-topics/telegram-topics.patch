@@ -25,20 +25,21 @@ index 0000000000000000000000000000000000000000..c2658d7d1b31848c3b71960543cb0368
 @@ -0,0 +1 @@
 +node_modules/
 diff --git a/external_plugins/telegram/.mcp.json b/external_plugins/telegram/.mcp.json
-index cf7195be355a449610d8153bfae6c4c394403c38..2f8b6d21e17d06f09c63de583d31525133f19f8f 100644
+index cf7195be355a449610d8153bfae6c4c394403c38..1a8555994abcbe051e83c62704f49a3789596071 100644
 --- a/external_plugins/telegram/.mcp.json
 +++ b/external_plugins/telegram/.mcp.json
-@@ -1,8 +1,12 @@
+@@ -1,8 +1,13 @@
  {
    "mcpServers": {
      "telegram": {
 -      "command": "bun",
 -      "args": ["run", "--cwd", "${CLAUDE_PLUGIN_ROOT}", "--shell=bun", "--silent", "start"]
 +      "type": "http",
-+      "url": "http://127.0.0.1:${HEX_PORT:-8789}/telegram",
++      "url": "http://127.0.0.1:${HEX_PORT}/telegram",
 +      "headers": {
-+        "X-Hex-Channel": "${HEX_CHANNEL:-}",
-+        "X-Hex-Thread": "${HEX_THREAD:-}"
++        "X-Hex-Channel": "${HEX_CHANNEL}",
++        "X-Hex-Thread": "${HEX_THREAD}",
++        "X-Hex-Token": "${HEX_TOKEN}"
 +      }
      }
    }
@@ -197,7 +198,7 @@ index f762daf561baba3df6406e5bbe3038843810a7c2..00000000000000000000000000000000
 -}
 -```
 diff --git a/external_plugins/telegram/README.md b/external_plugins/telegram/README.md
-index d72dbc1a759e601dd0188cc7a8c3b58edc04373c..c4c3c0d932fb7f3d70a0659d6639e2909921ed70 100644
+index d72dbc1a759e601dd0188cc7a8c3b58edc04373c..ea22273d0db82ef0761e95359455e24a4dee35f4 100644
 --- a/external_plugins/telegram/README.md
 +++ b/external_plugins/telegram/README.md
 @@ -1,98 +1,8 @@
@@ -208,7 +209,7 @@ index d72dbc1a759e601dd0188cc7a8c3b58edc04373c..c4c3c0d932fb7f3d70a0659d6639e290
  
 -The MCP server logs into Telegram as a bot and provides tools to Claude to reply, react, or edit messages. When you message the bot, the server forwards the message to your Claude Code session.
 +- `bot.ts` holds the one bot connection. It runs in the hub service (`bun hub/serve.ts`) next to Discord, so a conversation can move between them; `bun run bot` runs it alone. It starts sessions in `HEX_DIR` (the service's folder by default) through `HEX_LAUNCHER` (`claude` by default).
-+- `channel.ts` is the channel the hub serves each session over HTTP, so no process runs per session. `.mcp.json` points a session at the hub (`HEX_PORT`, 8789 by default) with its topic (`HEX_THREAD`) in a header.
++- `channel.ts` is the channel the hub serves each session over HTTP, so no process runs per session. `.mcp.json` points a session at the hub's port (`HEX_PORT`) with its topic (`HEX_THREAD`) and the hub's token (`HEX_TOKEN`) in headers.
  
 -## Prerequisites
 -

@@ -817,7 +817,7 @@ index 0000000000000000000000000000000000000000..2895d5c588951ad5b27ad7b6c6f42f42
 +}
 diff --git a/external_plugins/voice/bot.ts b/external_plugins/voice/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..17d2b444918bd9b032740f56689c55d5fb753887
+index 0000000000000000000000000000000000000000..f018557fff70a4230494c5ef1b58fc8fd99319a8
 --- /dev/null
 +++ b/external_plugins/voice/bot.ts
 @@ -0,0 +1,28 @@
@@ -838,7 +838,7 @@ index 0000000000000000000000000000000000000000..17d2b444918bd9b032740f56689c55d5
 +  mainName: 'voice',
 +  hexDir: HEX_DIR,
 +  fresh: () => true,
-+  capacity: 0,
++  limits: { capacity: 0 },
 +  bind: () => ({ VOICE_SOCKET: SOCKET }),
 +  launcher: process.env.HEX_LAUNCHER,
 +  call: async (_, tool) => {

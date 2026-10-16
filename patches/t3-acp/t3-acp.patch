@@ -24,18 +24,19 @@ index 0000000000000000000000000000000000000000..c2658d7d1b31848c3b71960543cb0368
 +node_modules/
 diff --git a/external_plugins/t3/.mcp.json b/external_plugins/t3/.mcp.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..e51c49795d0b5ac1ed822b2a1ba173acf0778b9d
+index 0000000000000000000000000000000000000000..0a01609e2799f0b12f0518a4c1b5ce140deee1ac
 --- /dev/null
 +++ b/external_plugins/t3/.mcp.json
-@@ -0,0 +1,12 @@
+@@ -0,0 +1,13 @@
 +{
 +  "mcpServers": {
 +    "t3": {
 +      "type": "http",
-+      "url": "http://127.0.0.1:${HEX_PORT:-8789}/t3",
++      "url": "http://127.0.0.1:${HEX_PORT}/t3",
 +      "headers": {
-+        "X-Hex-Channel": "${HEX_CHANNEL:-}",
-+        "X-Hex-Thread": "${HEX_THREAD:-}"
++        "X-Hex-Channel": "${HEX_CHANNEL}",
++        "X-Hex-Thread": "${HEX_THREAD}",
++        "X-Hex-Token": "${HEX_TOKEN}"
 +      }
 +    }
 +  }
