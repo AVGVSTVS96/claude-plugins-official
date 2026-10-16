@@ -52,6 +52,7 @@ const LATELY = 5
 const STEPS = 12
 const KEEP = 7 * 24 * 60 * 60_000
 const TRACK = 12 * 60 * 60_000
+const TURNS = 48
 const ORDER: State[] = ['needs', 'working', 'done', 'failed', 'idle']
 const RECORDS = new Set(['threads.json', 'guild.json', 'bot.json', 'channels.json'])
 const STATES: Record<string, State> = { working: 'working', blocked: 'needs', done: 'done', failed: 'failed' }
@@ -388,16 +389,13 @@ function streak(timeline: Entry[], state?: string) {
   return since
 }
 
-// How the job's state moved since `from`, for its lane: the state it was in then, and each change after.
-function track(timeline: Entry[], from: number) {
-  const turns: Turn[] = []
-  for (const entry of timeline) {
-    const state = STATES[entry.state] ?? 'idle'
-    const at = Date.parse(entry.at) < from ? new Date(from).toISOString() : entry.at
-    if (turns.at(-1)?.at === at) turns.pop()
-    if (turns.at(-1)?.state !== state) turns.push({ at, state })
-  }
-  return turns
+// The job since `from`, for its lane: the state it was in then, and each entry after it, a change of
+// state or a step within one.
+function track(timeline: Entry[], from: number): Turn[] {
+  const turn = (at: string, state: string) => ({ at, state: STATES[state] ?? 'idle' })
+  const before = timeline.findLast(entry => Date.parse(entry.at) < from)
+  const after = timeline.filter(entry => Date.parse(entry.at) >= from).slice(-TURNS)
+  return [...(before ? [turn(new Date(from).toISOString(), before.state)] : []), ...after.map(entry => turn(entry.at, entry.state))]
 }
 
 // A workflow agent's transcript lands in its run's own folder, so it's followed once it's written there.

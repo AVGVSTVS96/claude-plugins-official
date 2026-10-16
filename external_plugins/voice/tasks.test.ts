@@ -58,14 +58,14 @@ const telegram = {
 threads('telegram', telegram)
 threads('buzz', { b1: { name: 'Old news', session: 'ffffffff-old' } })
 job('aaaaaaaa-general', { state: 'done', detail: 'heartbeat ran', updatedAt: ago(5) })
-const [published, finished, asked] = [ago(90), ago(60), ago(40)]
+const [published, finished, asked, still] = [ago(90), ago(60), ago(40), ago(20)]
 job('bbbbbbbb-autofork', { state: 'blocked', detail: 'needs music', needs: 'Pick a music style, and run `claude setup-token`', updatedAt: ago(20) }, [
   { at: ago(13 * 60), state: 'done', detail: 'Overnight', text: '' },
   { at: ago(12.5 * 60), state: 'blocked', detail: 'Asked overnight', text: '' },
   { at: published, state: 'working', detail: 'Publishing', text: '' },
   { at: finished, state: 'done', detail: '**Published** autofork 0.1.2', text: 'npm is live' },
   { at: asked, state: 'blocked', detail: 'needs music', text: 'Your call' },
-  { at: ago(20), state: 'blocked', detail: 'still needs music', text: 'Still yours' },
+  { at: still, state: 'blocked', detail: 'still needs music', text: 'Still yours' },
 ])
 job('cccccccc-voiceapp', { state: 'working', detail: 'building', updatedAt: ago(1), fan: [{ id: 'old', kind: 'agent', label: 'Earlier', doneAt: 1 }, { id: 'agent2', kind: 'agent', label: 'Check the server', doneAt: Date.now() - 60_000 }, { id: 'agent1', kind: 'agent', label: 'Build the Tasks view' }, { id: 'sh', kind: 'shell', label: 'sleep' }] }, [
   { at: ago(14), state: 'working', detail: '', text: '' },
@@ -127,6 +127,7 @@ test("each thread is a task from its session's own records, what needs you first
     { at: published, state: 'working' },
     { at: finished, state: 'done' },
     { at: asked, state: 'needs' },
+    { at: still, state: 'needs' },
   ])
   expect(tasks.get('telegram:-1004422245734')).toMatchObject({ where: 'General', place: 'General', link: 'https://t.me/c/4422245734/1' })
   expect(tasks.get('telegram:-1004422245734:65')).toMatchObject({ line: 'clips posted', lately: [] })
