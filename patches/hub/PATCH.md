@@ -4,7 +4,7 @@ id: hub
 summary: Add a client-agnostic hub that gives every chat thread its own Claude Code session and moves threads between clients.
 baseline: ea10b213686c90bb1984b2016937310e05336cf3
 patch_file: hub.patch
-patch_sha256: 0bdb9886263e85a81a5b64aac1ac0a2a7ee62ef982173d4c1cf20d147ae2cff3
+patch_sha256: 6ed751724248bcc5caae734497e8eca7c4b9f4c8e9068b347c77f94e64ae2ecc
 ---
 
 ## Intent
@@ -116,9 +116,13 @@ refusal then as a failed connection; with any other header it records the
 server in `mcp-needs-auth-cache.json` and skips it for 15 minutes, which no
 restart in place clears. A session with no thread (its env has none, or
 another channel's) gets no messages and acts on no thread. Every client has a
-`server`, so HTTP is the one way a session reaches the hub; `hub.sock` only
+`server`, so HTTP is the one way a session the hub starts reaches it; `hub.sock`
 takes hooks' `state` and local programs' lines (`inbound`, `open`, `answer`,
-`settle`, `reopen`).
+`settle`, `reopen`). A session whose plugin started before its client served over
+HTTP still says hello on `hub.sock` and keeps that line as its channel, its tool
+calls and permission prompts included, so an update leaves no thread deaf; since
+nothing else says hello, such a session starts over at its next rest, the way a
+stale one does, and its next session reaches the hub over HTTP.
 
 A thread whose session runs needs its channel. When it drops, when the hub
 starts, when a message finds its session running without one, and after a
@@ -127,7 +131,10 @@ dropped HTTP server at about 0, 1, 3, 7 and 15 seconds, then gives up for
 good). After that, a session still running that started before then restarts
 in place (`claude respawn`, which keeps its conversation and runs a turn it was
 on again) when its flags read the thread's settings file, which the hub writes
-again first, so the session comes back with the current token and thread, and otherwise stops
+again first, so the session comes back with the current token and thread. The hub
+owns that file's plugin and thread keys and a launcher may add its own at start
+(hex's adds its chat prompt's settings and a call's model); a respawn runs without the
+launcher, so the hub renews only its own keys and the launcher's stay. Otherwise it stops
 and resumes, since a respawn would start it without its binding; one that
 started since gets the same time, and one that restarted
 and still has no channel is reported as a failed start, as is a session the
@@ -136,8 +143,10 @@ never waits on a start that is gone. A gone main thread
 starts again, and a thread whose messages waited on a session that has since
 ended resumes. The running session serving a thread is its current one, or one
 Claude's job record shows was started for it (its `respawnFlags` keep the
-settings env), so a session whose conversation isn't saved yet is waited for,
-never started twice.
+settings env, in its settings file or, from a hub before that file, inline), so a
+session whose conversation isn't saved yet is waited for, never started twice. A
+session the hub stops to start again is stopped by its own id, which for one
+found by its job record isn't the thread's saved one.
 
 `tappable` turns `buzz://` links into web links through `open.html` on hex's
 site, since chat apps only link web addresses.

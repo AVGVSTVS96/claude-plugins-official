@@ -124,6 +124,26 @@ function hook(payload: object) {
   socket.on('connect', () => socket.end(JSON.stringify(payload) + '\n'))
 }
 
+// A session whose plugin started before the hub served over HTTP: it says hello on hub.sock, which
+// stays its channel.
+async function older(thread: string, id = SESSION) {
+  const socket = connect(join(dir, 'hub.sock'))
+  sockets.push(socket)
+  const received: any[] = []
+  let buffer = ''
+  socket.setEncoding('utf8')
+  socket.on('data', (chunk: string) => {
+    buffer += chunk
+    const lines = buffer.split('\n')
+    buffer = lines.pop()!
+    received.push(...lines.map(line => JSON.parse(line)))
+  })
+  await new Promise(resolve => socket.on('connect', resolve))
+  const send = (payload: object) => socket.write(JSON.stringify(payload) + '\n')
+  send({ type: 'hello', thread, session: id })
+  return { received, send }
+}
+
 // Claude's record of a background job, with the flags it restarts with: they read the thread's
 // settings file, which binds the session to it. The job defaults to the session's short id, as
 // Claude lists a job without one.
@@ -332,6 +352,17 @@ test('a session still running once its channel stays gone restarts in place, and
   await Bun.sleep(150)
   expect(calls().filter(args => args[0] === 'respawn').length).toBe(1)
   expect(failures).toEqual([])
+})
+
+test('a session that restarts in place keeps what its launcher added to its settings, and gets the hub\'s current token', async () => {
+  bound('chat:7')
+  const file = join(dir, 'sessions', 'chat%3A7.json')
+  writeFileSync(file, JSON.stringify({ model: 'claude-sonnet-5-5', claudeMdExcludes: ['/rules.md'], enabledPlugins: { 'other@hex': true }, env: { HEX_CHANNEL: CHANNEL, HEX_THREAD: 'chat:7', HEX_TOKEN: 'old', HEX_WAKE: '/wake.md' } }))
+  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, startedAt: 1 }], reconnect: 50 })
+  await until(() => calls().find(args => args[0] === 'respawn'))
+  const settings = JSON.parse(readFileSync(file, 'utf8'))
+  expect(settings).toMatchObject({ model: 'claude-sonnet-5-5', claudeMdExcludes: ['/rules.md'], enabledPlugins: { 'other@hex': true, 'telegram@hex': true }, env: { HEX_WAKE: '/wake.md', HEX_THREAD: 'chat:7' } })
+  expect(settings.env.HEX_TOKEN).toBe(readFileSync(join(dir, 'token'), 'utf8'))
 })
 
 test('a session that restarts in place and still gets no channel is reported, not restarted again', async () => {
@@ -1186,6 +1217,34 @@ test('a session whose flags read no settings file of the hub stops and resumes o
   const args = await launched()
   expect(args[args.indexOf('--resume') + 1]).toBe(SESSION)
   expect(calls().some(args => args[0] === 'respawn')).toBe(false)
+})
+
+test('a session from before the hub served over HTTP keeps its hello line on hub.sock until its rest, then starts over', async () => {
+  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'busy' }] })
+  const { received, send } = await older('chat:7')
+  send({ type: 'state', thread: 'chat:7', busy: true })
+  await until(() => states.length)
+  hub.deliver('chat:7', 'Desk anchors', message)
+  await until(() => received.length)
+  expect(received[0]).toEqual({ type: 'inbound', ...message })
+  send({ type: 'call', id: 1, tool: 'reply', args: { text: 'hello' } })
+  expect(await until(() => received.find(event => event.type === 'result'))).toEqual({ type: 'result', id: 1, text: 'reply in chat:7' })
+  expect(calls().some(args => args[0] === 'stop')).toBe(false)
+  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid: 42, status: 'idle' }]))
+  send({ type: 'state', thread: 'chat:7', busy: false })
+  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
+})
+
+test('a fresh main thread whose unsaved session an older hub started with its settings inline is waited for, not started twice, and is stopped rather than respawned once its channel stays gone', async () => {
+  const old = Bun.spawn(['sleep', '30'])
+  const id = '1a2b3c4d-0000-4000-8000-000000000000'
+  mkdirSync(join(dir, 'jobs', id.slice(0, 8)), { recursive: true })
+  writeFileSync(join(dir, 'jobs', id.slice(0, 8), 'state.json'), JSON.stringify({ state: 'working', sessionId: id, respawnFlags: ['--channels', CHANNEL, '--settings', JSON.stringify({ enabledPlugins: {}, env: { HEX_CHANNEL: CHANNEL, HEX_THREAD: 'voice' } })] }))
+  start({ main: 'voice', fresh: () => true, capacity: 0, reconnect: 50, registry: { voice: { name: 'voice' } }, agents: [{ sessionId: id, pid: old.pid, status: 'idle', startedAt: 1 }] })
+  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', id.slice(0, 8)])
+  expect(calls().some(args => args[0] === '--bg' || args[0] === 'respawn')).toBe(false)
+  old.kill()
+  await launched()
 })
 
 test('HEX_CHAT_CAPACITY may be 0, and must be a number', async () => {

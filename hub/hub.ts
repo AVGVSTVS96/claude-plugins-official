@@ -327,11 +327,10 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
     else if (thread !== main) stop(thread)
   }
 
-  function stop(thread: string) {
+  function stop(thread: string, session = current(thread)) {
     const run = runOf(thread)
     clearTimeout(run.rest)
     run.rest = undefined
-    const session = current(thread)
     if (session) void claude.stop(session)
   }
 
@@ -448,8 +447,9 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
     return join(sessionsDir, `${encodeURIComponent(thread)}.json`)
   }
 
-  // A respawn reads the same file, so it gets the hub's current token too.
-  function writeSettings(thread: string) {
+  // A respawn reads the same file, so it gets the hub's current token too. It runs without the
+  // launcher, so the file keeps what the launcher added and renews only the hub's keys.
+  function writeSettings(thread: string, launched: ReturnType<typeof claude.settingsOf> = {}) {
     const env = {
       HEX_CHANNEL: channel,
       HEX_THREAD: thread,
@@ -459,7 +459,7 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
       ...(general && thread === main ? { HEX_MAIN: '1' } : {}),
       ...(fresh(thread) ? { HEX_FRESH: '1' } : {}),
     }
-    writeFileSync(settingsOf(thread), JSON.stringify({ enabledPlugins: { [plugin]: true }, env }), { mode: 0o600 })
+    writeFileSync(settingsOf(thread), JSON.stringify({ ...launched, enabledPlugins: { ...launched?.enabledPlugins, [plugin]: true }, env: { ...launched?.env, ...env } }), { mode: 0o600 })
   }
 
   async function start(thread: string, prompt?: string, fork?: string) {
@@ -542,27 +542,29 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
   async function cycle(thread: string, running?: claude.Agent, prompt?: string, quiet = false) {
     const run = runOf(thread)
     if (running) {
-      stop(thread)
+      stop(thread, running.sessionId)
       await claude.exited(running.pid)
     }
     if (run.phase.is === 'live' || run.phase.is === 'recovering') become(run, { is: 'stopped' })
     void launch(thread, threads[thread]!.name, { prompt, quiet })
   }
 
-  // A session's channel connected: its session is the one the hub started, or the one Claude
-  // reports running for the thread. One that only reconnects still owes a renew it asked for.
-  function welcome(thread: string, line: Line) {
+  // A session's channel connected: over HTTP (its session is the one the hub started, or the one
+  // Claude reports running for the thread), or through its plugin's hello on hub.sock, which names
+  // it. Only a session started before its plugin served over HTTP says hello, so it starts over on
+  // HTTP at its next rest. One that only reconnects still owes a renew it asked for.
+  function welcome(thread: string, line: Line, session?: string) {
     const run = runOf(thread)
     const job = run.phase.is === 'launching' ? run.phase.job : undefined
     become(run, { is: 'live', line })
     if (run.renew !== 'asked') run.renew = undefined
     threads[thread] ??= { name: thread }
-    const id = job && claude.record(job).sessionId
+    const id = session ?? (job && claude.record(job).sessionId)
     if (id) note(thread, id)
     for (const message of run.queue.splice(0)) line.send({ type: 'inbound', ...message })
     rest(thread)
     letGo(thread)
-    if (stale(thread)) {
+    if (session || stale(thread)) {
       run.renew = 'stale'
       void renew(thread)
     }
@@ -601,7 +603,7 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
       if ((running.startedAt ?? 0) >= since) return recover(thread)
       // A respawn starts from the flags the session started with, which read the thread's current
       // settings file only for a session the hub started that way.
-      if (claude.envOf(running)) return respawn(thread, running)
+      if (claude.settingsOf(running)) return respawn(thread, running)
       void cycle(thread, running)
     }, reconnect)
   }
@@ -626,7 +628,7 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
     if (run.phase.is === 'launching') run.phase.respawned = true
     else become(run, { is: 'launching', respawned: true })
     const phase = run.phase
-    writeSettings(thread)
+    writeSettings(thread, claude.settingsOf(running))
     await claude.respawn(running)
     if (run.phase === phase) recover(thread)
   }
@@ -672,23 +674,36 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
   })
   channels.set(path, serve)
 
-  // Where a session's hooks and hex's own tools reach the hub, one JSON line each.
+  // Where a session's hooks and hex's own tools reach the hub, one JSON line each. A session whose
+  // plugin started before it served over HTTP says hello here and keeps this line as its channel.
   rmSync(socketPath, { force: true })
   const sock = createServer(socket => {
+    let thread = ''
     let buffer = ''
+    const reply = (payload: object) => socket.write(JSON.stringify(payload) + '\n')
+    const line: Line = { send: reply }
     socket.setEncoding('utf8')
     socket.on('data', (chunk: string) => {
       buffer += chunk
       for (let end = buffer.indexOf('\n'); end >= 0; end = buffer.indexOf('\n')) {
-        const line = buffer.slice(0, end)
+        const raw = buffer.slice(0, end)
         buffer = buffer.slice(end + 1)
         try {
-          handle(JSON.parse(line))
+          const request = JSON.parse(raw)
+          if (request.type === 'hello') welcome((thread = request.thread), line, request.session)
+          else if (request.type === 'permission_request') permission?.(thread, request)
+          else if (request.type === 'call')
+            call(thread, request.tool, request.args ?? {}).then(
+              text => reply({ type: 'result', id: request.id, text }),
+              error => reply({ type: 'result', id: request.id, error: error instanceof Error ? error.message : String(error) }),
+            )
+          else handle(request)
         } catch (error) {
-          process.stderr.write(`hub: dropped a bad line on ${socketPath}: ${error}\n`)
+          process.stderr.write(`hub: dropped a bad line from ${thread || 'a session'}: ${error}\n`)
         }
       }
     })
+    socket.on('close', () => drop(thread, line))
     socket.on('error', () => {})
   }).listen(socketPath)
 
