@@ -1,9 +1,9 @@
 diff --git a/external_plugins/voice/asks.test.ts b/external_plugins/voice/asks.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..ce336b4b683da52eacac948cd90c429c0cda21c9
+index 0000000000000000000000000000000000000000..d68fa6f79391a49fd07a74fbea61b2c47db2aac1
 --- /dev/null
 +++ b/external_plugins/voice/asks.test.ts
-@@ -0,0 +1,203 @@
+@@ -0,0 +1,205 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { Database } from 'bun:sqlite'
 +import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'fs'
@@ -72,9 +72,9 @@ index 0000000000000000000000000000000000000000..ce336b4b683da52eacac948cd90c429c
 +test('open questions come newest first with a link to each, answered and settled ones drop out', () => {
 +  ledger([asked(1, 'Ship it?', ['Yes', 'No']), asked(2, 'Rename it?', ['Yes', 'No'], { answer: { label: 'No', at: '', via: 'telegram' } }), asked(3, 'Which color?', ['Mint', 'Coral'])])
 +  asks = new Asks(state, { t3Database: '/nonexistent', check: why => checks.push(why) })
-+  expect(asks.view.asks.map(ask => [ask.question, ask.topic, ask.link])).toEqual([
-+    ['Which color?', 'desk', 'https://t.me/c/1234/5/3'],
-+    ['Ship it?', 'desk', 'https://t.me/c/1234/5/1'],
++  expect(asks.view.asks.map(ask => [ask.question, ask.app, ask.topic, ask.link])).toEqual([
++    ['Which color?', 'telegram', 'desk', 'https://t.me/c/1234/5/3'],
++    ['Ship it?', 'telegram', 'desk', 'https://t.me/c/1234/5/1'],
 +  ])
 +})
 +
@@ -106,6 +106,7 @@ index 0000000000000000000000000000000000000000..ce336b4b683da52eacac948cd90c429c
 +  )
 +  asks = new Asks(state, { t3Database: '/nonexistent', check: why => checks.push(why) })
 +  expect(asks.view.asks.map(ask => ask.id)).toEqual([`telegram:${DESK}:9`, 'check:twilio', 'check:read'])
++  expect(asks.view.asks.map(ask => ask.app)).toEqual(['telegram', 'telegram', 'telegram'])
 +  expect(asks.view.check).toEqual({ at: '2026-10-13T15:00:00.000Z', why: 'a pinned post changed', fixed: 0, flagged: 0 })
 +
 +  await asks.answer('check:twilio', 'Use the app', 'app')
@@ -151,7 +152,7 @@ index 0000000000000000000000000000000000000000..ce336b4b683da52eacac948cd90c429c
 +  expect(await until(() => lines[0])).toEqual({ type: 'inbound', thread: GROUP, content: 'Restore cloud from checkpoint v7.', meta: { user: 'hex app' } })
 +  await asks.act('runs')
 +  await until(() => asks.view.stuck.length === 1)
-+  expect(asks.view.stuck[0]).toMatchObject({ id: 'disk', sent: expect.any(String) })
++  expect(asks.view.stuck[0]).toMatchObject({ id: 'disk', app: 'hex', sent: expect.any(String) })
 +  expect(JSON.parse(readFileSync(join(state, 'voice', 'marks.json'), 'utf8')).dismissed.runs).toBeString()
 +})
 +
@@ -187,7 +188,8 @@ index 0000000000000000000000000000000000000000..ce336b4b683da52eacac948cd90c429c
 +    ['broken thread ended in an error', 'Look', 'failed'],
 +  ])
 +  expect(stuck.every(item => item.request)).toBe(true)
-+  expect(fresh).toEqual([{ id: expect.stringMatching(/^t3-done-/), title: 'finished thread', where: 'T3 · hex', line: 'Done', at: '2026-10-13T10:00:00.000Z' }])
++  expect(fresh).toEqual([{ id: expect.stringMatching(/^t3-done-/), app: 't3', topic: 'hex', title: 'finished thread', where: 'T3 · hex', line: 'Done', at: '2026-10-13T10:00:00.000Z' }])
++  expect(stuck.every(item => item.app === 't3')).toBe(true)
 +})
 +
 +test('a check’s verdict is held to the ledger: real open refs and buttons only, and nothing both settled and listed', () => {
@@ -209,10 +211,10 @@ index 0000000000000000000000000000000000000000..ce336b4b683da52eacac948cd90c429c
 +})
 diff --git a/external_plugins/voice/asks.ts b/external_plugins/voice/asks.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..6719ac113231c7b3ef3ab5bf81e5d61b0359ad7e
+index 0000000000000000000000000000000000000000..83d77090a6e9f64338439e4df0de924e5f02cbc8
 --- /dev/null
 +++ b/external_plugins/voice/asks.ts
-@@ -0,0 +1,348 @@
+@@ -0,0 +1,350 @@
 +import { readdirSync, readFileSync, renameSync, watch, writeFileSync } from 'fs'
 +import { join } from 'path'
 +import type { Ask as Asked } from '../../hub/ledger.ts'
@@ -230,6 +232,7 @@ index 0000000000000000000000000000000000000000..6719ac113231c7b3ef3ab5bf81e5d61b
 +  id: string
 +  kind: Kind
 +  task: string
++  app: string
 +  topic: string
 +  at: string
 +  question: string
@@ -241,7 +244,7 @@ index 0000000000000000000000000000000000000000..6719ac113231c7b3ef3ab5bf81e5d61b
 +}
 +// hex's check rewrites the raw questions into these: one per decision, however many places asked
 +// it (refs), in the order that unblocks the most, with its pick and what it costs.
-+export type Curated = Omit<Ask, 'topic' | 'link'> & { refs?: Ref[] }
++export type Curated = Omit<Ask, 'app' | 'topic' | 'link'> & { refs?: Ref[] }
 +export type Note = { title: string; text: string; did?: string }
 +export type CheckResult = {
 +  at: string
@@ -250,7 +253,7 @@ index 0000000000000000000000000000000000000000..6719ac113231c7b3ef3ab5bf81e5d61b
 +  asks: Curated[]
 +  fixed: Note[]
 +  flagged: Note[]
-+  stuck: Stuck[]
++  stuck: Omit<Stuck, 'app'>[]
 +  inputs?: string
 +}
 +export type View = {
@@ -432,7 +435,7 @@ index 0000000000000000000000000000000000000000..6719ac113231c7b3ef3ab5bf81e5d61b
 +    )
 +    raw.sort((a, b) => b.at.localeCompare(a.at))
 +    const checked = this.result?.at ?? ''
-+    const stuck = [...this.t3.stuck, ...(this.result?.stuck ?? [])]
++    const stuck = [...this.t3.stuck, ...(this.result?.stuck ?? []).map(item => ({ ...item, app: 'hex' }))]
 +      .filter(item => !this.marks.dismissed[item.id])
 +      .map(item => ({ ...item, ...(this.marks.sent[item.id] && { sent: this.marks.sent[item.id] }) }))
 +    const view: Omit<View, 'version'> = {
@@ -464,6 +467,7 @@ index 0000000000000000000000000000000000000000..6719ac113231c7b3ef3ab5bf81e5d61b
 +    const ref = refs?.[0]
 +    return {
 +      ...rest,
++      app: ref?.app ?? ask.task.split(':')[0]!,
 +      topic: this.names.get(ask.task) ?? ask.task.split(':').at(-1)!,
 +      ...(ref && link(ref) && { link: link(ref) }),
 +    }
@@ -563,7 +567,7 @@ index 0000000000000000000000000000000000000000..6719ac113231c7b3ef3ab5bf81e5d61b
 +}
 diff --git a/external_plugins/voice/check.ts b/external_plugins/voice/check.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..9bca8dd83068258c6d31a46b33e256a39eecc5c3
+index 0000000000000000000000000000000000000000..76a3d677b3547b2f68b25dcbd91850a1d8bf6f39
 --- /dev/null
 +++ b/external_plugins/voice/check.ts
 @@ -0,0 +1,290 @@
@@ -816,7 +820,7 @@ index 0000000000000000000000000000000000000000..9bca8dd83068258c6d31a46b33e256a3
 +    settle: verdict.settle.filter(ref => open(ref) && !listed.has(`${ref.app} ${ref.thread} ${ref.message}`)).map(ref => ({ ...ref, note: ref.note.slice(0, 60) })),
 +    fixed: verdict.fixed,
 +    flagged: verdict.flagged,
-+    stuck: verdict.stuck.map((item: Stuck) => ({ ...item, id: item.id.startsWith('check-') ? item.id : `check-${item.id}` })),
++    stuck: verdict.stuck.map((item: Omit<Stuck, 'app'>) => ({ ...item, id: item.id.startsWith('check-') ? item.id : `check-${item.id}` })),
 +  }
 +}
 +
@@ -859,10 +863,10 @@ index 0000000000000000000000000000000000000000..9bca8dd83068258c6d31a46b33e256a3
 +if (import.meta.main) await run(process.argv[2]!)
 diff --git a/external_plugins/voice/links.ts b/external_plugins/voice/links.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..749ff8622b328b52ff580d061d255f306397f952
+index 0000000000000000000000000000000000000000..252bd38ba2b65227261b36ce5de7e9bf44f593b9
 --- /dev/null
 +++ b/external_plugins/voice/links.ts
-@@ -0,0 +1,118 @@
+@@ -0,0 +1,123 @@
 +import { Database } from 'bun:sqlite'
 +import { existsSync, readFileSync, watch } from 'fs'
 +import { homedir } from 'os'
@@ -874,13 +878,13 @@ index 0000000000000000000000000000000000000000..749ff8622b328b52ff580d061d255f30
 +
 +// Where a hex thread lives in its own app. Each bot leaves what its links need in its state folder
 +// (Discord's server, Telegram's bot name, the channel of every Buzz thread), and T3 Code's own database,
-+// read only, says which T3 thread a hex thread is. An app that can't say gives no link.
++// read only, says which T3 thread a hex thread is and what it's called there. An app that can't say gives no link.
 +// T3_APP_SCHEME is the T3 Code app's URL scheme: t3code, t3code-preview or t3code-dev.
 +export class Links {
 +  private guild?: string
 +  private bot?: string
 +  private channels: Record<string, string> = {}
-+  private threads = new Map<string, string>()
++  private threads = new Map<string, { thread: string; title: string }>()
 +  private environment?: string
 +  private db?: Database
 +  private watcher?: ReturnType<typeof watch>
@@ -929,10 +933,15 @@ index 0000000000000000000000000000000000000000..749ff8622b328b52ff580d061d255f30
 +        return channel && `buzz://message?channel=${channel}&id=${id}`
 +      }
 +      case 't3': {
-+        const thread = this.threads.get(id)
++        const thread = this.threads.get(id)?.thread
 +        return thread && this.environment && `${this.scheme}://threads/${this.environment}/${encodeURIComponent(thread)}`
 +      }
 +    }
++  }
++
++  // What the thread is called in its own app, where hex knows it by another name: T3 Code's title.
++  title(app: string, id: string): string | undefined {
++    return app === 't3' ? word(this.threads.get(id)?.title) : undefined
 +  }
 +
 +  private schedule() {
@@ -947,15 +956,15 @@ index 0000000000000000000000000000000000000000..749ff8622b328b52ff580d061d255f30
 +  private read() {
 +    try {
 +      const rows = this.db!
-+        .query<{ key: string; thread: string }, []>(
-+          `select json_extract(p.payload_json, '$.nativeThreadRef.nativeId') key, json_extract(p.payload_json, '$.appThreadId') thread
++        .query<{ key: string; thread: string; title: string }, []>(
++          `select json_extract(p.payload_json, '$.nativeThreadRef.nativeId') key, json_extract(p.payload_json, '$.appThreadId') thread, t.title
 +           from orchestration_v2_projection_provider_threads p
 +           join orchestration_v2_projection_threads t on t.thread_id = json_extract(p.payload_json, '$.appThreadId')
 +           where p.driver = 'acpRegistry' and t.deleted_at is null
 +           order by p.updated_at`,
 +        )
 +        .all()
-+      const threads = new Map(rows.map(row => [row.key, row.thread]))
++      const threads = new Map(rows.map(({ key, thread, title }) => [key, { thread, title }]))
 +      if (JSON.stringify([...threads]) === JSON.stringify([...this.threads])) return false
 +      this.threads = threads
 +      return true
@@ -1123,19 +1132,22 @@ index 0000000000000000000000000000000000000000..7619ff886830c93cc512bf50df04b012
 +}
 diff --git a/external_plugins/voice/t3.ts b/external_plugins/voice/t3.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..e3b27c92e497fc5099b4bb8079fcf957f8e1c387
+index 0000000000000000000000000000000000000000..8e0935b518cacfbebef18fdaec0f46a82a4a70f2
 --- /dev/null
 +++ b/external_plugins/voice/t3.ts
-@@ -0,0 +1,172 @@
+@@ -0,0 +1,186 @@
 +import { Database } from 'bun:sqlite'
 +import { createHash } from 'crypto'
 +import { existsSync, watch } from 'fs'
 +import { homedir } from 'os'
 +import { basename, dirname, join } from 'path'
 +
-+// request: what hex's General is asked to do about it; without one, the action just puts it away.
-+export type Stuck = { id: string; title: string; why: string; action: string; mark: 'paused' | 'failed'; at: string; request?: string }
-+export type Fresh = { id: string; title: string; where: string; line: string; at: string }
++// app: where it's stuck, t3 or hex itself. request: what hex's General is asked to do about it; without one,
++// the action just puts it away.
++export type Stuck = { id: string; app: string; title: string; why: string; action: string; mark: 'paused' | 'failed'; at: string; request?: string }
++// topic: the T3 project it finished in, or the thread's own title. where says the same as one line, for apps
++// that still read it.
++export type Fresh = { id: string; app: string; topic: string; title: string; where: string; line: string; at: string }
 +
 +type Thread = { id: string; title: string; project: string | null; visited: string | null; limit: string | null; mine: boolean }
 +type Run = { thread: string; ordinal: number; status: string; requested: string; completed: string | null }
@@ -1221,6 +1233,7 @@ index 0000000000000000000000000000000000000000..e3b27c92e497fc5099b4bb8079fcf957
 +      const until = parked.map(thread => thread.limit!).sort()[0]!
 +      stuck.push({
 +        id: `t3-limit-${until}`,
++        app: 't3',
 +        title: `${count(parked.length, 'T3 thread')} ${parked.length === 1 ? 'waits' : 'wait'} for ${day(until)}`,
 +        why: `A usage limit: ${parked.map(thread => thread.title).join(', ')}.`,
 +        action: 'Switch plan',
@@ -1234,6 +1247,7 @@ index 0000000000000000000000000000000000000000..e3b27c92e497fc5099b4bb8079fcf957
 +      if (!thread || thread.limit && thread.limit > iso || Date.parse(run.requested) > now - QUEUED) continue
 +      stuck.push({
 +        id: `t3-queued-${digest(`${run.thread}:${run.requested}`)}`,
++        app: 't3',
 +        title: `${thread.title}: queued since ${day(run.requested)}`,
 +        why: 'Its run never started.',
 +        action: 'Resume',
@@ -1250,6 +1264,7 @@ index 0000000000000000000000000000000000000000..e3b27c92e497fc5099b4bb8079fcf957
 +      const titles = failed.map(run => threads.get(run.thread)!.title)
 +      stuck.push({
 +        id: `t3-failed-${digest(failed.map(run => `${run.thread}:${run.ordinal}`).sort().join(','))}`,
++        app: 't3',
 +        title: failed.length === 1 ? `${titles[0]} ended in an error` : `${failed.length} T3 runs ended in an error`,
 +        why: failed.length === 1 ? 'You haven’t opened it since.' : `${titles.join(', ')}.`,
 +        action: 'Look',
@@ -1267,7 +1282,15 @@ index 0000000000000000000000000000000000000000..e3b27c92e497fc5099b4bb8079fcf957
 +      .sort((a, b) => b.completed!.localeCompare(a.completed!))
 +      .map((run): Fresh => {
 +        const thread = threads.get(run.thread)!
-+        return { id: `t3-done-${digest(`${run.thread}:${run.ordinal}`)}`, title: thread.title, where: thread.project ? `T3 · ${thread.project}` : 'T3', line: this.lastWords(run.thread), at: run.completed! }
++        return {
++          id: `t3-done-${digest(`${run.thread}:${run.ordinal}`)}`,
++          app: 't3',
++          topic: thread.project ?? thread.title,
++          title: thread.title,
++          where: thread.project ? `T3 · ${thread.project}` : 'T3',
++          line: this.lastWords(run.thread),
++          at: run.completed!,
++        }
 +      })
 +    return { stuck, fresh }
 +  }
@@ -1301,10 +1324,10 @@ index 0000000000000000000000000000000000000000..e3b27c92e497fc5099b4bb8079fcf957
 +}
 diff --git a/external_plugins/voice/tasks.test.ts b/external_plugins/voice/tasks.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..1996c748336c364f893b9b18172f9d24e53c584f
+index 0000000000000000000000000000000000000000..86d5745d5057f6ac874e272a061c2aeedf298333
 --- /dev/null
 +++ b/external_plugins/voice/tasks.test.ts
-@@ -0,0 +1,288 @@
+@@ -0,0 +1,332 @@
 +import { Database } from 'bun:sqlite'
 +import { afterAll, expect, test } from 'bun:test'
 +import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
@@ -1340,8 +1363,12 @@ index 0000000000000000000000000000000000000000..1996c748336c364f893b9b18172f9d24
 +}
 +
 +function step(path: string, name: string, input: object) {
++  said(path, { type: 'tool_use', id: `toolu_${Math.random()}`, name, input })
++}
++
++function said(path: string, content: object) {
 +  mkdirSync(join(path, '..'), { recursive: true })
-+  appendFileSync(path, JSON.stringify({ type: 'assistant', message: { id: `msg_${Math.random()}`, content: [{ type: 'tool_use', id: `toolu_${Math.random()}`, name, input }] } }) + '\n')
++  appendFileSync(path, JSON.stringify({ type: 'assistant', message: { id: `msg_${Math.random()}`, content: [content] } }) + '\n')
 +}
 +
 +async function until(check: () => boolean) {
@@ -1361,12 +1388,14 @@ index 0000000000000000000000000000000000000000..1996c748336c364f893b9b18172f9d24
 +threads('telegram', telegram)
 +threads('buzz', { b1: { name: 'Old news', session: 'ffffffff-old' } })
 +job('aaaaaaaa-general', { state: 'done', detail: 'heartbeat ran', updatedAt: ago(5) })
-+const asked = ago(40)
++const [published, finished, asked, still] = [ago(90), ago(60), ago(40), ago(20)]
 +job('bbbbbbbb-autofork', { state: 'blocked', detail: 'needs music', needs: 'Pick a music style, and run `claude setup-token`', updatedAt: ago(20) }, [
-+  { at: ago(90), state: 'working', detail: 'Publishing', text: '' },
-+  { at: ago(60), state: 'done', detail: '**Published** autofork 0.1.2', text: 'npm is live' },
++  { at: ago(13 * 60), state: 'done', detail: 'Overnight', text: '' },
++  { at: ago(12.5 * 60), state: 'blocked', detail: 'Asked overnight', text: '' },
++  { at: published, state: 'working', detail: 'Publishing', text: '' },
++  { at: finished, state: 'done', detail: '**Published** autofork 0.1.2', text: 'npm is live' },
 +  { at: asked, state: 'blocked', detail: 'needs music', text: 'Your call' },
-+  { at: ago(20), state: 'blocked', detail: 'still needs music', text: 'Still yours' },
++  { at: still, state: 'blocked', detail: 'still needs music', text: 'Still yours' },
 +])
 +job('cccccccc-voiceapp', { state: 'working', detail: 'building', updatedAt: ago(1), fan: [{ id: 'old', kind: 'agent', label: 'Earlier', doneAt: 1 }, { id: 'agent2', kind: 'agent', label: 'Check the server', doneAt: Date.now() - 60_000 }, { id: 'agent1', kind: 'agent', label: 'Build the Tasks view' }, { id: 'sh', kind: 'shell', label: 'sleep' }] }, [
 +  { at: ago(14), state: 'working', detail: '', text: '' },
@@ -1382,12 +1411,12 @@ index 0000000000000000000000000000000000000000..1996c748336c364f893b9b18172f9d24
 +mkdirSync(t3)
 +writeFileSync(join(t3, 'environment-id'), 'env-1\n')
 +const t3db = new Database(join(t3, 'statev2.sqlite'))
-+t3db.run('create table orchestration_v2_projection_threads (thread_id text primary key, deleted_at text)')
++t3db.run('create table orchestration_v2_projection_threads (thread_id text primary key, title text, deleted_at text)')
 +t3db.run('create table orchestration_v2_projection_provider_threads (provider_thread_id text primary key, driver text, updated_at text, payload_json text)')
 +afterAll(() => t3db.close())
 +
-+function mapped(key: string, thread: string, { driver = 'acpRegistry', deleted = null as string | null } = {}) {
-+  t3db.run('insert or replace into orchestration_v2_projection_threads values (?, ?)', [thread, deleted])
++function mapped(key: string, thread: string, { driver = 'acpRegistry', deleted = null as string | null, title = 'T3 thread' } = {}) {
++  t3db.run('insert or replace into orchestration_v2_projection_threads values (?, ?, ?)', [thread, title, deleted])
 +  t3db.run('insert or replace into orchestration_v2_projection_provider_threads values (?, ?, ?, ?)', [
 +    `${driver}:${key}`,
 +    driver,
@@ -1410,6 +1439,7 @@ index 0000000000000000000000000000000000000000..1996c748336c364f893b9b18172f9d24
 +  const autofork = tasks.get('telegram:-1004422245734:908')!
 +  expect(autofork).toMatchObject({
 +    where: 'Telegram',
++    place: 'autofork',
 +    line: 'Pick a music style, and run claude setup-token',
 +    needs: 'Pick a music style, and run claude setup-token',
 +    since: asked,
@@ -1420,7 +1450,16 @@ index 0000000000000000000000000000000000000000..1996c748336c364f893b9b18172f9d24
 +    ['needs', 'needs music'],
 +    ['done', 'Published autofork 0.1.2'],
 +  ])
-+  expect(tasks.get('telegram:-1004422245734')).toMatchObject({ where: 'General', link: 'https://t.me/c/4422245734/1' })
++  const window = autofork.track[0]!.at
++  expect(Date.now() - Date.parse(window)).toBeGreaterThanOrEqual(12 * 60 * 60_000)
++  expect(autofork.track).toEqual([
++    { at: window, state: 'needs' },
++    { at: published, state: 'working' },
++    { at: finished, state: 'done' },
++    { at: asked, state: 'needs' },
++    { at: still, state: 'needs' },
++  ])
++  expect(tasks.get('telegram:-1004422245734')).toMatchObject({ where: 'General', place: 'General', link: 'https://t.me/c/4422245734/1' })
 +  expect(tasks.get('telegram:-1004422245734:65')).toMatchObject({ line: 'clips posted', lately: [] })
 +  expect(tasks.get('buzz:b1')).toBeUndefined()
 +  expect(tasks.summary).toEqual({ needs: 1, working: 1 })
@@ -1436,12 +1475,39 @@ index 0000000000000000000000000000000000000000..1996c748336c364f893b9b18172f9d24
 +  step(join(project, 'cccccccc-voiceapp.jsonl'), 'Read', { file_path: '/repo/src/tasks.ts' })
 +  step(join(project, 'cccccccc-voiceapp.jsonl'), 'Edit', { file_path: '/repo/src/tasks.ts', old_string: 'a', new_string: 'b' })
 +  await until(() => voiceapp().line === 'Editing tasks.ts')
-+  expect(voiceapp().steps.map(step => step.text)).toEqual(['Editing tasks.ts', 'Reading tasks.ts'])
++  expect(voiceapp().steps.map(step => [step.kind, step.text])).toEqual([
++    ['edit', 'Editing tasks.ts'],
++    ['read', 'Reading tasks.ts'],
++  ])
 +  step(join(project, 'cccccccc-voiceapp', 'subagents', 'agent-agent1.jsonl'), 'Read', { file_path: '/repo/README.md' })
 +  await until(() => voiceapp().agents[0].line === 'Reading README.md')
 +  const row = tasks.rows().find(row => row.name === 'voiceapp')!
 +  expect(row).not.toContainKey('steps')
 +  expect(row.agents[0]).toEqual({ id: 'agent1', label: 'Build the Tasks view', state: 'working', line: 'Reading README.md' })
++})
++
++test("a working thread's page has its thoughts in their own words and its plan as Claude Code's todo list stands", async () => {
++  const voiceapp = () => tasks.get('telegram:-1004422245734:2583')!
++  const transcript = join(project, 'cccccccc-voiceapp.jsonl')
++  said(transcript, { type: 'thinking', thinking: 'The **list** needs a lane.\n\nThen the rows.', signature: 'x' })
++  step(transcript, 'TodoWrite', {
++    todos: [
++      { content: 'Read the inbox', status: 'completed', activeForm: 'Reading the inbox' },
++      { content: 'Draw the lanes', status: 'in_progress', activeForm: 'Drawing the lanes' },
++      { content: 'Ship it', status: 'pending', activeForm: 'Shipping it' },
++    ],
++  })
++  await until(() => voiceapp().plan.length === 3)
++  expect(voiceapp().plan).toEqual([
++    { text: 'Read the inbox', state: 'done' },
++    { text: 'Drawing the lanes', state: 'running' },
++    { text: 'Ship it', state: 'pending' },
++  ])
++  expect(voiceapp().steps.slice(0, 2).map(step => [step.kind, step.text])).toEqual([
++    ['plan', 'Drawing the lanes'],
++    ['think', 'The list needs a lane. Then the rows.'],
++  ])
++  expect(tasks.rows().find(row => row.name === 'voiceapp')).not.toContainKey('plan')
 +})
 +
 +test('a change to a session wakes the list, and the counts move only when a count does', async () => {
@@ -1503,11 +1569,12 @@ index 0000000000000000000000000000000000000000..1996c748336c364f893b9b18172f9d24
 +    unmapped: { name: 'Unmapped', session: 'd3000005-unmapped' },
 +  })
 +  for (const session of ['d3000001-mapped', 'd3000002-later', 'd3000003-gone', 'd3000004-other', 'd3000005-unmapped']) job(session, { state: 'done', detail: 'ok', updatedAt: ago(1) })
-+  mapped('mapped', '4a1e7c52-9b3d-4f60-8a2e-5d6c7b8e9f01')
++  mapped('mapped', '4a1e7c52-9b3d-4f60-8a2e-5d6c7b8e9f01', { title: 'Voice app restyle' })
 +  mapped('gone', 'thread-gone', { deleted: ago(5) })
 +  mapped('other', 'thread-other', { driver: 'claudeAgent' })
 +  await until(() => !!tasks.get('t3:mapped')?.link)
-+  expect(tasks.get('t3:mapped')!.link).toBe('t3code://threads/env-1/4a1e7c52-9b3d-4f60-8a2e-5d6c7b8e9f01')
++  expect(tasks.get('t3:mapped')).toMatchObject({ link: 't3code://threads/env-1/4a1e7c52-9b3d-4f60-8a2e-5d6c7b8e9f01', place: 'Voice app restyle', name: 'Voice app' })
++  expect(tasks.get('t3:unmapped')!.place).toBe('Unmapped')
 +  for (const key of ['later', 'gone', 'other', 'unmapped']) expect(tasks.get(`t3:${key}`)!.link).toBeUndefined()
 +  mapped('later', 'thread:delegated task')
 +  await until(() => !!tasks.get('t3:later')?.link)
@@ -1595,22 +1662,24 @@ index 0000000000000000000000000000000000000000..1996c748336c364f893b9b18172f9d24
 +})
 diff --git a/external_plugins/voice/tasks.ts b/external_plugins/voice/tasks.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..f5662d098f17b8598e938d70309984b1e64ae312
+index 0000000000000000000000000000000000000000..0fec3f18dd7ed2daea53493e3f30a1dac4f71967
 --- /dev/null
 +++ b/external_plugins/voice/tasks.ts
-@@ -0,0 +1,476 @@
+@@ -0,0 +1,499 @@
 +import { closeSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, watch, type FSWatcher } from 'fs'
 +import { homedir } from 'os'
 +import { join } from 'path'
-+import { followTranscript, headline, sizeOf } from './activity.ts'
++import { followTranscript, sizeOf, stepOf, type Did } from './activity.ts'
 +import { Changes } from './changes.ts'
 +import { Links } from './links.ts'
 +
 +export type State = 'working' | 'needs' | 'done' | 'failed' | 'idle'
-+export type Step = { at: string; text: string }
++export type Step = Did & { at: string }
++export type Planned = { text: string; state: 'done' | 'running' | 'pending' }
 +export type Agent = { id: string; label: string; state: 'working' | 'done'; line?: string; steps: Step[] }
 +export type Moment = { at: string; state: State; text: string }
-+export type Row = Omit<HexTask, 'needs' | 'lately' | 'steps' | 'agents'> & { agents: Omit<Agent, 'steps'>[] }
++export type Turn = { at: string; state: State }
++export type Row = Omit<HexTask, 'needs' | 'lately' | 'steps' | 'plan' | 'agents'> & { agents: Omit<Agent, 'steps'>[] }
 +export type Summary = { needs: number; working: number }
 +export type HexTask = {
 +  id: string
@@ -1618,6 +1687,7 @@ index 0000000000000000000000000000000000000000..f5662d098f17b8598e938d70309984b1
 +  thread: string
 +  name: string
 +  where: string
++  place: string
 +  state: State
 +  line: string
 +  needs?: string
@@ -1625,11 +1695,13 @@ index 0000000000000000000000000000000000000000..f5662d098f17b8598e938d70309984b1
 +  at: string
 +  agents: Agent[]
 +  steps: Step[]
++  plan: Planned[]
 +  lately: Moment[]
++  track: Turn[]
 +  link?: string
 +}
 +
-+type Thread = { app: string; id: string; name: string; session?: string; cwd?: string; link?: string }
++type Thread = { app: string; id: string; name: string; session?: string; cwd?: string; link?: string; title?: string }
 +type Session = { id: string; pid: number; status: string; name?: string; cwd?: string; started: number; at: number; parent?: string }
 +type Job = {
 +  state?: string
@@ -1640,16 +1712,19 @@ index 0000000000000000000000000000000000000000..f5662d098f17b8598e938d70309984b1
 +  fan?: { id: string; kind: string; label: string; doneAt?: number }[]
 +}
 +type Entry = { at: string; state: string; detail?: string; text?: string }
-+type Follower = { stop: () => void; steps: Step[] }
++type Follower = { stop: () => void; steps: Step[]; plan: Planned[] }
 +
 +const CLAUDE = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude')
 +const TAIL = 256 * 1024
 +const LATELY = 5
 +const STEPS = 12
 +const KEEP = 7 * 24 * 60 * 60_000
++const TRACK = 12 * 60 * 60_000
++const TURNS = 48
 +const ORDER: State[] = ['needs', 'working', 'done', 'failed', 'idle']
 +const RECORDS = new Set(['threads.json', 'guild.json', 'bot.json', 'channels.json'])
 +const STATES: Record<string, State> = { working: 'working', blocked: 'needs', done: 'done', failed: 'failed' }
++const PLANNED: Record<string, Planned['state']> = { completed: 'done', in_progress: 'running', pending: 'pending' }
 +const APPS: Record<string, string> = { telegram: 'Telegram', discord: 'Discord', buzz: 'Buzz', t3: 'T3 Code', voice: 'Voice', claude: 'Claude Code' }
 +const WORK = new Set(['agent', 'workflow'])
 +const BUSY = new Set(['busy', 'shell'])
@@ -1696,7 +1771,7 @@ index 0000000000000000000000000000000000000000..f5662d098f17b8598e938d70309984b1
 +  }
 +
 +  rows(): Row[] {
-+    return this.tasks.map(({ needs, lately, steps, agents, ...row }) => ({ ...row, agents: agents.map(({ steps, ...agent }) => agent) }))
++    return this.tasks.map(({ needs, lately, steps, plan, agents, ...row }) => ({ ...row, agents: agents.map(({ steps, ...agent }) => agent) }))
 +  }
 +
 +  close() {
@@ -1758,6 +1833,7 @@ index 0000000000000000000000000000000000000000..f5662d098f17b8598e938d70309984b1
 +        session: typeof thread.session === 'string' ? thread.session : undefined,
 +        cwd: thread.cwd,
 +        link: this.links.of(app, id),
++        title: this.links.title(app, id),
 +      })),
 +    )
 +  }
@@ -1853,6 +1929,7 @@ index 0000000000000000000000000000000000000000..f5662d098f17b8598e938d70309984b1
 +    const since =
 +      state === 'working' && known !== 'working' ? new Date(began).toISOString() : state === 'working' || state === 'needs' ? (streak(timeline, job?.state) ?? at) : at
 +    const steps = state === 'working' ? this.steps(thread.session!) : []
++    const plan = state === 'working' ? (this.followers.get(thread.session!)?.plan ?? []) : []
 +    const line = steps[0]?.text ?? needs ?? detail ?? lately[0]?.text ?? ''
 +    const agents = (
 +      state === 'working'
@@ -1870,6 +1947,7 @@ index 0000000000000000000000000000000000000000..f5662d098f17b8598e938d70309984b1
 +      thread: thread.id,
 +      name: thread.name,
 +      where: where(thread),
++      place: thread.app === 'telegram' && !thread.id.includes(':') ? where(thread) : (thread.title ?? thread.name),
 +      state,
 +      line: oneLine(line),
 +      ...(needs && { needs }),
@@ -1877,7 +1955,9 @@ index 0000000000000000000000000000000000000000..f5662d098f17b8598e938d70309984b1
 +      at,
 +      agents,
 +      steps,
++      plan,
 +      lately: state === 'idle' ? [] : lately,
++      track: track(timeline, Date.now() - TRACK),
 +      ...(thread.link && { link: thread.link }),
 +    }
 +  }
@@ -1927,14 +2007,15 @@ index 0000000000000000000000000000000000000000..f5662d098f17b8598e938d70309984b1
 +    }
 +    for (const [key, start] of wanted) {
 +      if (this.followers.has(key)) continue
-+      const follower: Follower = { stop: () => {}, steps: [] }
++      const follower: Follower = { stop: () => {}, steps: [], plan: [] }
 +      this.followers.set(key, follower)
 +      follower.stop = start(path =>
 +        followTranscript(path, Math.max(0, sizeOf(path) - TAIL), (entry, updates) => {
 +          for (const update of updates()) {
-+            const text = headline(update)
-+            if (!text || text === follower.steps.at(-1)?.text) continue
-+            follower.steps.push({ at: entry.timestamp ?? new Date().toISOString(), text: oneLine(text) })
++            if (update.sessionUpdate === 'plan') follower.plan = update.entries.map(entry => ({ text: oneLine(entry.content), state: PLANNED[entry.status] ?? 'pending' }))
++            const did = stepOf(update)
++            if (!did?.text || did.text === follower.steps.at(-1)?.text) continue
++            follower.steps.push({ at: entry.timestamp ?? new Date().toISOString(), kind: did.kind, text: oneLine(did.text) })
 +            if (follower.steps.length > STEPS) follower.steps.shift()
 +          }
 +          this.schedule()
@@ -1974,6 +2055,15 @@ index 0000000000000000000000000000000000000000..f5662d098f17b8598e938d70309984b1
 +  let since: string | undefined
 +  for (let i = timeline.length - 1; i >= 0 && timeline[i].state === state; i--) since = timeline[i].at
 +  return since
++}
++
++// The job since `from`, for its lane: the state it was in then, and each entry after it, a change of
++// state or a step within one.
++function track(timeline: Entry[], from: number): Turn[] {
++  const turn = (at: string, state: string) => ({ at, state: STATES[state] ?? 'idle' })
++  const before = timeline.findLast(entry => Date.parse(entry.at) < from)
++  const after = timeline.filter(entry => Date.parse(entry.at) >= from).slice(-TURNS)
++  return [...(before ? [turn(new Date(from).toISOString(), before.state)] : []), ...after.map(entry => turn(entry.at, entry.state))]
 +}
 +
 +// A workflow agent's transcript lands in its run's own folder, so it's followed once it's written there.

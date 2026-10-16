@@ -419,10 +419,10 @@ index 0000000000000000000000000000000000000000..8b33c4550688268f716051a3dc7ebf89
 +- One call at a time. A new call ends the previous one.
 diff --git a/external_plugins/voice/activity.test.ts b/external_plugins/voice/activity.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..3eeb33129185c9d11d32909d0ea575c49b7c95f6
+index 0000000000000000000000000000000000000000..6a23e93b4707b2b94b3b37b072fed68491a185ce
 --- /dev/null
 +++ b/external_plugins/voice/activity.test.ts
-@@ -0,0 +1,153 @@
+@@ -0,0 +1,174 @@
 +import { afterAll, expect, test } from 'bun:test'
 +import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 +import { tmpdir } from 'os'
@@ -430,7 +430,7 @@ index 0000000000000000000000000000000000000000..3eeb33129185c9d11d32909d0ea575c4
 +
 +const home = mkdtempSync(join(tmpdir(), 'voice-activity-'))
 +process.env.CLAUDE_CONFIG_DIR = join(home, 'claude')
-+const { findThread, followAgent, followThread, followTranscript, headline } = await import('./activity.ts')
++const { findThread, followAgent, followThread, followTranscript, headline, stepOf } = await import('./activity.ts')
 +afterAll(() => rmSync(home, { recursive: true }))
 +
 +const hex = '/home/someone/hex'
@@ -490,6 +490,27 @@ index 0000000000000000000000000000000000000000..3eeb33129185c9d11d32909d0ea575c4
 +    'Gmail: search threads',
 +    undefined,
 +  ])
++})
++
++test('each step says what kind it is, and a thought keeps its own words where the agent line says Thinking', () => {
++  const path = join(home, 'kinds.jsonl')
++  write(
++    path,
++    tool('Bash', { command: 'npm run check' }),
++    tool('Read', { file_path: '/repo/a.ts' }),
++    tool('Edit', { file_path: '/repo/a.ts', old_string: 'a', new_string: 'b' }),
++    tool('Grep', { pattern: 'lane' }),
++    tool('WebFetch', { url: 'https://ui.shadcn.com/docs', prompt: 'read' }),
++    tool('Agent', { description: 'Judge the restyles', prompt: 'go' }),
++    tool('mcp__plugin_telegram_telegram__reply', { text: 'done' }),
++    said('Sent it.'),
++  )
++  const kinds: string[] = []
++  followTranscript(path, 0, (_: unknown, updates: () => any[]) => kinds.push(...updates().map(update => stepOf(update)?.kind)))()
++  expect(kinds).toEqual(['run', 'read', 'edit', 'search', 'web', 'agent', 'tool', 'say'])
++  const thought = { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'The **lane** first.\n\nThen rows.' } } as const
++  expect(stepOf(thought)).toEqual({ kind: 'think', text: 'The lane first. Then rows.' })
++  expect(headline(thought)).toBe('Thinking')
 +})
 +
 +test("an agent's own words read as their first line, without markdown, and its plan as the step in progress", () => {
@@ -578,10 +599,10 @@ index 0000000000000000000000000000000000000000..3eeb33129185c9d11d32909d0ea575c4
 +})
 diff --git a/external_plugins/voice/activity.ts b/external_plugins/voice/activity.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..2895d5c588951ad5b27ad7b6c6f42f42b7751dae
+index 0000000000000000000000000000000000000000..01aef3124b6ef04f65a217009de5604a034bb850
 --- /dev/null
 +++ b/external_plugins/voice/activity.ts
-@@ -0,0 +1,233 @@
+@@ -0,0 +1,250 @@
 +import { closeSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, statSync, watch } from 'fs'
 +import { homedir } from 'os'
 +import { basename, dirname, join } from 'path'
@@ -597,42 +618,59 @@ index 0000000000000000000000000000000000000000..2895d5c588951ad5b27ad7b6c6f42f42
 +const logger = { log: () => {}, error: (...args: unknown[]) => process.stderr.write(`voice: activity: ${args.join(' ')}\n`) }
 +const ID = /^[\w-]+$/
 +
-+// What an agent is doing right now, in a few words, from one ACP session/update.
-+export function headline(update: Update): string | undefined {
++// What an agent did, as a kind of step and a few words for it.
++export type Did = { kind: 'think' | 'say' | 'plan' | 'run' | 'read' | 'edit' | 'search' | 'web' | 'agent' | 'tool'; text: string }
++
++// What an agent is doing right now, from one ACP session/update. A thought keeps its own words.
++export function stepOf(update: Update): Did | undefined {
 +  switch (update.sessionUpdate) {
 +    case 'tool_call':
 +      return step(update)
-+    case 'agent_message_chunk':
-+      return update.content.type === 'text' ? firstLine(update.content.text) : undefined
++    case 'agent_message_chunk': {
++      const text = update.content.type === 'text' ? firstLine(update.content.text) : undefined
++      return text ? { kind: 'say', text } : undefined
++    }
 +    case 'agent_thought_chunk':
-+      return 'Thinking'
-+    case 'plan':
-+      return update.entries.find(entry => entry.status === 'in_progress')?.content
++      return { kind: 'think', text: (update.content.type === 'text' && plain(update.content.text)) || 'Thinking' }
++    case 'plan': {
++      const text = update.entries.find(entry => entry.status === 'in_progress')?.content
++      return text ? { kind: 'plan', text } : undefined
++    }
 +  }
 +}
 +
-+function step({ title, kind, rawInput, locations, _meta }: ToolCall) {
++// The same in a few plain words, for a call's agent line, where a thought is just Thinking.
++export function headline(update: Update): string | undefined {
++  const did = stepOf(update)
++  return did?.kind === 'think' ? 'Thinking' : did?.text
++}
++
++function step({ title, kind, rawInput, locations, _meta }: ToolCall): Did | undefined {
 +  const input = (rawInput ?? {}) as Record<string, string | undefined>
 +  const tool: string = (_meta as any)?.claudeCode?.toolName ?? title
 +  const file = locations?.[0]?.path ?? input.file_path ?? input.notebook_path
 +  switch (kind) {
 +    case 'execute':
-+      return input.description || `Running ${firstLine(input.command ?? title)}`
++      return { kind: 'run', text: input.description || `Running ${firstLine(input.command ?? title)}` }
 +    case 'read':
-+      return file ? `Reading ${basename(file)}` : title
++      return { kind: 'read', text: file ? `Reading ${basename(file)}` : title }
 +    case 'edit':
-+      return `${tool === 'Write' ? 'Writing' : 'Editing'} ${basename(file ?? title)}`
++      return { kind: 'edit', text: `${tool === 'Write' ? 'Writing' : 'Editing'} ${basename(file ?? title)}` }
 +    case 'search':
-+      return input.pattern ? `Searching for ${input.pattern}` : title
++      return { kind: 'search', text: input.pattern ? `Searching for ${input.pattern}` : title }
 +    case 'fetch':
-+      return input.query ? `Searching the web for ${input.query}` : input.url ? `Reading ${new URL(input.url).host}` : title
++      return { kind: 'web', text: input.query ? `Searching the web for ${input.query}` : input.url ? `Reading ${new URL(input.url).host}` : title }
 +    case 'think':
-+      return input.description && `Started an agent: ${input.description}`
++      return input.description ? { kind: 'agent', text: `Started an agent: ${input.description}` } : undefined
 +  }
 +  const mcp = tool.match(/^mcp__(.+?)__(.+)$/)
-+  if (mcp) return `${mcp[1].split('_').at(-1)!.replace(/^./, letter => letter.toUpperCase())}: ${mcp[2].replaceAll('_', ' ')}`
-+  if (input.skill) return `Using the ${input.skill} skill`
-+  return title === tool ? undefined : title
++  if (mcp) return { kind: 'tool', text: `${mcp[1].split('_').at(-1)!.replace(/^./, letter => letter.toUpperCase())}: ${mcp[2].replaceAll('_', ' ')}` }
++  if (input.skill) return { kind: 'tool', text: `Using the ${input.skill} skill` }
++  return title === tool ? undefined : { kind: 'tool', text: title }
++}
++
++function plain(text: string) {
++  return text.replace(/\*\*|__|`/g, '').replace(/\s+/g, ' ').trim()
 +}
 +
 +function firstLine(text: string) {
