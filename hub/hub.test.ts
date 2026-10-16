@@ -1299,3 +1299,34 @@ test("a session's stop hook reports whether background agents are still working,
   server.close()
   expect(received).toEqual([{ type: 'state', thread: 't1', busy: false, background: true }, { type: 'state', thread: 't1', busy: false }])
 })
+
+test('a main thread whose new session ends before its channel connects is reported and started again', async () => {
+  start({ main: 'chat', agents: [], reconnect: 50 })
+  await launched()
+  expect(await until(() => failures[0])).toEqual(['chat', 'its session ended before its channel connected'])
+  await until(() => calls().filter(args => args[0] === '--bg').length === 2)
+})
+
+test('a thread whose new session ends before its channel connects is reported, and its next message starts it again', async () => {
+  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } }, agents: [], reconnect: 50 })
+  hub.deliver('chat:7', 'Desk anchors', message)
+  await launched()
+  expect(await until(() => failures[0])).toEqual(['chat:7', 'its session ended before its channel connected'])
+  hub.deliver('chat:7', 'Desk anchors', { ...message, content: 'again' })
+  await until(() => calls().filter(args => args[0] === '--bg').length === 2)
+  const { received } = await session('chat:7')
+  await until(() => received.length === 2)
+  expect(received.map(m => m.content)).toEqual(['hi', 'again'])
+})
+
+test('a session that restarts in place and then ends is reported, and the thread starts again on its next message', async () => {
+  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } }, reconnect: 50 })
+  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid: 42, startedAt: Date.now() }]))
+  const { close } = await session('chat:7')
+  close()
+  await until(() => calls().find(args => args[0] === 'respawn'))
+  writeFileSync(join(dir, 'agents'), '[]')
+  expect(await until(() => failures[0])).toEqual(['chat:7', 'its session ended before its channel connected'])
+  hub.deliver('chat:7', 'Desk anchors', message)
+  await launched()
+})

@@ -523,6 +523,7 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
     settle(thread)
     jobs.delete(thread)
     awaited.delete(thread)
+    respawned.delete(thread)
     renewed.delete(thread)
     failed(thread, reason)
     setState(thread, false)
@@ -622,8 +623,9 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
   }
 
   // A session whose channel is gone comes back on its own while Claude Code reconnects it. After
-  // that, one still running restarts in place (a turn it was on runs again), a gone main thread
-  // starts again, and a thread whose messages waited on a session that has since ended resumes.
+  // that, one still running restarts in place (a turn it was on runs again), a start that ended
+  // before its channel connected is reported, a gone main thread starts again, and a thread whose
+  // messages waited on a session that has since ended resumes.
   function recover(thread: string, since = Date.now()) {
     if (recovering.has(thread) || closed) return
     recovering.set(thread, setTimeout(() => {
@@ -632,10 +634,11 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
       sessionOf(thread, running => {
         if (live.has(thread)) return
         if (running) return (running.startedAt ?? 0) < since ? respawn(thread, running) : recover(thread)
-        if (thread === main) return revive()
-        if (!awaited.delete(thread)) return
+        const waited = awaited.delete(thread)
+        if (!waited) fail(thread, 'its session ended before its channel connected')
         settle(thread)
-        launch(thread, threads[thread]!.name)
+        if (thread === main) revive()
+        else if (waited) launch(thread, threads[thread]!.name)
       })
     }, reconnect))
   }

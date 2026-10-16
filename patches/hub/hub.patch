@@ -1,9 +1,9 @@
 diff --git a/hub/hub.test.ts b/hub/hub.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..05eebf1eef924eec99bd311e1edbe06fd0818182
+index 0000000000000000000000000000000000000000..fc0bdc9e0d71e43e8817d9301c1528046002f830
 --- /dev/null
 +++ b/hub/hub.test.ts
-@@ -0,0 +1,1301 @@
+@@ -0,0 +1,1332 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { connect, createServer, type Socket } from 'net'
 +import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, chmodSync, existsSync } from 'fs'
@@ -1305,12 +1305,43 @@ index 0000000000000000000000000000000000000000..05eebf1eef924eec99bd311e1edbe06f
 +  server.close()
 +  expect(received).toEqual([{ type: 'state', thread: 't1', busy: false, background: true }, { type: 'state', thread: 't1', busy: false }])
 +})
++
++test('a main thread whose new session ends before its channel connects is reported and started again', async () => {
++  start({ main: 'chat', agents: [], reconnect: 50 })
++  await launched()
++  expect(await until(() => failures[0])).toEqual(['chat', 'its session ended before its channel connected'])
++  await until(() => calls().filter(args => args[0] === '--bg').length === 2)
++})
++
++test('a thread whose new session ends before its channel connects is reported, and its next message starts it again', async () => {
++  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } }, agents: [], reconnect: 50 })
++  hub.deliver('chat:7', 'Desk anchors', message)
++  await launched()
++  expect(await until(() => failures[0])).toEqual(['chat:7', 'its session ended before its channel connected'])
++  hub.deliver('chat:7', 'Desk anchors', { ...message, content: 'again' })
++  await until(() => calls().filter(args => args[0] === '--bg').length === 2)
++  const { received } = await session('chat:7')
++  await until(() => received.length === 2)
++  expect(received.map(m => m.content)).toEqual(['hi', 'again'])
++})
++
++test('a session that restarts in place and then ends is reported, and the thread starts again on its next message', async () => {
++  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } }, reconnect: 50 })
++  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid: 42, startedAt: Date.now() }]))
++  const { close } = await session('chat:7')
++  close()
++  await until(() => calls().find(args => args[0] === 'respawn'))
++  writeFileSync(join(dir, 'agents'), '[]')
++  expect(await until(() => failures[0])).toEqual(['chat:7', 'its session ended before its channel connected'])
++  hub.deliver('chat:7', 'Desk anchors', message)
++  await launched()
++})
 diff --git a/hub/hub.ts b/hub/hub.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..ab9e14342e837e635abdae7d395e701bd665a259
+index 0000000000000000000000000000000000000000..9b6bd7a7bc66debfe41ebda4a4b1d208998b882e
 --- /dev/null
 +++ b/hub/hub.ts
-@@ -0,0 +1,792 @@
+@@ -0,0 +1,795 @@
 +import { createServer } from 'net'
 +import { execFile, spawn } from 'child_process'
 +import { createHash } from 'crypto'
@@ -1836,6 +1867,7 @@ index 0000000000000000000000000000000000000000..ab9e14342e837e635abdae7d395e701b
 +    settle(thread)
 +    jobs.delete(thread)
 +    awaited.delete(thread)
++    respawned.delete(thread)
 +    renewed.delete(thread)
 +    failed(thread, reason)
 +    setState(thread, false)
@@ -1935,8 +1967,9 @@ index 0000000000000000000000000000000000000000..ab9e14342e837e635abdae7d395e701b
 +  }
 +
 +  // A session whose channel is gone comes back on its own while Claude Code reconnects it. After
-+  // that, one still running restarts in place (a turn it was on runs again), a gone main thread
-+  // starts again, and a thread whose messages waited on a session that has since ended resumes.
++  // that, one still running restarts in place (a turn it was on runs again), a start that ended
++  // before its channel connected is reported, a gone main thread starts again, and a thread whose
++  // messages waited on a session that has since ended resumes.
 +  function recover(thread: string, since = Date.now()) {
 +    if (recovering.has(thread) || closed) return
 +    recovering.set(thread, setTimeout(() => {
@@ -1945,10 +1978,11 @@ index 0000000000000000000000000000000000000000..ab9e14342e837e635abdae7d395e701b
 +      sessionOf(thread, running => {
 +        if (live.has(thread)) return
 +        if (running) return (running.startedAt ?? 0) < since ? respawn(thread, running) : recover(thread)
-+        if (thread === main) return revive()
-+        if (!awaited.delete(thread)) return
++        const waited = awaited.delete(thread)
++        if (!waited) fail(thread, 'its session ended before its channel connected')
 +        settle(thread)
-+        launch(thread, threads[thread]!.name)
++        if (thread === main) revive()
++        else if (waited) launch(thread, threads[thread]!.name)
 +      })
 +    }, reconnect))
 +  }

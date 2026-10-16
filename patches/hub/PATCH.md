@@ -4,7 +4,7 @@ id: hub
 summary: Add a client-agnostic hub that gives every chat thread its own Claude Code session and moves threads between clients.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: hub.patch
-patch_sha256: dc5bdbde696cd4b14f71fc19175650e1d89b9510f917d899554eb144e454afd2
+patch_sha256: e100fc4d64dc30dba1b577cfdd635f4042e89a3c10e2a8e85f37cbe1e1ac9f5a
 ---
 
 ## Intent
@@ -108,7 +108,9 @@ dropped HTTP server at about 0, 1, 3, 7 and 15 seconds, then gives up for
 good). After that, a session still running that started before then restarts
 in place (`claude respawn`, which keeps its conversation and runs a turn it was
 on again), one that started since gets the same time, and one that restarted
-and still has no channel is reported as a failed start. A gone main thread
+and still has no channel is reported as a failed start, as is a session the
+hub started or restarted that ended before its channel connected, so a thread
+never waits on a start that is gone. A gone main thread
 starts again, and a thread whose messages waited on a session that has since
 ended resumes. The running session serving a thread is its current one, or one
 Claude's job record shows was started for it (its `respawnFlags` keep the
@@ -196,7 +198,7 @@ fills, even while Claude's status lags, or the cache expires, by its recorded ti
 restart found by its job instead of started twice), stopping, closing, naming and
 handoffs (release, adopt, fork), permission prompts and bad input against a fake `claude`, plus
 channels that drop and come back, sessions that restart in place once and are reported after,
-sessions that outlived the hub, unsaved sessions found by their job, a new stream held until
+sessions that outlived the hub, starts that end before their channel connects, unsaved sessions found by their job, a new stream held until
 Claude Code listens, a stream adopted after a restart, the declined protocol, refused requests
 and unbound sessions. Run `scripts/verify`. Live: a session in an isolated `CLAUDE_CONFIG_DIR`
 gets a message and replies, carries on through hub restarts (also a few seconds after it
