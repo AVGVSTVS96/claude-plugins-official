@@ -1,9 +1,9 @@
 diff --git a/hub/hub.test.ts b/hub/hub.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..e480cd3a187187718b2828e2d39b707c8e46b17a
+index 0000000000000000000000000000000000000000..5a2bc48a570de8f7f7c24b2f9fe4bb8940c46118
 --- /dev/null
 +++ b/hub/hub.test.ts
-@@ -0,0 +1,1042 @@
+@@ -0,0 +1,1062 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { connect, createServer, type Socket } from 'net'
 +import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, chmodSync, existsSync } from 'fs'
@@ -554,18 +554,39 @@ index 0000000000000000000000000000000000000000..e480cd3a187187718b2828e2d39b707c
 +  expect(calls().some(args => args[0] === 'stop' || args[0] === '--bg')).toBe(false)
 +})
 +
-+test('a fresh thread whose stopped session is still warm resumes it, and one gone cold starts a new one', async () => {
++test('a fresh thread whose session stopped starts a new one, warm or not, since a start rewrites its view past the cache', async () => {
 +  dm([])
 +  said(500)
 +  hub.deliver('dm', 'DM', message)
-+  const args = await launched()
-+  expect(calls()[1]).toEqual(['rm', SESSION.slice(0, 8)])
-+  expect(args.slice(args.indexOf('--resume'), args.indexOf('--resume') + 2)).toEqual(['--resume', SESSION])
-+  hub.close()
-+  rmSync(join(dir, 'calls'))
-+  dm([], { cacheWarm: 60_000 })
-+  said(500, false, SESSION, Date.now() - 61_000)
-+  hub.deliver('dm', 'DM', message)
++  expect(await launched()).not.toContain('--resume')
++  expect(calls().some(args => args[0] === 'rm')).toBe(false)
++})
++
++test('a fresh thread\'s session that fills up hands over at the rest the Stop hook reports, though Claude still calls it busy', async () => {
++  const old = Bun.spawn(['sleep', '30'])
++  dm([{ sessionId: SESSION, pid: old.pid, status: 'busy', startedAt: Date.now() + 60_000 }])
++  const first = await session('dm')
++  await Bun.sleep(50)
++  said(1500)
++  first.send({ type: 'state', thread: 'dm', busy: false })
++  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
++  first.socket.destroy()
++  old.kill()
++  expect(await launched()).not.toContain('--resume')
++})
++
++test('a fresh thread\'s session on a five-minute cache hands over five minutes after its last request, not an hour', async () => {
++  const old = Bun.spawn(['sleep', '30'])
++  dm([{ sessionId: SESSION, pid: old.pid, status: 'idle', startedAt: Date.now() + 60_000 }], { cacheWarm: 60_000 })
++  const project = join(dir, 'projects', join(dir, 'hex').replace(/[^a-zA-Z0-9]/g, '-'))
++  mkdirSync(project, { recursive: true })
++  const usage = { input_tokens: 2, cache_creation_input_tokens: 100, cache_read_input_tokens: 398, cache_creation: { ephemeral_5m_input_tokens: 100, ephemeral_1h_input_tokens: 0 } }
++  appendFileSync(join(project, `${SESSION}.jsonl`), JSON.stringify({ type: 'assistant', message: { usage }, timestamp: new Date(Date.now() - 4800).toISOString() }) + '\n')
++  const first = await session('dm')
++  first.send({ type: 'state', thread: 'dm', busy: false })
++  await until(() => calls().find(args => args[0] === 'stop'))
++  first.socket.destroy()
++  old.kill()
 +  expect(await launched()).not.toContain('--resume')
 +})
 +
@@ -634,7 +655,7 @@ index 0000000000000000000000000000000000000000..e480cd3a187187718b2828e2d39b707c
 +  expect(calls().filter(args => args[0] !== 'agents')).toEqual([])
 +})
 +
-+test('a fresh thread\'s warm session older than the hub resumes at once at its rest', async () => {
++test('a fresh thread\'s warm session older than the hub starts over as a new one at its rest', async () => {
 +  const old = Bun.spawn(['sleep', '30'])
 +  dm([{ sessionId: SESSION, pid: old.pid, status: 'idle', startedAt: 1 }])
 +  said(500)
@@ -643,8 +664,7 @@ index 0000000000000000000000000000000000000000..e480cd3a187187718b2828e2d39b707c
 +  writeFileSync(join(dir, 'agents'), '[]')
 +  first.socket.destroy()
 +  old.kill()
-+  const args = await launched()
-+  expect(args.slice(args.indexOf('--resume'), args.indexOf('--resume') + 2)).toEqual(['--resume', SESSION])
++  expect(await launched()).not.toContain('--resume')
 +})
 +
 +test('a thread that asks to renew starts over as a new session once its turn ends, without waiting out the main thread\'s relaunch delay', async () => {
@@ -1048,10 +1068,10 @@ index 0000000000000000000000000000000000000000..e480cd3a187187718b2828e2d39b707c
 +})
 diff --git a/hub/hub.ts b/hub/hub.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..45da52c647a3071976d2ff6257e7ffe5c0cd2681
+index 0000000000000000000000000000000000000000..5eb0894a68257fb1595135dd1b902aa8033e59a9
 --- /dev/null
 +++ b/hub/hub.ts
-@@ -0,0 +1,689 @@
+@@ -0,0 +1,690 @@
 +import { createServer, type Socket } from 'net'
 +import { execFile, spawn } from 'child_process'
 +import { createHash } from 'crypto'
@@ -1216,7 +1236,7 @@ index 0000000000000000000000000000000000000000..45da52c647a3071976d2ff6257e7ffe5
 +    else busy.delete(thread)
 +    if (!working) background ? waiting.add(thread) : waiting.delete(thread)
 +    if (!working && !background && renewing.has(thread)) renew(thread, asked.has(thread))
-+    rest(thread)
++    rest(thread, !working && !background)
 +    letGo(thread)
 +  }
 +
@@ -1263,7 +1283,7 @@ index 0000000000000000000000000000000000000000..45da52c647a3071976d2ff6257e7ffe5
 +
 +  // A running session that isn't busy stops after a while; its next message resumes it.
 +  // The main thread keeps running, and compacts before its cache goes cold.
-+  function rest(thread: string) {
++  function rest(thread: string, rested = false) {
 +    clearTimeout(idle.get(thread))
 +    idle.delete(thread)
 +    if (busy.has(thread) || !live.has(thread)) return
@@ -1271,7 +1291,8 @@ index 0000000000000000000000000000000000000000..45da52c647a3071976d2ff6257e7ffe5
 +    else if (retiring.has(thread)) stop(thread)
 +    else if (fresh(thread)) {
 +      const left = warmFor(thread)
-+      if (left !== undefined) idle.set(thread, setTimeout(() => handOff(thread), left))
++      if (left === 0 && rested) handOff(thread, true)
++      else if (left !== undefined) idle.set(thread, setTimeout(() => handOff(thread), left))
 +    } else idle.set(thread, setTimeout(() => stopIfIdle(thread), idleStop))
 +  }
 +
@@ -1280,25 +1301,25 @@ index 0000000000000000000000000000000000000000..45da52c647a3071976d2ff6257e7ffe5
 +  // over at the old one's rest, so the next message finds it running: after the cache expires,
 +  // the old session would send its whole context uncached, and a new one costs no more.
 +  // warmFor is how long a session stays worth its messages, undefined before its first request.
-+  function warmFor(thread: string, session = current(thread)) {
-+    const { sent, at } = session ? last(thread, session) : { sent: 0 }
++  // Its cache lives an hour on a Claude subscription and five minutes by default on an API key;
++  // the transcript records which.
++  function warmFor(thread: string) {
++    const session = current(thread)
++    const { sent, at, short } = session ? last(thread, session) : { sent: 0 }
 +    if (!sent) return
-+    return sent >= capacity ? 0 : Math.max(0, (at ?? Date.now()) + cacheWarm - Date.now())
++    return sent >= capacity ? 0 : Math.max(0, (at ?? Date.now()) + (short ? cacheWarm / 12 : cacheWarm) - Date.now())
 +  }
 +
 +  function spent(thread: string) {
 +    return fresh(thread) && warmFor(thread) === 0
 +  }
 +
-+  // A fresh thread resumes a session only while it's worth its messages; a new one has a fresher view.
-+  function resumes(thread: string, session?: string) {
-+    return !!session && (!fresh(thread) || (warmFor(thread, session) ?? 0) > 0)
-+  }
-+
-+  function handOff(thread: string) {
++  // At a rest the Stop hook reported with no agents working, Claude's own status still says busy
++  // for about a second, so a session that filled up on that turn hands over without asking it.
++  function handOff(thread: string, rested = false) {
 +    idle.delete(thread)
 +    agent(current(thread) ?? '', running => {
-+      if (running && !busy.has(thread) && running.status === 'idle' && spent(thread)) cycle(thread, running)
++      if (running && !busy.has(thread) && (rested || running.status === 'idle') && spent(thread)) cycle(thread, running)
 +    })
 +  }
 +
@@ -1320,7 +1341,7 @@ index 0000000000000000000000000000000000000000..45da52c647a3071976d2ff6257e7ffe5
 +  }
 +
 +  // The context a session's last request sent and when, from the newest usage or compaction in its transcript.
-+  function last(thread: string, session: string): { sent: number; at?: number } {
++  function last(thread: string, session: string): { sent: number; at?: number; short?: boolean } {
 +    let file: number
 +    try {
 +      file = openSync(transcript(thread, session), 'r')
@@ -1343,7 +1364,7 @@ index 0000000000000000000000000000000000000000..45da52c647a3071976d2ff6257e7ffe5
 +        if (entry.type === 'system' && entry.subtype === 'compact_boundary') return { sent: entry.compactMetadata?.postTokens ?? 0, at }
 +        const usage = entry.type === 'assistant' && !entry.isSidechain ? entry.message?.usage : undefined
 +        const sent = usage ? (usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0) : 0
-+        if (sent) return { sent, at }
++        if (sent) return { sent, at, short: !!usage.cache_creation?.ephemeral_5m_input_tokens && !usage.cache_creation?.ephemeral_1h_input_tokens }
 +      }
 +      return { sent: 0 }
 +    } finally {
@@ -1422,7 +1443,7 @@ index 0000000000000000000000000000000000000000..45da52c647a3071976d2ff6257e7ffe5
 +    if ((prompt && !quiet) || queued.has(thread)) setState(thread, true)
 +    launching.set(thread, undefined)
 +    if (fork) return start(known, thread, prompt, fork)
-+    if (!resumes(thread, known.session)) return start(known, thread, prompt)
++    if (!known.session || fresh(thread)) return start(known, thread, prompt)
 +    const session = known.session
 +    agent(session, running => {
 +      if (running) return
@@ -1485,7 +1506,7 @@ index 0000000000000000000000000000000000000000..45da52c647a3071976d2ff6257e7ffe5
 +        '--bg',
 +        '--channels', channel,
 +        '--name', known.name,
-+        ...(fork ? ['--resume', fork, '--fork-session'] : resumes(thread, known.session) ? ['--resume', known.session!] : []),
++        ...(fork ? ['--resume', fork, '--fork-session'] : known.session && !fresh(thread) ? ['--resume', known.session] : []),
 +        ...launchArgs,
 +        '--settings', JSON.stringify({ enabledPlugins: { [plugin]: true }, env: bound }),
 +        ...(prompt ? [prompt] : []),

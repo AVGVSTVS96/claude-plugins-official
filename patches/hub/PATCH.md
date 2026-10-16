@@ -4,7 +4,7 @@ id: hub
 summary: Add a client-agnostic hub that gives every chat thread its own Claude Code session and moves threads between clients.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: hub.patch
-patch_sha256: 1786906ee868acb034a7b4130974ab746be21114f160ee29039e80e9731f13bd
+patch_sha256: 25b82d9d6e5348fdf9d271dde7f36ca472ec7c84b7f89ea19f36097006b9ad25
 ---
 
 ## Intent
@@ -62,15 +62,20 @@ and sends each message straight to it, so no message waits for a session to star
 while that session is worth it: its context (its last request) holds less than
 `capacity` tokens, 350,000 unless the client or `HEX_CHAT_CAPACITY` sets
 another, and its last request is younger than the cache's life (54 minutes, as
-for the main thread). Past that, its next message would send a full context, or
+for the main thread, or a twelfth of that when the transcript shows the request
+wrote the five-minute cache, an API key's default). Past that, its next message would send a full context, or
 its whole context uncached, when a new session sends only the chat's view; so at
-the session's rest, once its context fills or at the moment its cache expires
-(timed from its last request in the transcript), the hub stops it and starts a new
+the session's rest, once its context fills (at the rest the Stop hook reports with
+no agents working, since Claude's own status still says busy for about a second)
+or at the moment its cache expires (timed from its last request in the
+transcript), the hub stops it and starts a new
 one at once, which then waits for the next message. A message that finds the
 session spent while it still works, on its turn, a permission prompt or background
 agents, reaches it as it is; one that finds it done goes to a new session. A
-stopped fresh session resumes only while it's still worth its messages, and a new
-session waits until its first request before any of this counts. A fresh thread
+stopped fresh session is never resumed: a start rewrites the view and memory its
+instruction files carry, so a resume would read nothing past the system prompt
+from the cache and would hold the chat twice. A new session waits until its first
+request before any of this counts. A fresh thread
 never stops for being idle. With a `capacity` of 0 (the voice client), every
 message that finds its session done goes to a new one. Messages
 waiting for a new start keep their order. Each session's settings enable only its client's plugin.
@@ -88,8 +93,8 @@ A session can ask to `renew`: at its next rest, once its Stop hook reports the
 turn over with no background agents or workflows working (Claude's own status
 lags the hook and counts a running shell as busy, so it isn't asked for a renew
 the session asked for itself), the hub stops it, and a main thread or a fresh
-thread starts over as soon as its process exits (a fresh thread resumes while its
-session is worth it, as above, and otherwise starts a new one), the main thread
+thread starts over as soon as its process exits (a fresh thread as a new session),
+the main thread
 without waiting out its 30 seconds; any other thread's next message resumes it. A session that says hello to a hub
 younger than it (Claude's `startedAt`) renews too, once Claude reports it idle, since it may run
 code an update has since replaced: an update restarts the hub, and each
@@ -151,8 +156,8 @@ fresh one left to reconnect after a hub restart), renews at the rest the Stop ho
 background agents, `renewal` holding for the new session's hello and not for agents or a keep,
 sessions older than the hub renewing at their
 next rest and never during a call, `free` waiting for calls to end, the launcher and its
-environment, failed starts, busy and idle, idle stops, compacting big sessions before they rest, fresh threads (warm delivery, resuming only while warm, the handover once the context
-fills or the cache expires, never compacting), stopping, closing, naming and
+environment, failed starts, busy and idle, idle stops, compacting big sessions before they rest, fresh threads (warm delivery, never resuming, the handover once the context
+fills, even while Claude's status lags, or the cache expires, by its recorded tier, never compacting), stopping, closing, naming and
 handoffs (release, adopt, fork), permission prompts and bad input against a fake `claude`. Run `scripts/verify`.
 
 ## Removal

@@ -548,18 +548,39 @@ test('a fresh thread\'s warm session takes every message as it comes, and stays 
   expect(calls().some(args => args[0] === 'stop' || args[0] === '--bg')).toBe(false)
 })
 
-test('a fresh thread whose stopped session is still warm resumes it, and one gone cold starts a new one', async () => {
+test('a fresh thread whose session stopped starts a new one, warm or not, since a start rewrites its view past the cache', async () => {
   dm([])
   said(500)
   hub.deliver('dm', 'DM', message)
-  const args = await launched()
-  expect(calls()[1]).toEqual(['rm', SESSION.slice(0, 8)])
-  expect(args.slice(args.indexOf('--resume'), args.indexOf('--resume') + 2)).toEqual(['--resume', SESSION])
-  hub.close()
-  rmSync(join(dir, 'calls'))
-  dm([], { cacheWarm: 60_000 })
-  said(500, false, SESSION, Date.now() - 61_000)
-  hub.deliver('dm', 'DM', message)
+  expect(await launched()).not.toContain('--resume')
+  expect(calls().some(args => args[0] === 'rm')).toBe(false)
+})
+
+test('a fresh thread\'s session that fills up hands over at the rest the Stop hook reports, though Claude still calls it busy', async () => {
+  const old = Bun.spawn(['sleep', '30'])
+  dm([{ sessionId: SESSION, pid: old.pid, status: 'busy', startedAt: Date.now() + 60_000 }])
+  const first = await session('dm')
+  await Bun.sleep(50)
+  said(1500)
+  first.send({ type: 'state', thread: 'dm', busy: false })
+  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
+  first.socket.destroy()
+  old.kill()
+  expect(await launched()).not.toContain('--resume')
+})
+
+test('a fresh thread\'s session on a five-minute cache hands over five minutes after its last request, not an hour', async () => {
+  const old = Bun.spawn(['sleep', '30'])
+  dm([{ sessionId: SESSION, pid: old.pid, status: 'idle', startedAt: Date.now() + 60_000 }], { cacheWarm: 60_000 })
+  const project = join(dir, 'projects', join(dir, 'hex').replace(/[^a-zA-Z0-9]/g, '-'))
+  mkdirSync(project, { recursive: true })
+  const usage = { input_tokens: 2, cache_creation_input_tokens: 100, cache_read_input_tokens: 398, cache_creation: { ephemeral_5m_input_tokens: 100, ephemeral_1h_input_tokens: 0 } }
+  appendFileSync(join(project, `${SESSION}.jsonl`), JSON.stringify({ type: 'assistant', message: { usage }, timestamp: new Date(Date.now() - 4800).toISOString() }) + '\n')
+  const first = await session('dm')
+  first.send({ type: 'state', thread: 'dm', busy: false })
+  await until(() => calls().find(args => args[0] === 'stop'))
+  first.socket.destroy()
+  old.kill()
   expect(await launched()).not.toContain('--resume')
 })
 
@@ -628,7 +649,7 @@ test('a fresh thread never compacts or idles out, however big its session', asyn
   expect(calls().filter(args => args[0] !== 'agents')).toEqual([])
 })
 
-test('a fresh thread\'s warm session older than the hub resumes at once at its rest', async () => {
+test('a fresh thread\'s warm session older than the hub starts over as a new one at its rest', async () => {
   const old = Bun.spawn(['sleep', '30'])
   dm([{ sessionId: SESSION, pid: old.pid, status: 'idle', startedAt: 1 }])
   said(500)
@@ -637,8 +658,7 @@ test('a fresh thread\'s warm session older than the hub resumes at once at its r
   writeFileSync(join(dir, 'agents'), '[]')
   first.socket.destroy()
   old.kill()
-  const args = await launched()
-  expect(args.slice(args.indexOf('--resume'), args.indexOf('--resume') + 2)).toEqual(['--resume', SESSION])
+  expect(await launched()).not.toContain('--resume')
 })
 
 test('a thread that asks to renew starts over as a new session once its turn ends, without waiting out the main thread\'s relaunch delay', async () => {

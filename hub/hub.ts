@@ -162,7 +162,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', general =
     else busy.delete(thread)
     if (!working) background ? waiting.add(thread) : waiting.delete(thread)
     if (!working && !background && renewing.has(thread)) renew(thread, asked.has(thread))
-    rest(thread)
+    rest(thread, !working && !background)
     letGo(thread)
   }
 
@@ -209,7 +209,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', general =
 
   // A running session that isn't busy stops after a while; its next message resumes it.
   // The main thread keeps running, and compacts before its cache goes cold.
-  function rest(thread: string) {
+  function rest(thread: string, rested = false) {
     clearTimeout(idle.get(thread))
     idle.delete(thread)
     if (busy.has(thread) || !live.has(thread)) return
@@ -217,7 +217,8 @@ export function startHub({ stateDir, channel, main, mainName = 'main', general =
     else if (retiring.has(thread)) stop(thread)
     else if (fresh(thread)) {
       const left = warmFor(thread)
-      if (left !== undefined) idle.set(thread, setTimeout(() => handOff(thread), left))
+      if (left === 0 && rested) handOff(thread, true)
+      else if (left !== undefined) idle.set(thread, setTimeout(() => handOff(thread), left))
     } else idle.set(thread, setTimeout(() => stopIfIdle(thread), idleStop))
   }
 
@@ -226,25 +227,25 @@ export function startHub({ stateDir, channel, main, mainName = 'main', general =
   // over at the old one's rest, so the next message finds it running: after the cache expires,
   // the old session would send its whole context uncached, and a new one costs no more.
   // warmFor is how long a session stays worth its messages, undefined before its first request.
-  function warmFor(thread: string, session = current(thread)) {
-    const { sent, at } = session ? last(thread, session) : { sent: 0 }
+  // Its cache lives an hour on a Claude subscription and five minutes by default on an API key;
+  // the transcript records which.
+  function warmFor(thread: string) {
+    const session = current(thread)
+    const { sent, at, short } = session ? last(thread, session) : { sent: 0 }
     if (!sent) return
-    return sent >= capacity ? 0 : Math.max(0, (at ?? Date.now()) + cacheWarm - Date.now())
+    return sent >= capacity ? 0 : Math.max(0, (at ?? Date.now()) + (short ? cacheWarm / 12 : cacheWarm) - Date.now())
   }
 
   function spent(thread: string) {
     return fresh(thread) && warmFor(thread) === 0
   }
 
-  // A fresh thread resumes a session only while it's worth its messages; a new one has a fresher view.
-  function resumes(thread: string, session?: string) {
-    return !!session && (!fresh(thread) || (warmFor(thread, session) ?? 0) > 0)
-  }
-
-  function handOff(thread: string) {
+  // At a rest the Stop hook reported with no agents working, Claude's own status still says busy
+  // for about a second, so a session that filled up on that turn hands over without asking it.
+  function handOff(thread: string, rested = false) {
     idle.delete(thread)
     agent(current(thread) ?? '', running => {
-      if (running && !busy.has(thread) && running.status === 'idle' && spent(thread)) cycle(thread, running)
+      if (running && !busy.has(thread) && (rested || running.status === 'idle') && spent(thread)) cycle(thread, running)
     })
   }
 
@@ -266,7 +267,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', general =
   }
 
   // The context a session's last request sent and when, from the newest usage or compaction in its transcript.
-  function last(thread: string, session: string): { sent: number; at?: number } {
+  function last(thread: string, session: string): { sent: number; at?: number; short?: boolean } {
     let file: number
     try {
       file = openSync(transcript(thread, session), 'r')
@@ -289,7 +290,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', general =
         if (entry.type === 'system' && entry.subtype === 'compact_boundary') return { sent: entry.compactMetadata?.postTokens ?? 0, at }
         const usage = entry.type === 'assistant' && !entry.isSidechain ? entry.message?.usage : undefined
         const sent = usage ? (usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0) : 0
-        if (sent) return { sent, at }
+        if (sent) return { sent, at, short: !!usage.cache_creation?.ephemeral_5m_input_tokens && !usage.cache_creation?.ephemeral_1h_input_tokens }
       }
       return { sent: 0 }
     } finally {
@@ -368,7 +369,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', general =
     if ((prompt && !quiet) || queued.has(thread)) setState(thread, true)
     launching.set(thread, undefined)
     if (fork) return start(known, thread, prompt, fork)
-    if (!resumes(thread, known.session)) return start(known, thread, prompt)
+    if (!known.session || fresh(thread)) return start(known, thread, prompt)
     const session = known.session
     agent(session, running => {
       if (running) return
@@ -431,7 +432,7 @@ export function startHub({ stateDir, channel, main, mainName = 'main', general =
         '--bg',
         '--channels', channel,
         '--name', known.name,
-        ...(fork ? ['--resume', fork, '--fork-session'] : resumes(thread, known.session) ? ['--resume', known.session!] : []),
+        ...(fork ? ['--resume', fork, '--fork-session'] : known.session && !fresh(thread) ? ['--resume', known.session] : []),
         ...launchArgs,
         '--settings', JSON.stringify({ enabledPlugins: { [plugin]: true }, env: bound }),
         ...(prompt ? [prompt] : []),
