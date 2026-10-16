@@ -10,7 +10,8 @@ out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
 for plugin in telegram discord buzz t3; do
   bun install --cwd "external_plugins/$plugin" --silent
-  bun build "external_plugins/$plugin/bot.ts" "external_plugins/$plugin/server.ts" --target bun --outdir "$out/$plugin" >/dev/null
+  bun build "external_plugins/$plugin/bot.ts" --target bun --outdir "$out/$plugin" >/dev/null
+  jq -e --arg plugin "$plugin" '.mcpServers[$plugin].type == "http"' "external_plugins/$plugin/.mcp.json" >/dev/null
 done
 bun install --cwd external_plugins/voice --silent
 bun build external_plugins/voice/bot.ts external_plugins/voice/server.ts --target bun --outdir "$out/voice" >/dev/null

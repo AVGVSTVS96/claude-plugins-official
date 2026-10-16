@@ -5,6 +5,7 @@ import { readFileSync, writeFileSync, mkdirSync, statSync, realpathSync, chmodSy
 import { homedir } from 'os'
 import { basename, join, extname, sep } from 'path'
 import { startHub, clients, move, tappable, title, transcribe, type Message, type Permission } from '../../hub/hub.ts'
+import { server } from './channel.ts'
 import { Ledger } from '../../hub/ledger.ts'
 
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'hex', 'telegram')
@@ -561,6 +562,7 @@ async function reopenAsk(thread: string, message: number, via: string) {
 const hub = startHub({
   stateDir: STATE_DIR,
   channel: 'plugin:telegram@hex',
+  server,
   main: MAIN,
   general: true,
   hexDir: process.env.HEX_DIR,

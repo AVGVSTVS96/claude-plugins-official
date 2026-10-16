@@ -6,7 +6,6 @@
       "name": "claude-channel-buzz",
       "dependencies": {
         "@agentclientprotocol/claude-agent-acp": "^0.86.0",
-        "@modelcontextprotocol/sdk": "^1.0.0",
         "nostr-tools": "^2.25.2",
       },
     },

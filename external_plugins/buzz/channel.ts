@@ -1,35 +1,23 @@
-#!/usr/bin/env bun
-import { Server } from '@modelcontextprotocol/sdk/server/index.js'
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
-import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
-import { connect, type Socket } from 'net'
-
-const SOCKET = process.env.HEX_HUB
-const THREAD = process.env.HEX_CHANNEL?.startsWith('plugin:buzz@') ? process.env.HEX_THREAD : undefined
-
-const mcp = new Server(
-  { name: 'buzz', version: '1.0.0' },
-  {
-    capabilities: { tools: {}, experimental: { 'claude/channel': {} } },
-    instructions: [
-      'The sender reads Buzz, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat. Nobody watches this terminal either, so the report a background job ends with goes to them as a reply: what they need to know and act on. Once it\'s sent, end the turn without repeating it here.',
-      '',
-      'This session is one Buzz thread or direct message, the place for deeper work. Buzz renders Markdown, so answers can be longer and structured: headings, lists, and code blocks with a language. Its messages arrive as <channel source="buzz" chat_id="..." message_id="..." user="..." ts="...">, and everything you send with these tools lands back in that same thread. If the tag has new_thread="true", name this thread with rename_thread. If you were tagged into a thread that was already going, reply_to_* is the message it hangs off ("(tagged you)" alone means: read that message) and fetch_messages shows the rest. In a forum channel each post is its own thread: comments on it arrive here, and your replies post as comments on it. If the tag has attachment_count, the attachments attribute lists name/type/size — call download_attachment(message_id) to fetch them. If the tag has reply_to_message_id, the sender replied to that earlier message: reply_to_text is its text and reply_to_attachments lists its files (download_attachment with that id). edited="true" means the sender edited the message with that message_id and this is its new text. A reaction arrives as "(reaction: 👍)", or "(reaction removed: 👍)" with reaction_removed="true", with reaction_to_message_id, reaction_to_user and reaction_to_text naming the message it is on. deleted="true" means the sender deleted the message with that message_id; deleted_text is what it said. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply.',
-      '',
-      'reply accepts file paths (files: ["/abs/path.png"]) for attachments, and buttons (up to 10 short labels) to offer choices the user taps: a tap arrives with button="true" and button_message_id, and the chosen label as its text. Use react to add emoji reactions (remove: true takes yours off), edit_message for interim progress updates, and delete_message to take back a message you sent. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',
-      '',
-      'Each channel has one shared canvas, a Markdown document the user opens from the channel\'s details: canvas() reads it with its revision, and canvas(text, revision) replaces it, refused if someone changed it since that revision. presence tells you whether the user is online, away or offline.',
-      '',
-      'new_thread opens another thread with its own fresh session and hands it your prompt. Use it for work the user will want to follow or talk to on its own. handoff moves this whole conversation to another app, such as telegram, when the user asks: you stop here and continue there with your memory.',
-      '',
-      "fetch_messages pulls real Buzz history, from this thread by default. The tag's channel attribute names the channel this thread is in: fetch_messages(channel) reads that channel's top-level messages, a message with a thread shows its reply count, and fetch_messages(thread: that message's id) reads the thread. When the user refers to earlier work or talk in the channel, read it rather than saying you can't see it. search_messages finds older messages by their words.",
-    ].join('\n'),
-  },
-)
+import type { ChannelServer } from '../../hub/hub.ts'
 
 const titleProperty = { type: 'string', description: 'One word, like a chat name ("Anchors", "Frontier").' }
 
-mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
+// What each session's channel says and offers; the hub serves it over HTTP.
+export const server: ChannelServer = {
+  title: 'Buzz',
+  instructions: [
+    'The sender reads Buzz, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat. Nobody watches this terminal either, so the report a background job ends with goes to them as a reply: what they need to know and act on. Once it\'s sent, end the turn without repeating it here.',
+    '',
+    'This session is one Buzz thread or direct message, the place for deeper work. Buzz renders Markdown, so answers can be longer and structured: headings, lists, and code blocks with a language. Its messages arrive as <channel source="buzz" chat_id="..." message_id="..." user="..." ts="...">, and everything you send with these tools lands back in that same thread. If the tag has new_thread="true", name this thread with rename_thread. If you were tagged into a thread that was already going, reply_to_* is the message it hangs off ("(tagged you)" alone means: read that message) and fetch_messages shows the rest. In a forum channel each post is its own thread: comments on it arrive here, and your replies post as comments on it. If the tag has attachment_count, the attachments attribute lists name/type/size — call download_attachment(message_id) to fetch them. If the tag has reply_to_message_id, the sender replied to that earlier message: reply_to_text is its text and reply_to_attachments lists its files (download_attachment with that id). edited="true" means the sender edited the message with that message_id and this is its new text. A reaction arrives as "(reaction: 👍)", or "(reaction removed: 👍)" with reaction_removed="true", with reaction_to_message_id, reaction_to_user and reaction_to_text naming the message it is on. deleted="true" means the sender deleted the message with that message_id; deleted_text is what it said. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply.',
+    '',
+    'reply accepts file paths (files: ["/abs/path.png"]) for attachments, and buttons (up to 10 short labels) to offer choices the user taps: a tap arrives with button="true" and button_message_id, and the chosen label as its text. Use react to add emoji reactions (remove: true takes yours off), edit_message for interim progress updates, and delete_message to take back a message you sent. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',
+    '',
+    'Each channel has one shared canvas, a Markdown document the user opens from the channel\'s details: canvas() reads it with its revision, and canvas(text, revision) replaces it, refused if someone changed it since that revision. presence tells you whether the user is online, away or offline.',
+    '',
+    'new_thread opens another thread with its own fresh session and hands it your prompt. Use it for work the user will want to follow or talk to on its own. handoff moves this whole conversation to another app, such as telegram, when the user asks: you stop here and continue there with your memory.',
+    '',
+    "fetch_messages pulls real Buzz history, from this thread by default. The tag's channel attribute names the channel this thread is in: fetch_messages(channel) reads that channel's top-level messages, a message with a thread shows its reply count, and fetch_messages(thread: that message's id) reads the thread. When the user refers to earlier work or talk in the channel, read it rather than saying you can't see it. search_messages finds older messages by their words.",
+  ].join('\n'),
   tools: [
     {
       name: 'reply',
@@ -216,77 +204,4 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
   ],
-}))
-
-let hub: Socket | undefined
-let nextId = 0
-const pending = new Map<number, { resolve: (text: string) => void; reject: (error: Error) => void }>()
-
-function request(tool: string, args: Record<string, unknown>): Promise<string> {
-  if (!THREAD) return Promise.reject(new Error('this session is not bound to a Buzz thread (HEX_THREAD is unset)'))
-  if (!hub) return Promise.reject(new Error('the Buzz hub is not running'))
-  const id = ++nextId
-  const socket = hub
-  return new Promise((resolve, reject) => {
-    pending.set(id, { resolve, reject })
-    socket.write(JSON.stringify({ type: 'call', id, tool, args }) + '\n')
-  })
 }
-
-mcp.setRequestHandler(CallToolRequestSchema, async req => {
-  try {
-    const text = await request(req.params.name, req.params.arguments ?? {})
-    return { content: [{ type: 'text', text }] }
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
-    return { content: [{ type: 'text', text: `${req.params.name} failed: ${msg}` }], isError: true }
-  }
-})
-
-function connectHub(): void {
-  const socket = connect(SOCKET!)
-  let buffer = ''
-  socket.setEncoding('utf8')
-  socket.on('connect', () => {
-    hub = socket
-    // Claude Code starts listening for channel notifications ~30ms after its last
-    // request to this server (tools/list) and never signals it; notifications
-    // before that are dropped. Saying hello flushes queued messages, so wait.
-    setTimeout(() => socket.write(JSON.stringify({ type: 'hello', thread: THREAD, session: process.env.CLAUDE_CODE_SESSION_ID }) + '\n'), 1000)
-  })
-  socket.on('data', (chunk: string) => {
-    buffer += chunk
-    for (let end = buffer.indexOf('\n'); end >= 0; end = buffer.indexOf('\n')) {
-      const event = JSON.parse(buffer.slice(0, end))
-      buffer = buffer.slice(end + 1)
-      if (event.type === 'inbound') {
-        mcp.notification({
-          method: 'notifications/claude/channel',
-          params: { content: event.content, meta: event.meta },
-        }).catch(err => process.stderr.write(`buzz channel: failed to deliver inbound to Claude: ${err}\n`))
-      }
-      if (event.type === 'result') {
-        const waiter = pending.get(event.id)
-        pending.delete(event.id)
-        if (event.error) waiter?.reject(new Error(event.error))
-        else waiter?.resolve(event.text)
-      }
-    }
-  })
-  socket.on('close', () => {
-    if (hub === socket) hub = undefined
-    for (const waiter of pending.values()) waiter.reject(new Error('the Buzz hub disconnected'))
-    pending.clear()
-    setTimeout(connectHub, 2000)
-  })
-  socket.on('error', () => {})
-}
-
-mcp.oninitialized = () => {
-  if (THREAD && SOCKET) connectHub()
-}
-
-await mcp.connect(new StdioServerTransport())
-
-process.stdin.on('end', () => process.exit(0))
-process.stdin.on('close', () => process.exit(0))

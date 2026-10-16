@@ -239,7 +239,7 @@ exit 0
 
   const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^(BUZZ_|HEX_|TELEGRAM_|DISCORD_)/.test(name)))
   const bot = Bun.spawn(['bun', join(import.meta.dir, 'bot.ts')], {
-    env: { ...env, BUZZ_STATE_DIR: state, HEX_DIR: join(dir, 'hex'), CLAUDE_CONFIG_DIR: join(dir, 'config'), PATH: `${dir}:${process.env.PATH}` },
+    env: { ...env, HEX_PORT: '0', BUZZ_STATE_DIR: state, HEX_DIR: join(dir, 'hex'), CLAUDE_CONFIG_DIR: join(dir, 'config'), PATH: `${dir}:${process.env.PATH}` },
     stdout: 'ignore',
     stderr: 'ignore',
   })

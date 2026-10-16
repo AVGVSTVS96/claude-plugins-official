@@ -4,7 +4,7 @@ id: t3-acp
 summary: Serve the agent to T3 Code as an ACP agent, where every T3 thread is its own Claude Code session in that thread's project, through the thread hub.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: t3-acp.patch
-patch_sha256: e472f6511bb005ba15239c5e2cf85138f70e403aa7056933ccdbe32e4e70f68b
+patch_sha256: 54190cf21cbfbc14040f776ef8b0c478c8cccb19375cfacfcade19b756a5922f
 ---
 
 ## Intent
@@ -46,8 +46,9 @@ agent's work itself, so the session's own output is the conversation:
   settings give it.
 - A session that fails to start fails the prompt with its reason, such as a
   workspace Claude Code doesn't trust yet.
-- `server.ts` is the channel each session loads. It delivers T3's messages and
-  tells the session that its output is the reply; it has no tools.
+- `channel.ts` is the channel the hub serves each session over HTTP
+  (`.mcp.json`). It delivers T3's messages and tells the session that its
+  output is the reply; it has no tools.
 
 ## Invariants
 

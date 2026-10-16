@@ -8,6 +8,7 @@ import { fileURLToPath } from 'url'
 import { randomUUID } from 'crypto'
 import { agent, ndJsonStream, PROTOCOL_VERSION, RequestError, type AgentContext, type ContentBlock, type McpServer, type PromptResponse, type SessionConfigOption, type SessionNotification, type StopReason } from '@agentclientprotocol/sdk'
 import { startHub } from '../../hub/hub.ts'
+import { server } from './channel.ts'
 import { follow, transcriptPath } from './transcript.ts'
 import { version } from './package.json'
 
@@ -55,6 +56,7 @@ mkdirSync(INBOX_DIR, { recursive: true, mode: 0o700 })
 const hub = startHub({
   stateDir: STATE_DIR,
   channel: process.env.T3_CHANNEL ?? 'plugin:t3@hex',
+  server,
   call: async (_, tool) => {
     throw new Error(`unknown tool: ${tool}`)
   },

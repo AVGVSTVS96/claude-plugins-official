@@ -1,7 +1,8 @@
-import { free } from './hub.ts'
+import { PORT, free, route } from './hub.ts'
 
 // Before the clients load: Telegram's bot module awaits its polling loop, which never ends.
 process.on('SIGHUP', () => void free().then(() => process.exit(0)))
+Bun.serve({ hostname: '127.0.0.1', port: PORT, idleTimeout: 0, fetch: route })
 
 await Promise.all([
   import('../external_plugins/telegram/bot.ts'),

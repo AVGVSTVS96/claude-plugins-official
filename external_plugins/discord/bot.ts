@@ -37,6 +37,7 @@ import { readFileSync, writeFileSync, mkdirSync, statSync, realpathSync, chmodSy
 import { homedir } from 'os'
 import { basename, join, sep } from 'path'
 import { startHub, clients, move, tappable, title, transcribe, type Message } from '../../hub/hub.ts'
+import { server } from './channel.ts'
 
 const STATE_DIR = process.env.DISCORD_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'hex', 'discord')
 const ACCESS_FILE = join(STATE_DIR, 'access.json')
@@ -470,6 +471,7 @@ function serve(token: string) {
   const hub = startHub({
     stateDir: STATE_DIR,
     channel: 'plugin:discord@hex',
+    server,
     call,
     state: showTyping,
     fresh: thread => dms.has(thread),

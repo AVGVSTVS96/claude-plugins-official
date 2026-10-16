@@ -4,7 +4,7 @@ id: buzz-threads
 summary: Add a Buzz channel where every Buzz thread is its own Claude Code session through the thread hub, with Buzz's activity, memory and files panels.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: buzz-threads.patch
-patch_sha256: 346c49d591da2fefcc14d7168a30e58aa8ca6fac7fab9c9b10e47e6238aca3aa
+patch_sha256: fb8274f510211b04c1e3a35db878f14adabf1edcdaf6b4680b902fb8b2125045
 ---
 
 ## Intent
@@ -18,7 +18,8 @@ halves as `discord-threads`:
   agent's NIP-OA auth tag, reconnect, resubscribe, dedupe). It runs in the hub
   service (`hub/serve.ts`), embeds the hub, and maps each Buzz thread to its
   own session by its root event id.
-- `server.ts` is the channel every session loads, the same as Discord's, with
+- `channel.ts` is the channel the hub serves every session over HTTP
+  (`.mcp.json`), the same as Discord's, with
   the same tools: `reply` (files go up through Blossom as `imeta`), `react`,
   `edit_message`, `fetch_messages`, `list_channels`, `download_attachment`,
   `rename_thread`, `close_thread`, `new_thread` and `handoff` to Telegram or
@@ -135,7 +136,7 @@ the agent's key and auth tag, and it writes them over SSH to
    off and the rest of the hub service runs. No `BUZZ_*` reaches a session.
 5. Only `allowFrom` (default: the owner named in the auth tag) reaches Hex;
    its own events are ignored.
-6. `server.ts` keeps `discord/server.ts`'s wording and structure wherever they
+6. `channel.ts` keeps `discord/channel.ts`'s wording and structure wherever they
    share code, so heals stay small.
 
 ## Verification
@@ -145,7 +146,7 @@ including channel windows with paging, thread drill-in, search, and refusal
 of channels Hex isn't in and of other direct messages, reactions, deletions,
 catching up after a restart, the canvas and presence; the activity and memory panels against a fake relay (including NIP-AE's and
 NIP-AF's test vectors), and the provider against a fake ssh. `scripts/verify` builds the
-bot, the channel and the provider.
+bot (with its channel) and the provider.
 
 ## Removal
 

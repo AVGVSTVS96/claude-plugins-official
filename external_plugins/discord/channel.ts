@@ -1,33 +1,21 @@
-#!/usr/bin/env bun
-import { Server } from '@modelcontextprotocol/sdk/server/index.js'
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
-import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
-import { connect, type Socket } from 'net'
-
-const SOCKET = process.env.HEX_HUB
-const THREAD = process.env.HEX_CHANNEL?.startsWith('plugin:discord@') ? process.env.HEX_THREAD : undefined
-
-const mcp = new Server(
-  { name: 'discord', version: '1.0.0' },
-  {
-    capabilities: { tools: {}, experimental: { 'claude/channel': {} } },
-    instructions: [
-      'The sender reads Discord, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat. Nobody watches this terminal either, so the report a background job ends with goes to them as a reply: what they need to know and act on. Once it\'s sent, end the turn without repeating it here.',
-      '',
-      'This session is one Discord thread, the place for deeper work. Discord renders Markdown, so answers can be longer and structured: headings, lists, and code blocks with a language. Its messages arrive as <channel source="discord" chat_id="..." message_id="..." user="..." ts="...">, and everything you send with these tools lands back in that same thread. If the tag has new_thread="true", this thread was just opened from that message and named after its first word: give it a fitting name with rename_thread first. If the tag has attachment_count, the attachments attribute lists name/type/size — call download_attachment(message_id) to fetch them. If the tag has reply_to_message_id, the sender replied to that earlier message: reply_to_text is its text and reply_to_attachments lists its files (download_attachment with that id). edited="true" means the sender edited the message with that message_id and this is its new text; forwarded="true" means it is a message they forwarded. stickers lists sent stickers with their image URLs; poll is a poll question, with poll_options and poll_multiple when several answers are allowed. post_title is the title of a new forum post. A reaction arrives as "(reaction: 👍)" with reaction, reaction_to_message_id, reaction_to_user and reaction_to_text, plus reaction_removed="true" when taken off. deleted="true" means the message with that message_id was deleted, with deleted_text when known. button="true" means the sender tapped the button with this label on button_message_id. A vote on your poll arrives as "(vote: Tacos)" with vote, poll and poll_message_id, plus vote_removed="true" when taken back. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply.',
-      '',
-      'reply accepts file paths (files: ["/abs/path.png"]) for attachments, silent: true to skip the notification, and buttons: ["Yes", "No"] for tappable choices. Use react to add emoji reactions, and edit_message for interim progress updates or to swap a sent file. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',
-      '',
-      'new_thread opens another thread with its own fresh session and hands it your prompt. Use it for work the user will want to follow or talk to on its own. handoff moves this whole conversation to another app, such as telegram, when the user asks: you stop here and continue there with your memory.',
-      '',
-      "fetch_messages pulls real Discord history, from this thread by default. The tag's channel attribute names the channel this thread is in: fetch_messages(channel) reads that channel's top-level messages, a message with a thread shows its reply count, and fetch_messages(thread: that message's id) reads the thread. When the user refers to earlier work or talk in the channel, read it rather than saying you can't see it. To find an old message anywhere in the server, use search_messages.",
-    ].join('\n'),
-  },
-)
+import type { ChannelServer } from '../../hub/hub.ts'
 
 const titleProperty = { type: 'string', description: 'One word, like a chat name ("Anchors", "Frontier").' }
 
-mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
+// What each session's channel says and offers; the hub serves it over HTTP.
+export const server: ChannelServer = {
+  title: 'Discord',
+  instructions: [
+    'The sender reads Discord, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat. Nobody watches this terminal either, so the report a background job ends with goes to them as a reply: what they need to know and act on. Once it\'s sent, end the turn without repeating it here.',
+    '',
+    'This session is one Discord thread, the place for deeper work. Discord renders Markdown, so answers can be longer and structured: headings, lists, and code blocks with a language. Its messages arrive as <channel source="discord" chat_id="..." message_id="..." user="..." ts="...">, and everything you send with these tools lands back in that same thread. If the tag has new_thread="true", this thread was just opened from that message and named after its first word: give it a fitting name with rename_thread first. If the tag has attachment_count, the attachments attribute lists name/type/size — call download_attachment(message_id) to fetch them. If the tag has reply_to_message_id, the sender replied to that earlier message: reply_to_text is its text and reply_to_attachments lists its files (download_attachment with that id). edited="true" means the sender edited the message with that message_id and this is its new text; forwarded="true" means it is a message they forwarded. stickers lists sent stickers with their image URLs; poll is a poll question, with poll_options and poll_multiple when several answers are allowed. post_title is the title of a new forum post. A reaction arrives as "(reaction: 👍)" with reaction, reaction_to_message_id, reaction_to_user and reaction_to_text, plus reaction_removed="true" when taken off. deleted="true" means the message with that message_id was deleted, with deleted_text when known. button="true" means the sender tapped the button with this label on button_message_id. A vote on your poll arrives as "(vote: Tacos)" with vote, poll and poll_message_id, plus vote_removed="true" when taken back. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply.',
+    '',
+    'reply accepts file paths (files: ["/abs/path.png"]) for attachments, silent: true to skip the notification, and buttons: ["Yes", "No"] for tappable choices. Use react to add emoji reactions, and edit_message for interim progress updates or to swap a sent file. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',
+    '',
+    'new_thread opens another thread with its own fresh session and hands it your prompt. Use it for work the user will want to follow or talk to on its own. handoff moves this whole conversation to another app, such as telegram, when the user asks: you stop here and continue there with your memory.',
+    '',
+    "fetch_messages pulls real Discord history, from this thread by default. The tag's channel attribute names the channel this thread is in: fetch_messages(channel) reads that channel's top-level messages, a message with a thread shows its reply count, and fetch_messages(thread: that message's id) reads the thread. When the user refers to earlier work or talk in the channel, read it rather than saying you can't see it. To find an old message anywhere in the server, use search_messages.",
+  ].join('\n'),
   tools: [
     {
       name: 'reply',
@@ -228,77 +216,4 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
   ],
-}))
-
-let hub: Socket | undefined
-let nextId = 0
-const pending = new Map<number, { resolve: (text: string) => void; reject: (error: Error) => void }>()
-
-function request(tool: string, args: Record<string, unknown>): Promise<string> {
-  if (!THREAD) return Promise.reject(new Error('this session is not bound to a Discord thread (HEX_THREAD is unset)'))
-  if (!hub) return Promise.reject(new Error('the Discord hub is not running'))
-  const id = ++nextId
-  const socket = hub
-  return new Promise((resolve, reject) => {
-    pending.set(id, { resolve, reject })
-    socket.write(JSON.stringify({ type: 'call', id, tool, args }) + '\n')
-  })
 }
-
-mcp.setRequestHandler(CallToolRequestSchema, async req => {
-  try {
-    const text = await request(req.params.name, req.params.arguments ?? {})
-    return { content: [{ type: 'text', text }] }
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
-    return { content: [{ type: 'text', text: `${req.params.name} failed: ${msg}` }], isError: true }
-  }
-})
-
-function connectHub(): void {
-  const socket = connect(SOCKET!)
-  let buffer = ''
-  socket.setEncoding('utf8')
-  socket.on('connect', () => {
-    hub = socket
-    // Claude Code starts listening for channel notifications ~30ms after its last
-    // request to this server (tools/list) and never signals it; notifications
-    // before that are dropped. Saying hello flushes queued messages, so wait.
-    setTimeout(() => socket.write(JSON.stringify({ type: 'hello', thread: THREAD, session: process.env.CLAUDE_CODE_SESSION_ID }) + '\n'), 1000)
-  })
-  socket.on('data', (chunk: string) => {
-    buffer += chunk
-    for (let end = buffer.indexOf('\n'); end >= 0; end = buffer.indexOf('\n')) {
-      const event = JSON.parse(buffer.slice(0, end))
-      buffer = buffer.slice(end + 1)
-      if (event.type === 'inbound') {
-        mcp.notification({
-          method: 'notifications/claude/channel',
-          params: { content: event.content, meta: event.meta },
-        }).catch(err => process.stderr.write(`discord channel: failed to deliver inbound to Claude: ${err}\n`))
-      }
-      if (event.type === 'result') {
-        const waiter = pending.get(event.id)
-        pending.delete(event.id)
-        if (event.error) waiter?.reject(new Error(event.error))
-        else waiter?.resolve(event.text)
-      }
-    }
-  })
-  socket.on('close', () => {
-    if (hub === socket) hub = undefined
-    for (const waiter of pending.values()) waiter.reject(new Error('the Discord hub disconnected'))
-    pending.clear()
-    setTimeout(connectHub, 2000)
-  })
-  socket.on('error', () => {})
-}
-
-mcp.oninitialized = () => {
-  if (THREAD && SOCKET) connectHub()
-}
-
-await mcp.connect(new StdioServerTransport())
-
-process.stdin.on('end', () => process.exit(0))
-process.stdin.on('close', () => process.exit(0))

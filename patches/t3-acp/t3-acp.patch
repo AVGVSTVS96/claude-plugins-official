@@ -24,15 +24,20 @@ index 0000000000000000000000000000000000000000..c2658d7d1b31848c3b71960543cb0368
 +node_modules/
 diff --git a/external_plugins/t3/.mcp.json b/external_plugins/t3/.mcp.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..dcc8a6b03ed18c6bd60d12c019669f62f5a456e3
+index 0000000000000000000000000000000000000000..684939c90395df2a375d569857eb7deab3151460
 --- /dev/null
 +++ b/external_plugins/t3/.mcp.json
-@@ -0,0 +1,8 @@
+@@ -0,0 +1,13 @@
 +{
 +  "mcpServers": {
 +    "t3": {
-+      "command": "bun",
-+      "args": ["run", "--cwd", "${CLAUDE_PLUGIN_ROOT}", "--shell=bun", "--silent", "start"]
++      "type": "http",
++      "url": "http://127.0.0.1:${HEX_PORT}/t3",
++      "headers": {
++        "X-Hex-Channel": "${HEX_CHANNEL}",
++        "X-Hex-Thread": "${HEX_THREAD}",
++        "Authorization": "Bearer ${HEX_TOKEN}"
++      }
 +    }
 +  }
 +}
@@ -45,7 +50,7 @@ index 0000000000000000000000000000000000000000..214c29d1395919ce175f26d140526368
 +registry=https://registry.npmjs.org/
 diff --git a/external_plugins/t3/README.md b/external_plugins/t3/README.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..4f0342fd149947516e7884cffd54fff6f9de66da
+index 0000000000000000000000000000000000000000..8ccbcb957982d5eb7f2c6594b0892c8b05ee2691
 --- /dev/null
 +++ b/external_plugins/t3/README.md
 @@ -0,0 +1,12 @@
@@ -55,7 +60,7 @@ index 0000000000000000000000000000000000000000..4f0342fd149947516e7884cffd54fff6
 +
 +- `bot.ts` runs in the hub service (`bun hub/serve.ts`) next to Telegram, Discord and Buzz. It embeds the hub and serves ACP on `acp.sock`: `session/new` opens a thread in the request's `cwd`, `session/prompt` delivers the message and streams the turn back, `session/cancel` or T3 quitting mid-turn stops it, `session/resume` picks a thread up again after T3 restarts, and `session/set_config_option` sets the thread's model and effort from T3's pickers.
 +- `transcript.ts` turns a session's Claude Code transcript into ACP `session/update` notifications: text, thinking, tool calls and their results. A turn ends when the session's work does: background agents keep it open, and the turns their results start stream into it, until a Stop hook reports no background agent still working.
-+- `server.ts` is the channel each session loads. It only delivers T3's messages: the session's own output is what T3 shows, so it has no reply tool.
++- `channel.ts` is the channel the hub serves each session over HTTP (`.mcp.json`). It only delivers T3's messages: the session's own output is what T3 shows, so it has no reply tool.
 +- `acp.ts` is what T3 starts. It relays stdio to `acp.sock`, so T3 reaches the agent that's already running instead of starting one.
 +
 +State lives in `~/.claude/channels/hex/t3/` (or `T3_STATE_DIR`): `threads.json`, the sockets, and `inbox/`, where pasted images and files land for the session to read.
@@ -89,10 +94,10 @@ index 0000000000000000000000000000000000000000..c12bf015726ea411ac246ded94d2493c
 +socket.on('close', () => process.exit(0))
 diff --git a/external_plugins/t3/bot.test.ts b/external_plugins/t3/bot.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..1fde50e431a6449a31a3c0274810608ca8b3301f
+index 0000000000000000000000000000000000000000..99f3046cd1961490ba188b07314350fea564c062
 --- /dev/null
 +++ b/external_plugins/t3/bot.test.ts
-@@ -0,0 +1,350 @@
+@@ -0,0 +1,351 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { connect, type Socket } from 'net'
 +import { Readable, Writable } from 'stream'
@@ -114,7 +119,7 @@ index 0000000000000000000000000000000000000000..1fde50e431a6449a31a3c0274810608c
 +  project = join(dir, 'project')
 +  for (const path of [project, join(dir, 'hex', '.claude'), join(dir, 'state'), join(dir, 'config', 'jobs', 'job12345'), join(dir, '.t3', 'scratch', 'chat')]) mkdirSync(path, { recursive: true })
 +  writeFileSync(join(dir, '.claude.json'), '{"projects":{}}')
-+  script('claude', `jq -cn '$ARGS.positional' --args -- "$@" >> "${dir}/claude"
++  script('claude', `jq -cn '$ARGS.positional' --args -- "$@" >> "${dir}/calls"
 +[ "$1 $2" = "agents --json" ] && { cat "${dir}/agents" 2>/dev/null || echo '[]'; }
 +[ "$1" = stop ] && [ -f "${dir}/agents" ] && pid=$(jq '.[0].pid' "${dir}/agents") && rm "${dir}/agents" && kill "$pid"
 +exit 0`)
@@ -128,6 +133,7 @@ index 0000000000000000000000000000000000000000..1fde50e431a6449a31a3c0274810608c
 +      HOME: dir,
 +      PATH: `${dir}:${process.env.PATH}`,
 +      T3_STATE_DIR: join(dir, 'state'),
++      HEX_PORT: '0',
 +      HEX_DIR: join(dir, 'hex'),
 +      HEX_LAUNCHER: join(dir, 'launch'),
 +      CLAUDE_CONFIG_DIR: join(dir, 'config'),
@@ -265,7 +271,7 @@ index 0000000000000000000000000000000000000000..1fde50e431a6449a31a3c0274810608c
 +  updates.length = 0
 +  const answer = agent.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: '/compact' }, { type: 'text', text: 'T3 context' }] })
 +  await until(() => lines('launched').some(line => line.includes('"/compact"')))
-+  expect(lines('claude')).toContain(JSON.stringify(['stop', SESSION.slice(0, 8)]))
++  expect(lines('calls')).toContain(JSON.stringify(['stop', SESSION.slice(0, 8)]))
 +  expect(JSON.parse(lines('launched').at(-1)!)).toEqual(expect.arrayContaining(['--resume', SESSION, '/compact']))
 +  hex.write(
 +    { type: 'user', message: { content: '/compact' } },
@@ -317,7 +323,7 @@ index 0000000000000000000000000000000000000000..1fde50e431a6449a31a3c0274810608c
 +  await agent.request('session/resume', { sessionId, cwd: project, mcpServers: [t3Tools('two')] })
 +  agent.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'again' }] }).catch(() => {})
 +  await until(() => lines('launched').some(line => line.includes('two')))
-+  expect(lines('claude')).toContain(JSON.stringify(['stop', SESSION.slice(0, 8)]))
++  expect(lines('calls')).toContain(JSON.stringify(['stop', SESSION.slice(0, 8)]))
 +  expect(hex.inbound.map(message => message.content)).toEqual(['hi'])
 +  const fresh = await session(sessionId)
 +  await until(() => fresh.inbound.length)
@@ -338,7 +344,7 @@ index 0000000000000000000000000000000000000000..1fde50e431a6449a31a3c0274810608c
 +  const pid = Number(Bun.spawnSync(['sh', '-c', 'sleep 60 >/dev/null 2>&1 & echo $!']).stdout.toString())
 +  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid, status: 'busy' }]))
 +  first.socket.destroy()
-+  await until(() => lines('claude').includes(JSON.stringify(['stop', SESSION.slice(0, 8)])) && !existsSync(join(dir, 'agents')))
++  await until(() => lines('calls').includes(JSON.stringify(['stop', SESSION.slice(0, 8)])) && !existsSync(join(dir, 'agents')))
 +  const second = await t3()
 +  await second.agent.request('session/resume', { sessionId, cwd: project, mcpServers: [t3Tools('two')] })
 +  second.agent.request('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'hi' }] }).catch(() => {})
@@ -378,7 +384,7 @@ index 0000000000000000000000000000000000000000..1fde50e431a6449a31a3c0274810608c
 +  await until(() => lines('launched').length === 2)
 +  const again = JSON.parse(lines('launched')[1]!)
 +  expect([again[again.indexOf('--model') + 1], again[again.indexOf('--effort') + 1], again[again.indexOf('--resume') + 1]]).toEqual(['claude-fable-5-1', 'xhigh', SESSION])
-+  expect(lines('claude')).toContain(JSON.stringify(['stop', SESSION.slice(0, 8)]))
++  expect(lines('calls')).toContain(JSON.stringify(['stop', SESSION.slice(0, 8)]))
 +  const fresh = await session(sessionId)
 +  await until(() => fresh.inbound.length)
 +  expect(fresh.inbound[0]).toMatchObject({ type: 'inbound', content: 'again' })
@@ -400,8 +406,8 @@ index 0000000000000000000000000000000000000000..1fde50e431a6449a31a3c0274810608c
 +  await until(() => hex.inbound.length)
 +  await agent.notify('session/cancel', { sessionId })
 +  expect(await answer).toEqual({ stopReason: 'cancelled' })
-+  await until(() => lines('claude').some(line => line.startsWith('["stop"')))
-+  expect(lines('claude')).toContain(JSON.stringify(['stop', SESSION.slice(0, 8)]))
++  await until(() => lines('calls').some(line => line.startsWith('["stop"')))
++  expect(lines('calls')).toContain(JSON.stringify(['stop', SESSION.slice(0, 8)]))
 +})
 +
 +test('a chat with no project works in hex\'s folder, and a project folder is trusted for good', async () => {
@@ -445,10 +451,10 @@ index 0000000000000000000000000000000000000000..1fde50e431a6449a31a3c0274810608c
 +})
 diff --git a/external_plugins/t3/bot.ts b/external_plugins/t3/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..c86b060b4b63d7cfb0e8aece288d669a7769692d
+index 0000000000000000000000000000000000000000..ea2b2bcecc092c691861b37ffc2c9cc0dc8ad55b
 --- /dev/null
 +++ b/external_plugins/t3/bot.ts
-@@ -0,0 +1,273 @@
+@@ -0,0 +1,275 @@
 +#!/usr/bin/env bun
 +import { createServer, type Socket } from 'net'
 +import { Readable, Writable } from 'stream'
@@ -459,6 +465,7 @@ index 0000000000000000000000000000000000000000..c86b060b4b63d7cfb0e8aece288d669a
 +import { randomUUID } from 'crypto'
 +import { agent, ndJsonStream, PROTOCOL_VERSION, RequestError, type AgentContext, type ContentBlock, type McpServer, type PromptResponse, type SessionConfigOption, type SessionNotification, type StopReason } from '@agentclientprotocol/sdk'
 +import { startHub } from '../../hub/hub.ts'
++import { server } from './channel.ts'
 +import { follow, transcriptPath } from './transcript.ts'
 +import { version } from './package.json'
 +
@@ -506,6 +513,7 @@ index 0000000000000000000000000000000000000000..c86b060b4b63d7cfb0e8aece288d669a
 +const hub = startHub({
 +  stateDir: STATE_DIR,
 +  channel: process.env.T3_CHANNEL ?? 'plugin:t3@hex',
++  server,
 +  call: async (_, tool) => {
 +    throw new Error(`unknown tool: ${tool}`)
 +  },
@@ -724,10 +732,10 @@ index 0000000000000000000000000000000000000000..c86b060b4b63d7cfb0e8aece288d669a
 +createServer(serve).listen(SOCKET)
 diff --git a/external_plugins/t3/bun.lock b/external_plugins/t3/bun.lock
 new file mode 100644
-index 0000000000000000000000000000000000000000..65607f26b741773cb110c416a96320da90d4bf9a
+index 0000000000000000000000000000000000000000..5db63b32a659de7ad4c2a59dbc32da343503868d
 --- /dev/null
 +++ b/external_plugins/t3/bun.lock
-@@ -0,0 +1,241 @@
+@@ -0,0 +1,240 @@
 +{
 +  "lockfileVersion": 2,
 +  "configVersion": 1,
@@ -737,7 +745,6 @@ index 0000000000000000000000000000000000000000..65607f26b741773cb110c416a96320da
 +      "dependencies": {
 +        "@agentclientprotocol/claude-agent-acp": "^0.86.0",
 +        "@agentclientprotocol/sdk": "^1.7.0",
-+        "@modelcontextprotocol/sdk": "^1.0.0",
 +      },
 +    },
 +  },
@@ -979,90 +986,40 @@ index 0000000000000000000000000000000000000000..7112054b720266b866c74bc3b48350f6
 +# only its transcript converter is used here.
 +[install]
 +optional = false
+diff --git a/external_plugins/t3/channel.ts b/external_plugins/t3/channel.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..20cb5c46ca51b5dcb034d463719c0aaf961a1db0
+--- /dev/null
++++ b/external_plugins/t3/channel.ts
+@@ -0,0 +1,12 @@
++import type { ChannelServer } from '../../hub/hub.ts'
++
++// What each session's channel says and offers; the hub serves it over HTTP.
++export const server: ChannelServer = {
++  title: 'T3 Code',
++  instructions: [
++    'This session is one T3 Code thread. Unlike the chat apps, the user reads this session itself: T3 Code shows your text, tool calls and edits live as you work. So answer in plain text, as you would in a terminal; there is no reply tool here.',
++    '',
++    'Messages arrive as <channel source="t3" ts="...">. Images and files the user attaches show up in them as absolute paths: Read them. Your working directory is the project this thread was opened in.',
++  ].join('\n'),
++  tools: [],
++}
 diff --git a/external_plugins/t3/package.json b/external_plugins/t3/package.json
 new file mode 100644
-index 0000000000000000000000000000000000000000..5db105f7c76cab8a23353e9783441056719d7a81
+index 0000000000000000000000000000000000000000..31db90a1adf6a40f1cd1ce461584c9a6e094ffd0
 --- /dev/null
 +++ b/external_plugins/t3/package.json
-@@ -0,0 +1,14 @@
+@@ -0,0 +1,10 @@
 +{
 +  "name": "claude-channel-t3",
 +  "version": "0.1.0",
 +  "license": "Apache-2.0",
 +  "type": "module",
-+  "scripts": {
-+    "start": "bun install --no-summary 1>&2 && bun server.ts"
-+  },
 +  "dependencies": {
 +    "@agentclientprotocol/claude-agent-acp": "^0.86.0",
-+    "@agentclientprotocol/sdk": "^1.7.0",
-+    "@modelcontextprotocol/sdk": "^1.0.0"
++    "@agentclientprotocol/sdk": "^1.7.0"
 +  }
 +}
-diff --git a/external_plugins/t3/server.ts b/external_plugins/t3/server.ts
-new file mode 100644
-index 0000000000000000000000000000000000000000..958c2871abf3049e772d8f95686bf2ef649c4c6b
---- /dev/null
-+++ b/external_plugins/t3/server.ts
-@@ -0,0 +1,58 @@
-+#!/usr/bin/env bun
-+import { Server } from '@modelcontextprotocol/sdk/server/index.js'
-+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
-+import { ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
-+import { connect } from 'net'
-+
-+const SOCKET = process.env.HEX_HUB
-+const THREAD = process.env.HEX_CHANNEL?.startsWith('plugin:t3@') ? process.env.HEX_THREAD : undefined
-+
-+const mcp = new Server(
-+  { name: 't3', version: '0.1.0' },
-+  {
-+    capabilities: { tools: {}, experimental: { 'claude/channel': {} } },
-+    instructions: [
-+      'This session is one T3 Code thread. Unlike the chat apps, the user reads this session itself: T3 Code shows your text, tool calls and edits live as you work. So answer in plain text, as you would in a terminal; there is no reply tool here.',
-+      '',
-+      'Messages arrive as <channel source="t3" ts="...">. Images and files the user attaches show up in them as absolute paths: Read them. Your working directory is the project this thread was opened in.',
-+    ].join('\n'),
-+  },
-+)
-+
-+mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [] }))
-+
-+function connectHub(): void {
-+  const socket = connect(SOCKET!)
-+  let buffer = ''
-+  socket.setEncoding('utf8')
-+  socket.on('connect', () => {
-+    // Claude Code starts listening for channel notifications ~30ms after its last
-+    // request to this server (tools/list) and never signals it; notifications
-+    // before that are dropped. Saying hello flushes queued messages, so wait.
-+    setTimeout(() => socket.write(JSON.stringify({ type: 'hello', thread: THREAD, session: process.env.CLAUDE_CODE_SESSION_ID }) + '\n'), 1000)
-+  })
-+  socket.on('data', (chunk: string) => {
-+    buffer += chunk
-+    for (let end = buffer.indexOf('\n'); end >= 0; end = buffer.indexOf('\n')) {
-+      const event = JSON.parse(buffer.slice(0, end))
-+      buffer = buffer.slice(end + 1)
-+      if (event.type === 'inbound') {
-+        mcp.notification({
-+          method: 'notifications/claude/channel',
-+          params: { content: event.content, meta: event.meta },
-+        }).catch(err => process.stderr.write(`t3 channel: failed to deliver inbound to Claude: ${err}\n`))
-+      }
-+    }
-+  })
-+  socket.on('close', () => setTimeout(connectHub, 2000))
-+  socket.on('error', () => {})
-+}
-+
-+mcp.oninitialized = () => {
-+  if (THREAD && SOCKET) connectHub()
-+}
-+
-+await mcp.connect(new StdioServerTransport())
-+
-+process.stdin.on('end', () => process.exit(0))
-+process.stdin.on('close', () => process.exit(0))
 diff --git a/external_plugins/t3/transcript.test.ts b/external_plugins/t3/transcript.test.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..a64ab2fd4c1baf1520a69dd876ea438574bb3e00
