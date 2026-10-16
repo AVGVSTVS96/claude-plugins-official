@@ -176,10 +176,10 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
   const runs = new Map<string, Run>()
   const plugin = channel.replace(/^plugin:/, '')
   const path = `/${plugin.split('@')[0]}`
+  mkdirSync(sessionsDir, { recursive: true, mode: 0o700 })
   const token = server && tokenOf(stateDir)
   const inherited = Object.fromEntries(Object.entries(process.env).filter(([name]) => !PRIVATE.test(name)))
   let closed = false
-  mkdirSync(sessionsDir, { recursive: true, mode: 0o700 })
 
   function read(): Record<string, Saved> {
     let text: string

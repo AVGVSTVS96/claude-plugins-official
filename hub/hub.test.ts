@@ -1128,6 +1128,12 @@ test('a session that started with what the hub still gives keeps running across 
   expect(calls().some(args => args[0] === 'stop')).toBe(false)
 })
 
+test('a hub whose state folder is gone makes it again, with a new token', () => {
+  const state = join(dir, 'gone')
+  hub = startHub({ stateDir: state, channel: CHANNEL, server: SERVER, port: listener.port, call: async () => '', state: () => {}, failed: () => {}, hexDir: join(dir, 'hex') })
+  expect(statSync(join(state, 'token')).mode & 0o777).toBe(0o600)
+})
+
 test('a session records what it started with, and the hub tells a change of arguments or channel from a plain restart', async () => {
   start({ registry: { 'chat:7': { name: 'Desk anchors' } }, stale: true, agents: [] })
   hub.deliver('chat:7', 'Desk anchors', message)
