@@ -1,12 +1,12 @@
 diff --git a/hub/hub.test.ts b/hub/hub.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..44722ca2c11302defbd3132a852006ad10154d22
+index 0000000000000000000000000000000000000000..e480cd3a187187718b2828e2d39b707c8e46b17a
 --- /dev/null
 +++ b/hub/hub.test.ts
-@@ -0,0 +1,930 @@
+@@ -0,0 +1,1042 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { connect, createServer, type Socket } from 'net'
-+import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, chmodSync, existsSync } from 'fs'
++import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, chmodSync, existsSync } from 'fs'
 +import { tmpdir } from 'os'
 +import { join } from 'path'
 +import { free, startHub, tappable, transcribe, type Message, type Permission } from './hub.ts'
@@ -45,7 +45,7 @@ index 0000000000000000000000000000000000000000..44722ca2c11302defbd3132a852006ad
 +  process.env.PATH = process.env.PATH!.split(':').slice(1).join(':')
 +})
 +
-+function start(options: { main?: string; general?: boolean; idleStop?: number; cacheWarm?: number; compactAbove?: number; relaunch?: number; launcher?: string; registry?: object; agents?: object[]; fresh?: (thread: string) => boolean; bind?: (thread: string) => Record<string, string> } = {}) {
++function start(options: { main?: string; general?: boolean; idleStop?: number; cacheWarm?: number; compactAbove?: number; relaunch?: number; launcher?: string; registry?: object; agents?: object[]; fresh?: (thread: string) => boolean; capacity?: number; bind?: (thread: string) => Record<string, string> } = {}) {
 +  if (options.registry) writeFileSync(join(dir, 'threads.json'), JSON.stringify(options.registry))
 +  if (options.agents) writeFileSync(join(dir, 'agents'), JSON.stringify(options.agents))
 +  const seen: [string, boolean][] = (states = [])
@@ -69,6 +69,7 @@ index 0000000000000000000000000000000000000000..44722ca2c11302defbd3132a852006ad
 +    relaunch: options.relaunch,
 +    launcher: options.launcher,
 +    fresh: options.fresh,
++    capacity: options.capacity,
 +    bind: options.bind,
 +    mainName: 'hex',
 +  })
@@ -115,13 +116,13 @@ index 0000000000000000000000000000000000000000..44722ca2c11302defbd3132a852006ad
 +}
 +
 +// A line of the session's transcript: a request that sent this much context, or a compaction down to it.
-+function said(tokens: number, compacted = false, id = SESSION) {
++function said(tokens: number, compacted = false, id = SESSION, at = Date.now()) {
 +  const project = join(dir, 'projects', join(dir, 'hex').replace(/[^a-zA-Z0-9]/g, '-'))
 +  mkdirSync(project, { recursive: true })
 +  const line = compacted
 +    ? { type: 'system', subtype: 'compact_boundary', compactMetadata: { trigger: 'manual', preTokens: 0, postTokens: tokens } }
 +    : { type: 'assistant', message: { usage: { input_tokens: 2, cache_creation_input_tokens: 100, cache_read_input_tokens: tokens - 102 } } }
-+  appendFileSync(join(project, `${id}.jsonl`), JSON.stringify(line) + '\n')
++  appendFileSync(join(project, `${id}.jsonl`), JSON.stringify({ ...line, timestamp: new Date(at).toISOString() }) + '\n')
 +}
 +
 +function settingsOf(args: string[]) {
@@ -487,27 +488,27 @@ index 0000000000000000000000000000000000000000..44722ca2c11302defbd3132a852006ad
 +  expect(fresh.received[0]).toMatchObject({ type: 'inbound', content: 'again' })
 +})
 +
-+test('a fresh thread starts a new session instead of resuming its last, and says so in its env', async () => {
-+  start({ registry: { dm: { name: 'DM', session: SESSION } }, agents: [], fresh: thread => thread === 'dm' })
++test('a fresh thread with no capacity starts a new session instead of resuming its last, and says so in its env', async () => {
++  start({ registry: { dm: { name: 'DM', session: SESSION } }, agents: [], fresh: thread => thread === 'dm', capacity: 0 })
 +  hub.deliver('dm', 'DM', message)
 +  const args = await launched()
 +  expect(args).not.toContain('--resume')
 +  expect(calls().some(args => args[0] === 'rm')).toBe(false)
 +  expect(settingsOf(args).env).toEqual({ HEX_CHANNEL: CHANNEL, HEX_THREAD: 'dm', HEX_HUB: join(dir, 'hub.sock'), HEX_FRESH: '1' })
-+  const NEXT = '0a1b2c3d-0000-4000-8000-000000000001'
 +  saved(NEXT)
 +  const { received } = await session('dm', NEXT)
 +  await until(() => received.length)
 +  expect(registry().dm).toEqual({ name: 'DM', session: NEXT })
 +})
 +
-+test('a message to a fresh thread steers its session while Claude reports it working, and starts a new one once it is done', async () => {
-+  start({ registry: { dm: { name: 'DM', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 999999, status: 'busy' }], fresh: thread => thread === 'dm' })
++test('a message to a fresh thread with no capacity steers its session while Claude reports it working, and starts a new one once it is done', async () => {
++  start({ registry: { dm: { name: 'DM', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 999999, status: 'busy' }], fresh: thread => thread === 'dm', capacity: 0 })
 +  const { received, send } = await session('dm')
 +  await Bun.sleep(50)
 +  hub.deliver('dm', 'DM', message)
 +  await until(() => received.length)
 +  expect(received).toEqual([{ type: 'inbound', ...message }])
++  said(50_000)
 +  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid: 999999, status: 'idle' }]))
 +  send({ type: 'state', thread: 'dm', busy: false })
 +  await until(() => states.length)
@@ -535,8 +536,119 @@ index 0000000000000000000000000000000000000000..44722ca2c11302defbd3132a852006ad
 +  expect(calls().some(args => args[0] === 'stop' || args[0] === '--bg')).toBe(false)
 +})
 +
++const NEXT = '0a1b2c3d-0000-4000-8000-000000000001'
++const dm = (agents: object[], options: { capacity?: number; cacheWarm?: number; idleStop?: number; compactAbove?: number } = {}) =>
++  start({ registry: { dm: { name: 'DM', session: SESSION } }, agents, fresh: thread => thread === 'dm', capacity: 1000, ...options })
++
++test('a fresh thread\'s warm session takes every message as it comes, and stays up while it rests', async () => {
++  dm([{ sessionId: SESSION, pid: 999999, status: 'idle', startedAt: Date.now() + 60_000 }], { idleStop: 10 })
++  said(500)
++  const { received, send } = await session('dm')
++  await Bun.sleep(50)
++  hub.deliver('dm', 'DM', message)
++  send({ type: 'state', thread: 'dm', busy: false })
++  await until(() => states.length)
++  hub.deliver('dm', 'DM', { content: 'next', meta: {} })
++  await until(() => received.length === 2)
++  await Bun.sleep(100)
++  expect(calls().some(args => args[0] === 'stop' || args[0] === '--bg')).toBe(false)
++})
++
++test('a fresh thread whose stopped session is still warm resumes it, and one gone cold starts a new one', async () => {
++  dm([])
++  said(500)
++  hub.deliver('dm', 'DM', message)
++  const args = await launched()
++  expect(calls()[1]).toEqual(['rm', SESSION.slice(0, 8)])
++  expect(args.slice(args.indexOf('--resume'), args.indexOf('--resume') + 2)).toEqual(['--resume', SESSION])
++  hub.close()
++  rmSync(join(dir, 'calls'))
++  dm([], { cacheWarm: 60_000 })
++  said(500, false, SESSION, Date.now() - 61_000)
++  hub.deliver('dm', 'DM', message)
++  expect(await launched()).not.toContain('--resume')
++})
++
++test('once a fresh thread\'s session is full, a new one takes over as soon as it rests, before the next message', async () => {
++  const old = Bun.spawn(['sleep', '30'])
++  dm([{ sessionId: SESSION, pid: old.pid, status: 'busy', startedAt: Date.now() + 60_000 }])
++  const first = await session('dm')
++  await Bun.sleep(50)
++  hub.deliver('dm', 'DM', message)
++  await until(() => first.received.length)
++  said(1500)
++  writeFileSync(join(dir, 'agents'), JSON.stringify([{ sessionId: SESSION, pid: old.pid, status: 'idle', startedAt: Date.now() + 60_000 }]))
++  first.send({ type: 'state', thread: 'dm', busy: false })
++  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
++  first.socket.destroy()
++  old.kill()
++  const args = await launched()
++  expect(args).not.toContain('--resume')
++  expect(args.at(-1)).toStartWith('{')
++  const next = await session('dm', NEXT)
++  await Bun.sleep(50)
++  hub.deliver('dm', 'DM', { content: 'next', meta: {} })
++  await until(() => next.received.length)
++  expect(next.received[0]).toMatchObject({ type: 'inbound', content: 'next' })
++  expect(first.received).toHaveLength(1)
++})
++
++test('a fresh thread\'s session hands over when its cache expires, timed from its last request', async () => {
++  const old = Bun.spawn(['sleep', '30'])
++  dm([{ sessionId: SESSION, pid: old.pid, status: 'idle', startedAt: Date.now() + 60_000 }], { cacheWarm: 400 })
++  said(500, false, SESSION, Date.now() - 200)
++  const first = await session('dm')
++  const rested = Date.now()
++  first.send({ type: 'state', thread: 'dm', busy: false })
++  await until(() => calls().find(args => args[0] === 'stop'))
++  expect(Date.now() - rested).toBeGreaterThanOrEqual(150)
++  expect(Date.now() - rested).toBeLessThan(350)
++  first.socket.destroy()
++  old.kill()
++  expect(await launched()).not.toContain('--resume')
++})
++
++test('a message that finds a fresh thread\'s session gone cold goes to a new one', async () => {
++  const old = Bun.spawn(['sleep', '30'])
++  dm([{ sessionId: SESSION, pid: old.pid, status: 'idle', startedAt: Date.now() + 60_000 }], { cacheWarm: 60_000 })
++  said(500, false, SESSION, Date.now() - 61_000)
++  const first = await session('dm')
++  await until(() => calls().find(args => args[0] === 'stop'))
++  hub.deliver('dm', 'DM', message)
++  first.socket.destroy()
++  old.kill()
++  expect(await launched()).not.toContain('--resume')
++  const next = await session('dm', NEXT)
++  await until(() => next.received.length)
++  expect(next.received[0]).toMatchObject({ type: 'inbound', ...message })
++  expect(first.received).toHaveLength(0)
++})
++
++test('a fresh thread never compacts or idles out, however big its session', async () => {
++  dm([{ sessionId: SESSION, pid: 999999, status: 'idle', startedAt: Date.now() + 60_000 }], { capacity: 400_000, compactAbove: 150_000, idleStop: 20 })
++  said(200_000)
++  const { send } = await session('dm')
++  send({ type: 'state', thread: 'dm', busy: false })
++  await until(() => states.length)
++  await Bun.sleep(150)
++  expect(calls().filter(args => args[0] !== 'agents')).toEqual([])
++})
++
++test('a fresh thread\'s warm session older than the hub resumes at once at its rest', async () => {
++  const old = Bun.spawn(['sleep', '30'])
++  dm([{ sessionId: SESSION, pid: old.pid, status: 'idle', startedAt: 1 }])
++  said(500)
++  const first = await session('dm')
++  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', SESSION.slice(0, 8)])
++  writeFileSync(join(dir, 'agents'), '[]')
++  first.socket.destroy()
++  old.kill()
++  const args = await launched()
++  expect(args.slice(args.indexOf('--resume'), args.indexOf('--resume') + 2)).toEqual(['--resume', SESSION])
++})
++
 +test('a thread that asks to renew starts over as a new session once its turn ends, without waiting out the main thread\'s relaunch delay', async () => {
-+  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: EXITED, status: 'idle' }], relaunch: 60_000, fresh: () => true })
++  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: EXITED, status: 'idle' }], relaunch: 60_000, fresh: () => true, capacity: 0 })
 +  const { send } = await session('voice')
 +  send({ type: 'state', thread: 'voice', busy: true })
 +  send({ type: 'renew', thread: 'voice' })
@@ -548,7 +660,7 @@ index 0000000000000000000000000000000000000000..44722ca2c11302defbd3132a852006ad
 +})
 +
 +test('a renew waits out background agents the turn ended with, then starts over at the next idle', async () => {
-+  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: EXITED, status: 'busy' }], relaunch: 60_000, fresh: () => true })
++  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: EXITED, status: 'busy' }], relaunch: 60_000, fresh: () => true, capacity: 0 })
 +  const { send } = await session('voice')
 +  send({ type: 'renew', thread: 'voice' })
 +  send({ type: 'state', thread: 'voice', busy: false, background: true })
@@ -560,7 +672,7 @@ index 0000000000000000000000000000000000000000..44722ca2c11302defbd3132a852006ad
 +})
 +
 +test('a renew goes through at a rest the Stop hook reports, though Claude still calls the session busy (its status lags, and a running shell counts)', async () => {
-+  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: EXITED, status: 'busy' }], relaunch: 60_000, fresh: () => true })
++  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: EXITED, status: 'busy' }], relaunch: 60_000, fresh: () => true, capacity: 0 })
 +  const { send } = await session('voice')
 +  send({ type: 'state', thread: 'voice', busy: true })
 +  send({ type: 'renew', thread: 'voice' })
@@ -578,7 +690,7 @@ index 0000000000000000000000000000000000000000..44722ca2c11302defbd3132a852006ad
 +})
 +
 +test('a call that comes while a renew is on its way waits for the new session to say hello', async () => {
-+  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: EXITED, status: 'busy' }], relaunch: 60_000, fresh: () => true })
++  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: EXITED, status: 'busy' }], relaunch: 60_000, fresh: () => true, capacity: 0 })
 +  let through = false
 +  await hub.renewal('voice')
 +  const { send } = await session('voice')
@@ -595,7 +707,7 @@ index 0000000000000000000000000000000000000000..44722ca2c11302defbd3132a852006ad
 +})
 +
 +test('a call waits for no renew held up by background agents, or called off by a call already in the session', async () => {
-+  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'busy' }], relaunch: 60_000, fresh: () => true })
++  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'busy' }], relaunch: 60_000, fresh: () => true, capacity: 0 })
 +  let through = 0
 +  const { send } = await session('voice')
 +  send({ type: 'state', thread: 'voice', busy: true })
@@ -614,7 +726,7 @@ index 0000000000000000000000000000000000000000..44722ca2c11302defbd3132a852006ad
 +})
 +
 +test('a fresh main thread still running when the hub starts is left to reconnect instead of getting a second session', async () => {
-+  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'idle' }], relaunch: 150, fresh: () => true })
++  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'idle' }], relaunch: 150, fresh: () => true, capacity: 0 })
 +  await Bun.sleep(50)
 +  await session('voice')
 +  await Bun.sleep(250)
@@ -622,7 +734,7 @@ index 0000000000000000000000000000000000000000..44722ca2c11302defbd3132a852006ad
 +})
 +
 +test('a fresh main thread whose newest session is still running but not yet saved is left to reconnect too', async () => {
-+  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: '0a1b2c3d-0000-4000-8000-000000000009', pid: 43, name: 'hex', cwd: join(dir, 'hex') }], relaunch: 150, fresh: () => true })
++  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: '0a1b2c3d-0000-4000-8000-000000000009', pid: 43, name: 'hex', cwd: join(dir, 'hex') }], relaunch: 150, fresh: () => true, capacity: 0 })
 +  await Bun.sleep(50)
 +  await session('voice', '0a1b2c3d-0000-4000-8000-000000000009')
 +  await Bun.sleep(250)
@@ -630,12 +742,12 @@ index 0000000000000000000000000000000000000000..44722ca2c11302defbd3132a852006ad
 +})
 +
 +test('a fresh main thread whose session is gone when the hub starts gets a new one at once', async () => {
-+  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [], relaunch: 60_000, fresh: () => true })
++  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [], relaunch: 60_000, fresh: () => true, capacity: 0 })
 +  expect(await launched()).not.toContain('--resume')
 +})
 +
 +test('a thread that asked to renew keeps running when it asks to keep before its turn ends (a new call started)', async () => {
-+  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'idle' }], relaunch: 50, fresh: () => true })
++  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'idle' }], relaunch: 50, fresh: () => true, capacity: 0 })
 +  const { send } = await session('voice')
 +  send({ type: 'state', thread: 'voice', busy: true })
 +  send({ type: 'renew', thread: 'voice' })
@@ -675,7 +787,7 @@ index 0000000000000000000000000000000000000000..44722ca2c11302defbd3132a852006ad
 +})
 +
 +test('a voice session older than the hub waits out its call before starting over', async () => {
-+  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'busy', startedAt: 1 }], relaunch: 60_000, fresh: () => true })
++  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: 42, status: 'busy', startedAt: 1 }], relaunch: 60_000, fresh: () => true, capacity: 0 })
 +  const { send } = await session('voice')
 +  send({ type: 'keep', thread: 'voice' })
 +  await Bun.sleep(100)
@@ -689,7 +801,7 @@ index 0000000000000000000000000000000000000000..44722ca2c11302defbd3132a852006ad
 +})
 +
 +test('a restart waits for every call to hang up, or for its session to go', async () => {
-+  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, relaunch: 60_000, fresh: () => true })
++  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, relaunch: 60_000, fresh: () => true, capacity: 0 })
 +  let freed = false
 +  await free()
 +  const first = await session('voice')
@@ -936,10 +1048,10 @@ index 0000000000000000000000000000000000000000..44722ca2c11302defbd3132a852006ad
 +})
 diff --git a/hub/hub.ts b/hub/hub.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..0ec5aadcf3025132b441187b977da25fe33d7398
+index 0000000000000000000000000000000000000000..45da52c647a3071976d2ff6257e7ffe5c0cd2681
 --- /dev/null
 +++ b/hub/hub.ts
-@@ -0,0 +1,652 @@
+@@ -0,0 +1,689 @@
 +import { createServer, type Socket } from 'net'
 +import { execFile, spawn } from 'child_process'
 +import { createHash } from 'crypto'
@@ -995,6 +1107,7 @@ index 0000000000000000000000000000000000000000..0ec5aadcf3025132b441187b977da25f
 +// and compacts a background session only when told to.
 +const CACHE_WARM = 54 * 60_000
 +const COMPACT_ABOVE = 150_000
++const CAPACITY = 350_000
 +const PRIVATE = /_BOT_TOKEN$|^HEX_|^BUZZ_/
 +
 +// A voice call passes through this process (its page and phone line go through the hub's
@@ -1016,7 +1129,7 @@ index 0000000000000000000000000000000000000000..0ec5aadcf3025132b441187b977da25f
 +  return title
 +}
 +
-+export function startHub({ stateDir, channel, main, mainName = 'main', general = false, call, state, failed, permission, asks, args = () => [], bind = () => ({}), fresh = () => false, idleStop = IDLE_STOP, cacheWarm = CACHE_WARM, compactAbove = COMPACT_ABOVE, relaunch = RELAUNCH, jobsDir = JOBS, hexDir = process.cwd(), projectsDir = join(CLAUDE, 'projects'), launcher = 'claude' }: {
++export function startHub({ stateDir, channel, main, mainName = 'main', general = false, call, state, failed, permission, asks, args = () => [], bind = () => ({}), fresh = () => false, capacity = Number(process.env.HEX_CHAT_CAPACITY) || CAPACITY, idleStop = IDLE_STOP, cacheWarm = CACHE_WARM, compactAbove = COMPACT_ABOVE, relaunch = RELAUNCH, jobsDir = JOBS, hexDir = process.cwd(), projectsDir = join(CLAUDE, 'projects'), launcher = 'claude' }: {
 +  stateDir: string
 +  channel: string
 +  main?: string
@@ -1031,9 +1144,12 @@ index 0000000000000000000000000000000000000000..0ec5aadcf3025132b441187b977da25f
 +  args?: (thread: string) => string[]
 +  // More of the thread's binding for its session's settings env, like where its plugin serves.
 +  bind?: (thread: string) => Record<string, string>
-+  // A fresh thread starts a new session for each message that finds its session done,
-+  // instead of resuming it, and the launcher builds what that session knows of the chat.
++  // A fresh thread's session is never compacted: its launcher builds what a new session knows
++  // of the chat, and a new one takes over once the old one's context or cache is spent.
 +  fresh?: (thread: string) => boolean
++  // How much context a fresh thread's session holds before a new one takes over; with 0, every
++  // message that finds its session done goes to a new one.
++  capacity?: number
 +  idleStop?: number
 +  // How long the main thread rests before it compacts, while its cache is still warm.
 +  cacheWarm?: number
@@ -1118,7 +1234,7 @@ index 0000000000000000000000000000000000000000..0ec5aadcf3025132b441187b977da25f
 +      if (!renewing.has(thread) || busy.has(thread) || onCall.has(callOf(thread)) || (!rested && running?.status === 'busy')) return
 +      renewing.delete(thread)
 +      asked.delete(thread)
-+      if (running && thread === main) {
++      if (running && (thread === main || fresh(thread))) {
 +        renewed.add(thread)
 +        cycle(thread, running)
 +      } else stop(thread)
@@ -1153,7 +1269,37 @@ index 0000000000000000000000000000000000000000..0ec5aadcf3025132b441187b977da25f
 +    if (busy.has(thread) || !live.has(thread)) return
 +    if (thread === main) idle.set(thread, setTimeout(() => stopIfIdle(thread), cacheWarm))
 +    else if (retiring.has(thread)) stop(thread)
-+    else idle.set(thread, setTimeout(() => stopIfIdle(thread), idleStop))
++    else if (fresh(thread)) {
++      const left = warmFor(thread)
++      if (left !== undefined) idle.set(thread, setTimeout(() => handOff(thread), left))
++    } else idle.set(thread, setTimeout(() => stopIfIdle(thread), idleStop))
++  }
++
++  // A fresh thread keeps one session running, which takes its messages while its context has
++  // room and its cache is warm. Once either is spent, a new session built from the chat takes
++  // over at the old one's rest, so the next message finds it running: after the cache expires,
++  // the old session would send its whole context uncached, and a new one costs no more.
++  // warmFor is how long a session stays worth its messages, undefined before its first request.
++  function warmFor(thread: string, session = current(thread)) {
++    const { sent, at } = session ? last(thread, session) : { sent: 0 }
++    if (!sent) return
++    return sent >= capacity ? 0 : Math.max(0, (at ?? Date.now()) + cacheWarm - Date.now())
++  }
++
++  function spent(thread: string) {
++    return fresh(thread) && warmFor(thread) === 0
++  }
++
++  // A fresh thread resumes a session only while it's worth its messages; a new one has a fresher view.
++  function resumes(thread: string, session?: string) {
++    return !!session && (!fresh(thread) || (warmFor(thread, session) ?? 0) > 0)
++  }
++
++  function handOff(thread: string) {
++    idle.delete(thread)
++    agent(current(thread) ?? '', running => {
++      if (running && !busy.has(thread) && running.status === 'idle' && spent(thread)) cycle(thread, running)
++    })
 +  }
 +
 +  // The Stop hook ends a turn, but background tasks keep a session busy past it,
@@ -1166,20 +1312,20 @@ index 0000000000000000000000000000000000000000..0ec5aadcf3025132b441187b977da25f
 +    if (!session) return
 +    agent(session, running => {
 +      if (busy.has(thread) || running?.status === 'busy') return
-+      if (running && !retiring.has(thread) && !fresh(thread) && !onCall.has(callOf(thread)) && context(thread, session) > compactAbove) {
++      if (running && !retiring.has(thread) && !fresh(thread) && !onCall.has(callOf(thread)) && last(thread, session).sent > compactAbove) {
 +        compacting.add(thread)
 +        cycle(thread, running, '/compact')
 +      } else if (thread !== main) stop(thread)
 +    })
 +  }
 +
-+  // The context a session's last request sent, from the newest usage or compaction in its transcript.
-+  function context(thread: string, session: string): number {
++  // The context a session's last request sent and when, from the newest usage or compaction in its transcript.
++  function last(thread: string, session: string): { sent: number; at?: number } {
 +    let file: number
 +    try {
 +      file = openSync(transcript(thread, session), 'r')
 +    } catch {
-+      return 0
++      return { sent: 0 }
 +    }
 +    try {
 +      const size = fstatSync(file).size
@@ -1193,12 +1339,13 @@ index 0000000000000000000000000000000000000000..0ec5aadcf3025132b441187b977da25f
 +        } catch {
 +          continue
 +        }
-+        if (entry.type === 'system' && entry.subtype === 'compact_boundary') return entry.compactMetadata?.postTokens ?? 0
++        const at = entry.timestamp ? Date.parse(entry.timestamp) : undefined
++        if (entry.type === 'system' && entry.subtype === 'compact_boundary') return { sent: entry.compactMetadata?.postTokens ?? 0, at }
 +        const usage = entry.type === 'assistant' && !entry.isSidechain ? entry.message?.usage : undefined
 +        const sent = usage ? (usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0) : 0
-+        if (sent) return sent
++        if (sent) return { sent, at }
 +      }
-+      return 0
++      return { sent: 0 }
 +    } finally {
 +      closeSync(file)
 +    }
@@ -1275,7 +1422,7 @@ index 0000000000000000000000000000000000000000..0ec5aadcf3025132b441187b977da25f
 +    if ((prompt && !quiet) || queued.has(thread)) setState(thread, true)
 +    launching.set(thread, undefined)
 +    if (fork) return start(known, thread, prompt, fork)
-+    if (!known.session || fresh(thread)) return start(known, thread, prompt)
++    if (!resumes(thread, known.session)) return start(known, thread, prompt)
 +    const session = known.session
 +    agent(session, running => {
 +      if (running) return
@@ -1338,7 +1485,7 @@ index 0000000000000000000000000000000000000000..0ec5aadcf3025132b441187b977da25f
 +        '--bg',
 +        '--channels', channel,
 +        '--name', known.name,
-+        ...(fork ? ['--resume', fork, '--fork-session'] : known.session && !fresh(thread) ? ['--resume', known.session] : []),
++        ...(fork ? ['--resume', fork, '--fork-session'] : resumes(thread, known.session) ? ['--resume', known.session!] : []),
 +        ...launchArgs,
 +        '--settings', JSON.stringify({ enabledPlugins: { [plugin]: true }, env: bound }),
 +        ...(prompt ? [prompt] : []),
@@ -1389,7 +1536,7 @@ index 0000000000000000000000000000000000000000..0ec5aadcf3025132b441187b977da25f
 +
 +  function deliver(thread: string, name: string, message: Message) {
 +    const socket = live.get(thread)
-+    if (socket && !stale(thread) && !fresh(thread)) return send(socket, { type: 'inbound', ...message })
++    if (socket && !stale(thread) && !spent(thread)) return send(socket, { type: 'inbound', ...message })
 +    if (socket) return refresh(thread, message)
 +    queued.set(thread, [...(queued.get(thread) ?? []), message])
 +    launch(thread, name)
@@ -1409,9 +1556,11 @@ index 0000000000000000000000000000000000000000..0ec5aadcf3025132b441187b977da25f
 +  // arguments or, in a fresh thread, a new session; a session still working, on its turn
 +  // or on background agents, keeps running and takes it as it is, unless earlier messages
 +  // already wait for the new start.
++  // A session that took over while Claude was asked gets the message as any message would.
 +  function refresh(thread: string, message: Message) {
++    const socket = live.get(thread)
 +    agent(current(thread) ?? '', running => {
-+      const socket = live.get(thread)
++      if (live.get(thread) !== socket) return deliver(thread, threads[thread]!.name, message)
 +      const working = fresh(thread) ? busy.has(thread) || (running && running.status !== 'idle') : running?.status === 'busy'
 +      if (socket && working && !queued.has(thread)) return send(socket, { type: 'inbound', ...message })
 +      queued.set(thread, [...(queued.get(thread) ?? []), message])

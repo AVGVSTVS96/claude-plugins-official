@@ -4,7 +4,7 @@ id: hub
 summary: Add a client-agnostic hub that gives every chat thread its own Claude Code session and moves threads between clients.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: hub.patch
-patch_sha256: 1aae09df2cca0296d57041b7b7c244c3a88723b885ef56aa1e565401deeeaf73
+patch_sha256: 1786906ee868acb034a7b4130974ab746be21114f160ee29039e80e9731f13bd
 ---
 
 ## Intent
@@ -55,11 +55,24 @@ client can add launch arguments per thread, and more of a thread's binding to it
 settings env (`bind`), under the hub's own. `threads.json` keeps a digest of what a
 session started with, so a message to a session whose arguments changed goes to a
 fresh start of it (a session busy with background work keeps running and takes it
-as it is). A client can mark threads fresh: a fresh thread's session is never
-resumed, so a message that finds its session done (Claude reports it idle and its
-turn has ended) starts a new one, and a message while it still works, on its turn,
-a permission prompt or background agents, reaches it as it is. Its settings env
-says `HEX_FRESH`, so the launcher can build what the new session knows. Messages
+as it is). A client can mark threads fresh: their launcher builds what a new
+session knows of the chat (its settings env says `HEX_FRESH`), so a fresh thread
+needs no compaction and never compacts. A fresh thread keeps one session running
+and sends each message straight to it, so no message waits for a session to start,
+while that session is worth it: its context (its last request) holds less than
+`capacity` tokens, 350,000 unless the client or `HEX_CHAT_CAPACITY` sets
+another, and its last request is younger than the cache's life (54 minutes, as
+for the main thread). Past that, its next message would send a full context, or
+its whole context uncached, when a new session sends only the chat's view; so at
+the session's rest, once its context fills or at the moment its cache expires
+(timed from its last request in the transcript), the hub stops it and starts a new
+one at once, which then waits for the next message. A message that finds the
+session spent while it still works, on its turn, a permission prompt or background
+agents, reaches it as it is; one that finds it done goes to a new session. A
+stopped fresh session resumes only while it's still worth its messages, and a new
+session waits until its first request before any of this counts. A fresh thread
+never stops for being idle. With a `capacity` of 0 (the voice client), every
+message that finds its session done goes to a new one. Messages
 waiting for a new start keep their order. Each session's settings enable only its client's plugin.
 
 `tappable` turns `buzz://` links into web links through `open.html` on hex's
@@ -74,9 +87,10 @@ hex runs General's jobs in General alone, not in every client's main thread.
 A session can ask to `renew`: at its next rest, once its Stop hook reports the
 turn over with no background agents or workflows working (Claude's own status
 lags the hook and counts a running shell as busy, so it isn't asked for a renew
-the session asked for itself), the hub stops it, and a main thread starts over as soon as its process exits,
-as a new session for a fresh thread, without waiting out its 30 seconds; any
-other thread's next message resumes it. A session that says hello to a hub
+the session asked for itself), the hub stops it, and a main thread or a fresh
+thread starts over as soon as its process exits (a fresh thread resumes while its
+session is worth it, as above, and otherwise starts a new one), the main thread
+without waiting out its 30 seconds; any other thread's next message resumes it. A session that says hello to a hub
 younger than it (Claude's `startedAt`) renews too, once Claude reports it idle, since it may run
 code an update has since replaced: an update restarts the hub, and each
 session then moves onto the new code at its own next rest instead of all of
@@ -118,7 +132,8 @@ instead (`fork`, `--fork-session`).
    its job's `failed` state. The only delays are how long a quiet session
    stays warm before it's stopped, how long the main thread rests before its
    cache would expire, and how long the main thread may be gone
-   (a reconnect, a respawn) before it's started again; Claude's own status
+   (a reconnect, a respawn) before it's started again; a fresh thread's session
+   hands over when its cache's life, counted from its last request, runs out. Claude's own status
    decides whether a session is still working or running.
 7. Bad input fails alone: a malformed line on `hub.sock` is logged and
    dropped, an unreadable `threads.json` is moved aside rather than
@@ -136,7 +151,8 @@ fresh one left to reconnect after a hub restart), renews at the rest the Stop ho
 background agents, `renewal` holding for the new session's hello and not for agents or a keep,
 sessions older than the hub renewing at their
 next rest and never during a call, `free` waiting for calls to end, the launcher and its
-environment, failed starts, busy and idle, idle stops, compacting big sessions before they rest, fresh threads, stopping, closing, naming and
+environment, failed starts, busy and idle, idle stops, compacting big sessions before they rest, fresh threads (warm delivery, resuming only while warm, the handover once the context
+fills or the cache expires, never compacting), stopping, closing, naming and
 handoffs (release, adopt, fork), permission prompts and bad input against a fake `claude`. Run `scripts/verify`.
 
 ## Removal
