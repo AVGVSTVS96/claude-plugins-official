@@ -9,7 +9,8 @@ const TWILIO_TOKEN = 'twilio-secret'
 const HOST = 'voice.test'
 
 // A phone call end to end, with a stand-in for OpenAI's live API and a recorded-style Twilio
-// media stream: the plugin runs as it does in hex, and the test plays the caller's phone.
+// media stream: the call engine runs on its own with a hub that takes everything, and the test
+// plays the caller's phone.
 async function phoneCall() {
   const home = mkdtempSync(join(tmpdir(), 'phone-'))
   const state = join(home, '.claude', 'channels', 'voice')
@@ -37,7 +38,30 @@ async function phoneCall() {
     [`OPENAI_API_KEY=test`, `OPENAI_BASE_URL=http://127.0.0.1:${openai.port}/v1`, `VOICE_PORT=${port}`, `TWILIO_ACCOUNT_SID=AC1`, `TWILIO_AUTH_TOKEN=${TWILIO_TOKEN}`, `TWILIO_NUMBER=+15550002222`, `CALLER_NUMBER=${CALLER}`, `VOICE_PUBLIC_URL=${HOST}`].join('\n'),
   )
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(VOICE|TWILIO|OPENAI|CALLER|HEX)_/.test(key)))
-  const plugin = Bun.spawn(['bun', join(import.meta.dir, 'server.ts')], { env: { ...env, HOME: home }, stdin: 'pipe', stdout: 'ignore', stderr: 'ignore' })
+  const hex = join(home, 'hex', 'state')
+  mkdirSync(hex, { recursive: true })
+  // The hub's side, as lines on stdout; a renewal holds until the test writes a line to stdin.
+  const engine = `import { serve } from ${JSON.stringify(join(import.meta.dir, 'server.ts'))}
+const step = (step, more = {}) => console.log(JSON.stringify({ step, ...more }))
+const lines = console[Symbol.asyncIterator]()
+serve({
+  deliver: (content, meta) => step('deliver', { content, meta }),
+  keep: () => step('keep'),
+  renew: () => step('renew'),
+  renewal: async () => (step('renewal'), await lines.next()),
+  session: () => 'brain',
+}, ${JSON.stringify(hex)})`
+  const plugin = Bun.spawn(['bun', '-e', engine], { env: { ...env, HOME: home }, stdin: 'pipe', stdout: 'pipe', stderr: 'ignore' })
+  const steps: any[] = []
+  void (async () => {
+    let buffer = ''
+    for await (const chunk of plugin.stdout) {
+      buffer += new TextDecoder().decode(chunk)
+      const lines = buffer.split('\n')
+      buffer = lines.pop()!
+      steps.push(...lines.map(line => JSON.parse(line)))
+    }
+  })()
   const base = `http://127.0.0.1:${port}`
   for (let i = 0; i < 100; i++) {
     if (await fetch(`${base}/calls`).then(r => r.ok, () => false)) break
@@ -46,6 +70,9 @@ async function phoneCall() {
   return {
     base,
     audio,
+    steps,
+    renewed: () => (plugin.stdin.write('renewed\n'), plugin.stdin.flush()),
+    delegate: (id: string, offset_ms: number) => voice!.send(JSON.stringify({ type: 'session.delegation.created', delegation: { id, target: 'client' }, offset_ms })),
     say: (who: 'you' | 'voice', delta: string, start_ms: number) =>
       voice!.send(JSON.stringify({ type: who === 'you' ? 'session.input_transcript.delta' : 'session.output_transcript.delta', delta, start_ms, end_ms: start_ms + 300 })),
     [Symbol.asyncDispose]: async () => {
@@ -113,4 +140,35 @@ test("a phone call's words reach the app as they're heard, and how it ended land
   expect(ended.version).toBeUndefined()
   expect(ended.turns).toHaveLength(2)
   expect((await fetch(`${call.base}/calls`).then(r => r.json())).live).toBeUndefined()
+}, 20_000)
+
+async function until<T>(check: () => T | undefined, timeout = 3000): Promise<T> {
+  for (const end = Date.now() + timeout; Date.now() < end; await Bun.sleep(20)) {
+    const value = check()
+    if (value) return value
+  }
+  throw new Error('timed out')
+}
+
+test("a call's words reach the voice session only once the last call's renew is through, in order, and its end lets the session renew", async () => {
+  await using call = await phoneCall()
+  const phone = await dialIn(call.base)
+  await live(call.base)
+  await until(() => call.steps.find(step => step.step === 'renewal'))
+  call.delegate('d1', 900)
+  await Bun.sleep(50)
+  call.say('you', 'is the build green?', 1000)
+  await Bun.sleep(200)
+  expect(call.steps.map(step => step.step)).toEqual(['renewal'])
+  call.renewed()
+  await until(() => call.steps.filter(step => step.step === 'deliver').length === 2)
+  const [, keep, started, handoff] = call.steps
+  expect(keep.step).toBe('keep')
+  expect(started.content).toStartWith('A call started.')
+  expect(handoff).toMatchObject({ content: expect.stringContaining('is the build green?'), meta: { delegation_id: 'd1' } })
+  phone.send(JSON.stringify({ event: 'stop' }))
+  await until(() => call.steps.at(-1)?.step === 'renew')
+  expect(call.steps.at(-2).content).toStartWith('The call ended')
+  const record = await fetch(`${call.base}/calls/sess_phone`).then(r => r.json())
+  expect(record.claude).toBe('brain')
 }, 20_000)

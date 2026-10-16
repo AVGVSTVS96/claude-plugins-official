@@ -1,28 +1,39 @@
 import { mkdirSync } from 'fs'
 import { join } from 'path'
 import { startHub } from '../../hub/hub.ts'
-import { door, voicePort } from './door.ts'
+import { server } from './channel.ts'
+import { serve, tool } from './server.ts'
 
 const HEX_DIR = process.env.HEX_DIR ?? process.cwd()
-const STATE_DIR = process.env.VOICE_STATE_DIR ?? join(HEX_DIR, 'state', 'voice')
-const SOCKET = join(STATE_DIR, 'http.sock')
-mkdirSync(STATE_DIR, { recursive: true })
+const STATE = join(HEX_DIR, 'state')
+const THREAD = 'voice'
+const stateDir = process.env.VOICE_STATE_DIR ?? join(STATE, THREAD)
+mkdirSync(stateDir, { recursive: true })
 
+// One session, always running, takes every call: it stays warm for the whole call and starts
+// over once the call ends, so each call gets a new session that reads the call chat.
 const hub = startHub({
-  stateDir: STATE_DIR,
+  stateDir,
   channel: process.env.VOICE_CHANNEL ?? 'plugin:voice@hex',
-  main: 'voice',
-  mainName: 'voice',
+  server,
+  main: THREAD,
+  mainName: THREAD,
   hexDir: HEX_DIR,
   fresh: () => true,
   limits: { capacity: 0 },
-  bind: () => ({ VOICE_SOCKET: SOCKET }),
   launcher: process.env.HEX_LAUNCHER,
-  call: async (_, tool) => {
-    throw new Error(`unknown tool: ${tool}`)
-  },
+  call: (_, name, args) => tool(name, args),
   state: () => {},
   failed: (_, reason) => process.stderr.write(`voice hub: the voice session couldn't start: ${reason}\n`),
 })
 
-door({ port: voicePort(), socket: SOCKET, renewal: () => hub.renewal('voice') })
+serve(
+  {
+    deliver: (content, meta) => hub.deliver(THREAD, THREAD, { content, meta }),
+    keep: () => hub.keep(THREAD),
+    renew: () => hub.renew(THREAD),
+    renewal: () => hub.renewal(THREAD),
+    session: () => hub.session(THREAD),
+  },
+  STATE,
+)

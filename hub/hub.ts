@@ -110,8 +110,8 @@ export function stamp(args: string[], server?: ChannelServer, hooks: string[] = 
   return createHash('sha256').update(JSON.stringify([args, server ?? null, ...(hooks.length ? [hooks.map(read)] : [])])).digest('hex').slice(0, 16)
 }
 
-// A voice call passes through this process (its page and phone line go through the hub's
-// door), so a restart waits for every thread on a call to hang up.
+// A voice call runs in this process (its call engine holds the caller's audio), so a restart
+// waits for every thread on a call to hang up.
 const onCall = new Set<Run>()
 const hungUp: (() => void)[] = []
 
@@ -136,12 +136,11 @@ function tokenOf(stateDir: string) {
   return readFileSync(file, 'utf8').trim()
 }
 
-export function startHub({ stateDir, channel, server, port = PORT, main, mainName = 'main', general = false, call, state, failed, permission, asks, args = () => [], bind = () => ({}), fresh = () => false, limits, hexDir = process.cwd(), launcher = 'claude', hooks = process.env.HEX_HOOKS?.split(':').filter(Boolean) ?? [] }: {
+export function startHub({ stateDir, channel, server, port = PORT, main, mainName = 'main', general = false, call, state, failed, permission, asks, args = () => [], fresh = () => false, limits, hexDir = process.cwd(), launcher = 'claude', hooks = process.env.HEX_HOOKS?.split(':').filter(Boolean) ?? [] }: {
   stateDir: string
   channel: string
-  // What the channel serves its sessions over HTTP; a client without one serves them through its
-  // plugin's own process, on hub.sock.
-  server?: ChannelServer
+  // What the channel serves its sessions over HTTP.
+  server: ChannelServer
   // Where serve.ts listens for every hub's sessions.
   port?: number
   main?: string
@@ -154,8 +153,6 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
   permission?: (thread: string, request: Permission) => void
   asks?: Asks
   args?: (thread: string) => string[]
-  // More of the thread's binding for its session's settings env, like where its plugin serves.
-  bind?: (thread: string) => Record<string, string>
   // A fresh thread's session is never compacted: its launcher builds what a new session knows
   // of the chat, and a new one takes over once the old one's context or cache is spent.
   fresh?: (thread: string) => boolean
@@ -177,7 +174,7 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
   const plugin = channel.replace(/^plugin:/, '')
   const path = `/${plugin.split('@')[0]}`
   mkdirSync(sessionsDir, { recursive: true, mode: 0o700 })
-  const token = server && tokenOf(stateDir)
+  const token = tokenOf(stateDir)
   const inherited = Object.fromEntries(Object.entries(process.env).filter(([name]) => !PRIVATE.test(name)))
   let closed = false
 
@@ -301,8 +298,9 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
     return sent >= capacity ? 0 : Math.max(0, (at ?? Date.now()) + (short ? cacheWarm / 12 : cacheWarm) - Date.now())
   }
 
+  // A session on a call takes every message of the call, so a call never changes sessions midway.
   function spent(thread: string) {
-    return fresh(thread) && warmFor(thread) === 0
+    return fresh(thread) && !onCall.has(runOf(thread)) && warmFor(thread) === 0
   }
 
   // At a rest the Stop hook reported with no agents working, Claude's own status still says busy
@@ -450,14 +448,14 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
     return join(sessionsDir, `${encodeURIComponent(thread)}.json`)
   }
 
-  // A respawn reads the same file, so it gets the hub's current token and binding too.
+  // A respawn reads the same file, so it gets the hub's current token too.
   function writeSettings(thread: string) {
     const env = {
-      ...bind(thread),
       HEX_CHANNEL: channel,
       HEX_THREAD: thread,
       HEX_HUB: socketPath,
-      ...(token ? { HEX_PORT: String(port), HEX_TOKEN: token } : {}),
+      HEX_PORT: String(port),
+      HEX_TOKEN: token,
       ...(general && thread === main ? { HEX_MAIN: '1' } : {}),
       ...(fresh(thread) ? { HEX_FRESH: '1' } : {}),
     }
@@ -509,7 +507,7 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
 
   function deliver(thread: string, name: string, message: Message) {
     const run = runOf(thread)
-    if (run.phase.is === 'live') return stale(thread) || spent(thread) ? void refresh(thread, message) : run.phase.line.send({ type: 'inbound', ...message })
+    if (run.phase.is === 'live') return (stale(thread) && !onCall.has(run)) || spent(thread) ? void refresh(thread, message) : run.phase.line.send({ type: 'inbound', ...message })
     run.queue.push(message)
     void launch(thread, name)
   }
@@ -547,22 +545,19 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
       stop(thread)
       await claude.exited(running.pid)
     }
-    if (run.phase.is === 'live' || run.phase.is === 'recovering') {
-      hangUp(run)
-      become(run, { is: 'stopped' })
-    }
+    if (run.phase.is === 'live' || run.phase.is === 'recovering') become(run, { is: 'stopped' })
     void launch(thread, threads[thread]!.name, { prompt, quiet })
   }
 
-  // A session's channel connected: over HTTP (its session is the one the hub started, or the one
-  // Claude reports running for the thread), or through its plugin's hello, which names it.
-  function welcome(thread: string, line: Line, session?: string) {
+  // A session's channel connected: its session is the one the hub started, or the one Claude
+  // reports running for the thread. One that only reconnects still owes a renew it asked for.
+  function welcome(thread: string, line: Line) {
     const run = runOf(thread)
     const job = run.phase.is === 'launching' ? run.phase.job : undefined
     become(run, { is: 'live', line })
-    run.renew = undefined
+    if (run.renew !== 'asked') run.renew = undefined
     threads[thread] ??= { name: thread }
-    const id = session ?? (job && claude.record(job).sessionId)
+    const id = job && claude.record(job).sessionId
     if (id) note(thread, id)
     for (const message of run.queue.splice(0)) line.send({ type: 'inbound', ...message })
     rest(thread)
@@ -585,7 +580,6 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
     const run = runs.get(thread)
     if (run?.phase.is !== 'live' || run.phase.line !== line) return
     become(run, { is: 'recovering' })
-    hangUp(run)
     setState(thread, false)
     if (run.leaving) return forget(thread)
     recover(thread)
@@ -656,20 +650,32 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
     return runs.get(thread)?.unsaved ?? threads[thread]?.session
   }
 
-  rmSync(socketPath, { force: true })
-  const serve = server && endpoint(path.slice(1), channel, token!, server, {
-      call,
-      permission: (thread, request) => permission?.(thread, request),
-      open: (thread, line) => welcome(thread, line),
-      close: drop,
-    })
-  if (serve) channels.set(path, serve)
+  // A thread is on a call from its keep until its renew, which starts the next call in a new session.
+  function keep(thread: string) {
+    const run = runOf(thread)
+    if (run.renew !== 'underway') run.renew = undefined
+    onCall.add(run)
+    letGo(thread)
+  }
 
+  function renewAsked(thread: string) {
+    const run = runOf(thread)
+    if (run.renew !== 'underway') run.renew = 'asked'
+    hangUp(run)
+  }
+
+  const serve = endpoint(path.slice(1), channel, token, server, {
+    call,
+    permission: (thread, request) => permission?.(thread, request),
+    open: welcome,
+    close: drop,
+  })
+  channels.set(path, serve)
+
+  // Where a session's hooks and hex's own tools reach the hub, one JSON line each.
+  rmSync(socketPath, { force: true })
   const sock = createServer(socket => {
-    let thread = ''
     let buffer = ''
-    const reply = (payload: object) => socket.write(JSON.stringify(payload) + '\n')
-    const line: Line = { send: reply }
     socket.setEncoding('utf8')
     socket.on('data', (chunk: string) => {
       buffer += chunk
@@ -679,40 +685,21 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
         try {
           handle(JSON.parse(line))
         } catch (error) {
-          process.stderr.write(`hub: dropped a bad line from ${thread || 'a session'}: ${error}\n`)
+          process.stderr.write(`hub: dropped a bad line on ${socketPath}: ${error}\n`)
         }
       }
     })
-    function handle(request: any) {
-      if (request.type === 'hello') welcome((thread = request.thread), line, request.session)
-      if (request.type === 'state') setState(request.thread, request.busy, request.background === true)
-      if (request.type === 'renew') {
-        const run = runOf(request.thread)
-        if (run.renew !== 'underway') run.renew = 'asked'
-        hangUp(run)
-      }
-      if (request.type === 'keep') {
-        const run = runOf(request.thread)
-        if (run.renew !== 'underway') run.renew = undefined
-        onCall.add(run)
-        letGo(request.thread)
-      }
-      if (request.type === 'open') void launch(request.thread, request.name, { prompt: request.prompt })
-      if (request.type === 'permission_request') permission?.(thread, request)
-      if (request.type === 'answer') asks?.answer(request.thread, request.message, request.label, request.via)
-      if (request.type === 'settle') asks?.settle(request.thread, request.message, request.note)
-      if (request.type === 'reopen') asks?.reopen(request.thread, request.message, request.via)
-      if (request.type === 'inbound') deliver(request.thread, threads[request.thread]?.name ?? request.thread, { content: request.content, meta: request.meta })
-      if (request.type === 'call') {
-        call(thread, request.tool, request.args ?? {}).then(
-          text => reply({ type: 'result', id: request.id, text }),
-          error => reply({ type: 'result', id: request.id, error: error instanceof Error ? error.message : String(error) }),
-        )
-      }
-    }
-    socket.on('close', () => drop(thread, line))
     socket.on('error', () => {})
   }).listen(socketPath)
+
+  function handle(request: any) {
+    if (request.type === 'state') setState(request.thread, request.busy, request.background === true)
+    if (request.type === 'open') void launch(request.thread, request.name, { prompt: request.prompt })
+    if (request.type === 'answer') asks?.answer(request.thread, request.message, request.label, request.via)
+    if (request.type === 'settle') asks?.settle(request.thread, request.message, request.note)
+    if (request.type === 'reopen') asks?.reopen(request.thread, request.message, request.via)
+    if (request.type === 'inbound') deliver(request.thread, threads[request.thread]?.name ?? request.thread, { content: request.content, meta: request.meta })
+  }
 
   // The main thread is always running: started with the hub, and started again when its session
   // is gone.
@@ -746,6 +733,8 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
     fork: (thread: string, name: string, session: string, prompt: string, cwd?: string) => void launch(thread, name, { prompt, fork: session, cwd }),
     main,
     renewal,
+    keep,
+    renew: renewAsked,
     session: current,
     threads: () => Object.keys(threads),
     name: (thread: string) => threads[thread]?.name,
@@ -763,7 +752,7 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
     close: () => {
       closed = true
       sock.close()
-      if (serve && channels.get(path) === serve) channels.delete(path)
+      if (channels.get(path) === serve) channels.delete(path)
       for (const run of runs.values()) {
         become(run, { is: 'stopped' })
         clearTimeout(run.rest)

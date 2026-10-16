@@ -8,7 +8,7 @@ time; your Claude Code session does the real work and tells it what to say.
                               │           decides when it needs the backend
                               │ handoff (an id, no text)
                               ▼
-                         voice plugin     keeps the one ordered transcript and the
+                         call engine      keeps the one ordered transcript and the
                               │           task board; makes no decisions
                               │ channel message: transcript since the last handoff
                               ▼
@@ -21,15 +21,32 @@ mode, so it has no tools and no way to start or stop work. It can only ask for
 the backend. Every task is Claude's, and keeps running until the caller asks
 Claude to stop that task.
 
+It runs in hex's hub service (`bun hub/serve.ts`), next to Telegram and the
+other apps:
+
+- `server.ts` is the call engine: the call page and app API on `VOICE_PORT`,
+  each call's `gpt-live-1` connection, Twilio's media streams, call records,
+  Tasks and Asks. It lives as long as the service, not a session.
+- `bot.ts` starts the hub for the `voice` thread and the engine, and hands the
+  engine the hub's side: deliver, keep, renew.
+- `channel.ts` is the channel the hub serves the voice session over HTTP, with
+  its tools; a tool call runs in the engine. `.mcp.json` points the session at
+  the hub's port (`HEX_PORT`) with its thread and the hub's token in headers,
+  so no process runs per session.
+
+```
+ voice session ── HTTP ──► hub ──► call engine (server.ts) ◄── page, app, Twilio
+```
+
 ## How a call flows
 
 1. You open the call page and press **Start call**. The page sends its WebRTC
-   offer to the plugin, the plugin starts a `gpt-live-1` session with
+   offer to the engine, the engine starts a `gpt-live-1` session with
    OpenAI, and attaches a server-side connection to the same session.
-2. The plugin hears every transcript fragment from both sides and keeps them in
+2. The engine hears every transcript fragment from both sides and keeps them in
    timeline order (by `start_ms`), so lines that arrive late still land in the
    right place.
-3. When the voice model hands off (`session.delegation.created`), the plugin
+3. When the voice model hands off (`session.delegation.created`), the engine
    waits for the first words spoken after that moment, so the request is fully
    transcribed, then sends Claude everything said since the last handoff.
    Every message to Claude carries the caller's local time (`time`), and the
@@ -109,22 +126,22 @@ updating its record.
 
 ## Dropped connections and restarts
 
-If the plugin's connection to a page or app call drops, it reattaches to the
+If the engine's connection to a page or app call drops, it reattaches to the
 same session by its id (`/v1/live/sessions/<id>/attach`) a few times over
-about 15 seconds before calling the call dropped. When the plugin starts, it
+about 15 seconds before calling the call dropped. When the engine starts, it
 picks the latest call that never got an end back up the same way and sends
 Claude a "call resumed" message with the call so far; any other call left
 without an end is closed out as `dropped` and ends like any other call: Claude
 is told to name it, and the session renews. A phone call's audio runs through
-the plugin, so a restart ends it. When a call starts, the plugin tells the hub
-to keep the session (`keep`), so a renew asked for by the call before it
-doesn't stop the session mid-call.
+the engine, so the service waits for a call to end before it restarts.
 
-In hex the plugin restarts with each call's new session, so the hub holds the
-port instead (`door.ts`): it starts the plugin with `VOICE_SOCKET` set to
-`state/voice/http.sock`, the plugin listens there, and the hub passes every
-request and websocket on to it. A request that comes while the
-plugin restarts waits for it to come back (up to 30 seconds) instead of failing.
+One session takes a whole call. When a call starts, the engine tells the hub
+to keep the session (`keep`) once the last call's renew is through, so a
+renew asked for before doesn't stop it mid-call, and every message of the
+call reaches that session however long it sits idle. When the call ends the
+engine asks for a renew (`renew`), and the next call gets a new session. A
+call's own messages wait in order for that: the call itself starts at once,
+since the engine never restarts with the session.
 
 ## Agent activity
 
@@ -152,7 +169,7 @@ same conversion hex uses for Buzz and T3 Code), then into a few plain words.
   the moment it takes the message in, background agents included, and marks
   it done when a turn ends with none of them still out (failed if the turn
   ends on an API error). It keeps updating the call's record after you hang
-  up: the plugin that starts with the next session picks unfinished sends
+  up: when the service restarts, the engine picks unfinished sends
   from the last day back up, reading their threads from the start.
 
 | Request | Answers |
@@ -289,24 +306,12 @@ them with hex) gets Claude walking the list in order.
    learns from the session: when a call starts, Claude sends it what's going
    on now, and questions about the caller are handed to Claude.
 
-2. Start a session with the channel:
-
-   ```sh
-   claude --dangerously-load-development-channels plugin:voice@hex
-   ```
-
-   Organizations that allowlist channels add
-   `{ "plugin": "voice", "marketplace": "hex" }` to `allowedChannelPlugins` in
-   managed settings, then start it with `--channels plugin:voice@hex`.
-
-   In [hex](https://github.com/AVGVSTVS96/hex), the hub runs `bot.ts`, which
-   keeps a session named `voice` always running with this channel, so the
-   call page comes back by itself after restarts and updates. Each call gets
-   a new session: when a call ends, the plugin asks the hub to renew, and once
-   that turn is done the hub starts `voice` over fresh right away, with its own
-   OptChat chat of past calls instead of one context that grows with every
-   call. The hub holds `VOICE_PORT` meanwhile, so a call started then waits a
-   few seconds for the new session instead of failing or landing in the old one.
+2. Run [hex](https://github.com/AVGVSTVS96/hex)'s hub service. It runs
+   `bot.ts`, which keeps a session named `voice` running with this channel.
+   Each call gets a new session: when a call ends, the engine asks the hub to
+   renew, and once that turn is done the hub starts `voice` over fresh, with
+   its own OptChat chat of past calls instead of one context that grows with
+   every call.
 
 3. Open the call page. The browser only allows the microphone on `localhost`
    or HTTPS:
@@ -316,7 +321,7 @@ them with hex) gets Claude walking the list in order.
    - From a phone on Tailscale: `tailscale serve --bg --https=8790 http://127.0.0.1:8790`,
      then `https://<host>.<tailnet>.ts.net:8790`.
 
-The page listens on `127.0.0.1` only, and the API key never leaves the plugin.
+The page listens on `127.0.0.1` only, and the API key never leaves the engine.
 With `VOICE_TOKEN` set, every request except the page itself and Twilio's
 (which carry their own signature or one-time token) needs the token, so
 other devices on the same tailnet can't read or delete calls. The page gets it
@@ -334,7 +339,7 @@ channel may send `session.input_audio.mute`, `session.input_audio.unmute` and
 
 ## Phone calls
 
-The plugin can also ring a phone through [Twilio](https://www.twilio.com):
+The engine can also ring a phone through [Twilio](https://www.twilio.com):
 Claude's `phone` tool, or **Call my phone** on the call page. Twilio places
 the call and streams its audio (G.711 μ-law, passed through untouched) to a
 `gpt-live-1` session over a WebSocket; handoffs, `say`, `note` and the board
@@ -345,7 +350,7 @@ ended to a signed status callback, so an unanswered or failed call is saved
 and Claude hears about it.
 
 ```
-phone ◄── PSTN ──► Twilio ── Media Stream (wss) ──► plugin /twilio/<one-time token>
+phone ◄── PSTN ──► Twilio ── Media Stream (wss) ──► engine /twilio/<one-time token>
                                                         │
                                                         ▼
                                            gpt-live-1 (audio/pcmu, 8 kHz) ◄─► Claude
@@ -367,7 +372,7 @@ Twilio has to reach `/twilio` from the internet, for example with
 carries a one-time token, so nothing else gets through.
 
 To call in, set your Twilio number's voice webhook (HTTP POST) to
-`https://<VOICE_PUBLIC_URL>/twilio/incoming`. The plugin picks up only calls
+`https://<VOICE_PUBLIC_URL>/twilio/incoming`. The engine picks up only calls
 Twilio signed whose caller is `CALLER_NUMBER`, and rejects the rest.
 
 ## Limits

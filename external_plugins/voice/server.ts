@@ -1,52 +1,34 @@
-#!/usr/bin/env bun
-import { Server } from '@modelcontextprotocol/sdk/server/index.js'
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
-import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { createHmac, timingSafeEqual } from 'crypto'
-import { readFileSync, rmSync } from 'fs'
-import { connect } from 'net'
-import { homedir } from 'os'
+import { readFileSync } from 'fs'
 import { dirname, join } from 'path'
 import { findThread, followAgent, followThread, type Step, type Thread } from './activity.ts'
 import { Call, transcript, type Mark, type Speaker, type Task } from './call.ts'
 import { CallLog, ending, usage, type CallRecord, type Ending, type Source } from './calls.ts'
 import { Changes } from './changes.ts'
+import { PORT, STATE_DIR, env } from './env.ts'
 import { Asks, type Ask } from './asks.ts'
 import { relay } from './relay.ts'
 import { Tasks, opener, type HexTask } from './tasks.ts'
 import page from './page.html' with { type: 'text' }
 
-const STATE_DIR = join(homedir(), '.claude', 'channels', 'voice')
-try {
-  for (const line of readFileSync(join(STATE_DIR, '.env'), 'utf8').split('\n')) {
-    const match = line.match(/^\s*([A-Z_]+)\s*=\s*(.*?)\s*$/)
-    if (match && !process.env[match[1]]) process.env[match[1]] = match[2]
-  }
-} catch {}
-
-const KEY = process.env.OPENAI_API_KEY
-const VOICE = process.env.VOICE
-const PORT = Number(process.env.VOICE_PORT ?? 8790)
-const API = `${process.env.OPENAI_BASE_URL ?? 'https://api.openai.com/v1'}/live/sessions`
-const TWILIO_SID = process.env.TWILIO_ACCOUNT_SID
-const TWILIO_TOKEN = process.env.TWILIO_AUTH_TOKEN
-const TWILIO_NUMBER = process.env.TWILIO_NUMBER
-const CALLER_NUMBER = process.env.CALLER_NUMBER
-const PUBLIC_HOST = process.env.VOICE_PUBLIC_URL?.replace(/^\w+:\/\//, '')
-const TOKEN = process.env.VOICE_TOKEN
-const HUB = process.env.HEX_HUB
-const THREAD = process.env.HEX_CHANNEL?.startsWith('plugin:voice@') ? process.env.HEX_THREAD : undefined
-const HEX_STATE = HUB && dirname(dirname(HUB))
-const SOCKET = process.env.VOICE_SOCKET
+const KEY = env.OPENAI_API_KEY
+const VOICE = env.VOICE
+const API = `${env.OPENAI_BASE_URL ?? 'https://api.openai.com/v1'}/live/sessions`
+const TWILIO_SID = env.TWILIO_ACCOUNT_SID
+const TWILIO_TOKEN = env.TWILIO_AUTH_TOKEN
+const TWILIO_NUMBER = env.TWILIO_NUMBER
+const CALLER_NUMBER = env.CALLER_NUMBER
+const PUBLIC_HOST = env.VOICE_PUBLIC_URL?.replace(/^\w+:\/\//, '')
+const TOKEN = env.VOICE_TOKEN
 const calls = new CallLog(join(STATE_DIR, 'calls'))
 const activity = new Changes()
 const follows = new Map<string, () => void>()
-let board: Tasks | undefined
-let yours: Asks | undefined
+let board: Tasks
+let yours: Asks
 
 const IDENTITY = (() => {
   try {
-    return readFileSync(process.env.VOICE_INSTRUCTIONS ?? join(STATE_DIR, 'instructions.md'), 'utf8').trim()
+    return readFileSync(env.VOICE_INSTRUCTIONS ?? join(STATE_DIR, 'instructions.md'), 'utf8').trim()
   } catch {
     return 'You are the voice of a personal assistant, on a live call with the person it works for. Speak warmly and naturally, like a sharp friend: plain words, short answers.'
   }
@@ -93,10 +75,24 @@ type Placed = { to: string; why?: string; started: string; session?: string }
 type Dial = { greeting: string; from: Source; token: string; why?: string }
 type Phone = Dial & { openai?: WebSocket; stream?: string; started?: true; refused?: true }
 
+// What the call engine asks of the voice thread's hub: hand its session a message, hold the session
+// for a call (keep) or let it start over for the next (renew), wait for a renew on its way, and
+// name the session now serving the thread.
+export type Hub = {
+  deliver: (content: string, meta: Record<string, string>) => void
+  keep: () => void
+  renew: () => void
+  renewal: () => Promise<void>
+  session: () => string | undefined
+}
+
+let hub: Hub
+let HEX_STATE: string
+// Every step to the hub in the order the calls take them; a new call's first step waits out the
+// last call's renew, so the new call's words reach the new session.
+let lane = Promise.resolve()
 let live: Live | undefined
 let ended: string | undefined
-let hub: ReturnType<typeof connect> | undefined
-let standing: 'keep' | 'renew' | undefined
 let seq = 0
 const dials = new Map<string, Dial>()
 const placed = new Map<string, Placed>()
@@ -104,176 +100,32 @@ const briefing: string[] = []
 const RETRIES = [250, 1000, 2000, 4000, 8000]
 const WARN_BEFORE = 120_000
 
-const mcp = new Server(
-  { name: 'voice', version: '0.1.0' },
-  {
-    capabilities: { tools: {}, experimental: { 'claude/channel': {} } },
-    instructions: `This channel is a live voice call. A fast voice model (OpenAI gpt-live-1) talks with the caller in real time and hands work to you; you do the real work with your tools. The caller hears only the voice model, never your transcript output.
-
-When a call starts you get a "call started" message: send the voice, with note, what it should know right away about the caller and what's going on now, in a few short lines.
-
-Each handoff arrives as <channel source="voice" delegation_id="..."> with the transcript since the last handoff, oldest first, timestamped from the start of the call: "you" is the caller, "voice" is the voice model. Speech transcripts can mishear words, and the latest correction wins. A late line can belong before one you already got; its timestamp places it.
-
-Every message's time attribute is the caller's local time right now: go by it whenever time matters, like "the last ten minutes" or "tonight". Before you say what's new or how something is going, check its live state right then (claude agents --json and ~/.claude/jobs/<id>/state.json for every session, the newest lines of its thread, the thing itself) and answer from that, never from what you knew earlier in the call or the last message about it.
-
-Answer every handoff with say(delegation_id, text): the voice says only what you give it, so you are the one talking. It paraphrases aloud, so write one or two plain spoken sentences, no markdown. Use note for facts the voice should know without saying them yet.
-
-Keep each turn quick so the next handoff reaches you fast. Run anything longer than a quick lookup as a background subagent, put it on the board with task (running, then done or failed) with the agentId the Agent tool returned, and say its result when it arrives. The caller sees each step the agent takes. Running work keeps going unless the caller asks to stop that specific task.
-${HEX_STATE ? '\nWork that belongs to a hex thread (a Telegram topic, or a Discord, Buzz or T3 Code thread) goes there with send: it puts the work on the board, the caller sees each step the thread takes, and the board shows it done when the thread is.\n' : ''}
-
-phone rings the caller's phone and holds the same kind of call there, for when you're asked to call them or have something worth a call. Give why, the reason you're calling in a plain sentence: the voice opens with it and the call's record keeps it. Notes you send while it rings reach the voice when the call connects. If nobody answers, the line is busy or the call fails, a message tells you.
-
-hang_up ends the live call once the voice finishes speaking: say goodbye with say first. Use it when the caller asks you to hang up, or when a call you placed has done its job and the caller is done.
-
-When a call ends, name it with title: a few plain words for what it was about, shown in the caller's list of past calls. Once the call's work has settled, call title again for that call with summary (what happened and what you sent where, in two or three plain sentences) and waiting (each thing left for the caller to do or decide, a short line each; an empty list when nothing is).
-
-If the voice plugin restarts or its connection drops during a call, it picks the call back up and you get a "call resumed" message with the call so far.
-
-A result too long to speak goes wherever the caller reads, if this session has another channel to reach them; say where you sent it. Voice page: http://localhost:${PORT}.`,
-  },
-)
-
-mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [
-    {
-      name: 'say',
-      _meta: { 'anthropic/alwaysLoad': true },
-      description: 'Give the voice model a result to say aloud for a handoff. It paraphrases, so write one or two plain spoken sentences.',
-      inputSchema: {
-        type: 'object',
-        properties: { delegation_id: { type: 'string' }, text: { type: 'string' } },
-        required: ['delegation_id', 'text'],
-      },
-    },
-    {
-      name: 'note',
-      _meta: { 'anthropic/alwaysLoad': true },
-      description: 'Give the voice model a fact to know without saying it now. Pass delegation_id when it belongs to a handoff. While a call you placed is ringing, it waits and reaches the voice when the call connects.',
-      inputSchema: {
-        type: 'object',
-        properties: { text: { type: 'string' }, delegation_id: { type: 'string' } },
-        required: ['text'],
-      },
-    },
-    {
-      name: 'task',
-      _meta: { 'anthropic/alwaysLoad': true },
-      description:
-        "Put a task on the board the voice model reads to answer status questions: running when it starts, then done or failed. After its call ends, pass that call's id to update its record.",
-      inputSchema: {
-        type: 'object',
-        properties: {
-          id: { type: 'string', description: 'A short name that stays the same across updates' },
-          call: { type: 'string', description: 'The call the task belongs to, once that call has ended; the live call by default' },
-          state: { type: 'string', enum: ['running', 'done', 'failed'] },
-          text: { type: 'string', description: 'What it is, and the result once it has one' },
-          agent: { type: 'string', description: 'The agentId the Agent tool returned for the background subagent doing it, so the caller sees its steps live' },
-        },
-        required: ['id', 'state', 'text'],
-      },
-    },
-    ...(HEX_STATE
-      ? [
-          {
-            name: 'ask',
-            description:
-              "Put one of the caller's open asks on their screen as a card in the call's transcript, by its id from the list you were given: they can tap a choice there or say it.",
-            inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
-          },
-          {
-            name: 'answer',
-            description: "Answer one of the caller's asks with the choice they said aloud: it reaches the thread that asked as their own tap would, and its Telegram buttons say it was answered on a call.",
-            inputSchema: {
-              type: 'object',
-              properties: { id: { type: 'string' }, label: { type: 'string', description: "The option's label, or their own words when none fits" } },
-              required: ['id', 'label'],
-            },
-          },
-          {
-            name: 'send',
-            _meta: { 'anthropic/alwaysLoad': true },
-            description:
-              "Hand work to a hex thread, by its name or id: your message reaches that thread's session from hex voice, the work goes on the board as running, the caller sees each step the thread takes on it, and the board shows it done or failed once the thread's work is, its background agents and workflows included.",
-            inputSchema: {
-              type: 'object',
-              properties: {
-                thread: { type: 'string', description: "The thread's name (like voiceapp) or id" },
-                about: { type: 'string', description: "A few words for what you sent, shown to the caller, like 'your orb-bounce feedback'" },
-                text: { type: 'string', description: "The message, with the caller's own words" },
-              },
-              required: ['thread', 'about', 'text'],
-            },
-          },
-        ]
-      : []),
-    {
-      name: 'title',
-      description:
-        "Name a call in the caller's list of past calls, and once its work has settled, wrap it up: summary is what happened and what you sent where, waiting is what's left for the caller. Each field you pass replaces the call's last one.",
-      inputSchema: {
-        type: 'object',
-        properties: {
-          call: { type: 'string', description: 'The call id from the call ended message' },
-          title: { type: 'string', description: 'A few plain words for what the call was about' },
-          summary: { type: 'string', description: 'Two or three plain sentences' },
-          waiting: { type: 'array', items: { type: 'string' }, description: 'What the caller still has to do or decide, one short line each' },
-        },
-        required: ['call'],
-      },
-    },
-    {
-      name: 'phone',
-      description: "Ring a phone and hold the call there: the caller's own number unless to is given (E.164, like +14155550123).",
-      inputSchema: {
-        type: 'object',
-        properties: {
-          to: { type: 'string' },
-          why: { type: 'string', description: "Why you're calling, one plain sentence; the voice opens with it" },
-        },
-      },
-    },
-    {
-      name: 'hang_up',
-      description: 'End the live call once the voice finishes speaking. Say goodbye with say first.',
-      inputSchema: { type: 'object', properties: {} },
-    },
-  ],
-}))
-
-mcp.setRequestHandler(CallToolRequestSchema, async request => {
-  const args = (request.params.arguments ?? {}) as Record<string, any>
-  try {
-    if (request.params.name === 'phone') return done(await dial(args.to, args.why))
-    if (request.params.name === 'title') return done(name(args.call, args))
-    if (request.params.name === 'task') return done(await task(args.id, args.state as Task['state'], args.text, args.call, args.agent))
-    if (request.params.name === 'send') return done(await pass(args.thread, args.about, args.text))
-    if (request.params.name === 'answer') return done(await answerAsk(args.id, args.label, 'call'))
-    if (request.params.name === 'note' && !live && ringing()) {
-      briefing.push(args.text)
-      return done('the call is still ringing; the voice gets this when it connects')
-    }
-    if (!live) throw new Error('no call is live')
-    switch (request.params.name) {
-      case 'say':
-        await tell(live, 'say', args.text, args.delegation_id)
-        return done('said')
-      case 'note':
-        await tell(live, 'note', args.text, args.delegation_id)
-        return done('noted')
-      case 'hang_up':
-        return done(await hangUpCall(live))
-      case 'ask':
-        return done(show(live, args.id))
-      default:
-        throw new Error(`unknown tool ${request.params.name}`)
-    }
-  } catch (error) {
-    return { content: [{ type: 'text', text: `${request.params.name}: ${error instanceof Error ? error.message : error}` }], isError: true }
+// The voice session's tools, which the hub hands here.
+export async function tool(name: string, args: Record<string, any>): Promise<string> {
+  if (name === 'phone') return dial(args.to, args.why)
+  if (name === 'title') return title(args.call, args)
+  if (name === 'task') return task(args.id, args.state as Task['state'], args.text, args.call, args.agent)
+  if (name === 'send') return pass(args.thread, args.about, args.text)
+  if (name === 'answer') return answerAsk(args.id, args.label, 'call')
+  if (name === 'note' && !live && ringing()) {
+    briefing.push(args.text)
+    return 'the call is still ringing; the voice gets this when it connects'
   }
-})
-
-function done(text: string) {
-  return { content: [{ type: 'text', text }] }
+  if (!live) throw new Error('no call is live')
+  switch (name) {
+    case 'say':
+      await tell(live, 'say', args.text, args.delegation_id)
+      return 'said'
+    case 'note':
+      await tell(live, 'note', args.text, args.delegation_id)
+      return 'noted'
+    case 'hang_up':
+      return hangUpCall(live)
+    case 'ask':
+      return show(live, args.id)
+    default:
+      throw new Error(`unknown tool ${name}`)
+  }
 }
 
 function send(call: Live, type: string, content: string, delegation?: string) {
@@ -309,14 +161,14 @@ function whole(call: Live): CallRecord {
 async function task(id: string, state: Task['state'], text: string, call = live?.id ?? ended, agent?: string) {
   if (!call) throw new Error('no call yet')
   if (agent || state !== 'running') stop(call, id)
-  const following = live?.id === call && state === 'running' && agent && followAgent(agent, process.env.CLAUDE_CODE_SESSION_ID, step => see(call, id, step))
+  const following = live?.id === call && state === 'running' && agent && followAgent(agent, hub.session(), step => see(call, id, step))
   if (following) follows.set(`${call} ${id}`, following)
   const result = await mark(call, { ...current(call, id), id, state, text, ...(agent && { agent }) })
   return agent && live?.id === call && !following ? `${result}, but no transcript of agent ${agent} turned up, so the caller won't see its steps` : result
 }
 
 async function pass(name: string, about: string, text: string, call = live?.id ?? ended) {
-  const thread = findThread(HEX_STATE!, name)
+  const thread = findThread(HEX_STATE, name)
   if (!thread) throw new Error(`no hex thread is named ${name}`)
   const id = call && fresh(call, about)
   if (call && id) {
@@ -324,7 +176,7 @@ async function pass(name: string, about: string, text: string, call = live?.id ?
     watch(call, id, thread, false)
   }
   try {
-    await relay(HEX_STATE!, thread.app, { type: 'inbound', thread: thread.id, content: text, meta: { user: 'hex voice', ...(id && { voice_task: `${call}:${id}` }) } })
+    await relay(HEX_STATE, thread.app, { type: 'inbound', thread: thread.id, content: text, meta: { user: 'hex voice', ...(id && { voice_task: `${call}:${id}` }) } })
   } catch (error) {
     if (call && id) see(call, id, { end: 'failed' })
     throw error
@@ -332,10 +184,9 @@ async function pass(name: string, about: string, text: string, call = live?.id ?
   return id ? `sent to ${thread.name}, on the board as ${id}` : `sent to ${thread.name}`
 }
 
-// A plugin starts with each call's session, so work a past call sent out is picked back up here,
-// read from the start of its thread's session.
+// Work a past call sent out is picked back up when the engine starts, read from the start of its
+// thread's session.
 function resume() {
-  if (!HEX_STATE) return
   const since = Date.now() - 24 * 60 * 60_000
   for (const { id: call, started } of calls.list()) {
     if (Date.parse(started) < since) break
@@ -348,14 +199,13 @@ function resume() {
 }
 
 function watch(call: string, id: string, thread: Thread, resumed: boolean) {
-  follows.set(`${call} ${id}`, followThread(thread, dirname(HEX_STATE!), `${call}:${id}`, resumed, step => (step.end ? settle(call, id, thread, step.end) : see(call, id, step))))
+  follows.set(`${call} ${id}`, followThread(thread, dirname(HEX_STATE), `${call}:${id}`, resumed, step => (step.end ? settle(call, id, thread, step.end) : see(call, id, step))))
 }
 
 // The turn that took the message in has ended, but the thread's work may not have: the board keeps
 // a thread working while its background agents, workflows or next turns run, so the task follows
 // the board's row until it rests.
 function settle(call: string, id: string, thread: Thread, end: NonNullable<Step['end']>) {
-  const board = hexTasks()!
   const check = () => {
     const row = board.get(`${thread.app}:${thread.id}`)
     if (row?.state === 'working') see(call, id, { line: newest(row) })
@@ -410,13 +260,13 @@ function stop(call: string, id: string) {
   follows.delete(`${call} ${id}`)
 }
 
-function name(call: string, { title, summary, waiting }: { title?: string; summary?: string; waiting?: string[] }) {
+function title(call: string, { title, summary, waiting }: { title?: string; summary?: string; waiting?: string[] }) {
   const change = { ...(title ? { title } : {}), ...(summary ? { summary } : {}), ...(Array.isArray(waiting) ? { waiting } : {}) }
   if (live?.id === call) {
     Object.assign(live.record, change)
     save(live)
   } else calls.save({ ...past(call), ...change })
-  if (Array.isArray(waiting)) hexAsks()?.called()
+  if (Array.isArray(waiting)) yours.called()
   return 'saved'
 }
 
@@ -435,7 +285,12 @@ async function hangUpCall(call: Live) {
 }
 
 function deliver(content: string, meta: Record<string, string>) {
-  void mcp.notification({ method: 'notifications/claude/channel', params: { content, meta: { ...meta, time: clock() } } })
+  const time = clock()
+  toHub(() => hub.deliver(content, { ...meta, time }))
+}
+
+function toHub(step: () => void | Promise<void>) {
+  lane = lane.then(step).catch(error => trace(`the hub step failed: ${error}`))
 }
 
 function clock() {
@@ -484,7 +339,7 @@ function finish(call: Live, reason: string, by?: string) {
     [`The call ended: ${ENDINGS[end]} (${reason}). Name it with title.`, ...(rest.length ? ['Last words:', transcript(rest)] : [])].join('\n'),
     { call: call.id, ended: end, reason },
   )
-  stand('renew')
+  toHub(hub.renew)
   call.socket.onclose = null
   call.socket.close()
 }
@@ -514,7 +369,11 @@ function follow(socket: WebSocket, record: Live['record'], { call = new Call(), 
   live = current
   save(current)
   activity.changed()
-  stand('keep')
+  toHub(async () => {
+    await hub.renewal()
+    hub.keep()
+    current.record.claude = hub.session()
+  })
   listen(current, socket)
   warn(current)
   deliver(
@@ -567,7 +426,7 @@ function talkAbout(topic: Topic) {
 
 // Puts an ask on the caller's screen as a card in the transcript.
 function show(call: Live, id: string) {
-  const ask = hexAsks()?.find(id)
+  const ask = yours.find(id)
   if (!ask) throw new Error(`no open ask ${id}`)
   call.shown.set(id, ask)
   remember(call, 'ask', ask.question, id)
@@ -577,10 +436,8 @@ function show(call: Live, id: string) {
 
 // An ask answered on a call, said aloud (via call) or tapped on its card (via app).
 async function answerAsk(id: string, label: string, via: string) {
-  const asks = hexAsks()
-  if (!asks) throw new Error('asks are hex threads, and this voice plugin runs outside hex')
-  const ask = asks.find(id) ?? live?.shown.get(id)
-  await asks.answer(id, label, via)
+  const ask = yours.find(id) ?? live?.shown.get(id)
+  await yours.answer(id, label, via)
   if (live && ask) {
     live.shown.set(id, ask)
     remember(live, 'answered', label, id)
@@ -668,7 +525,7 @@ function expiry(seconds?: number) {
 }
 
 function base(id: string, from: Source, extra: Partial<CallRecord> = {}): Live['record'] {
-  return { id, started: new Date().toISOString(), from, claude: process.env.CLAUDE_CODE_SESSION_ID, ...extra }
+  return { id, started: new Date().toISOString(), from, ...extra }
 }
 
 function recover() {
@@ -682,21 +539,14 @@ function recover() {
   }
 }
 
-// A call lost with the plugin ends like any other: Claude names it, and the session renews.
+// A call lost with the engine ends like any other: Claude names it, and the session renews.
 function closeOut(record: CallRecord) {
   const heard = Math.max(0, ...record.turns.map(turn => turn.at), ...record.tasks.map(task => task.at), ...(record.moments ?? []).map(mark => mark.at))
-  const reason = 'the voice plugin restarted and the call was gone'
+  const reason = "hex's service restarted and the call was gone"
   calls.save({ ...record, ended: new Date(Date.parse(record.started) + heard).toISOString(), end: 'dropped', reason })
   trace(`closed out ${record.id}: it never got an end`)
   deliver(`The call ended: ${ENDINGS.dropped} (${reason}). Name it with title.`, { call: record.id, ended: 'dropped', reason })
-  if (!live) stand('renew')
-}
-
-// The hub learns when a call starts (keep) or ends (renew), and hears it again after every
-// hello, since a hello clears what the hub knew of the session before it.
-function stand(type: 'keep' | 'renew') {
-  standing = type
-  hub?.write(JSON.stringify({ type, thread: THREAD }) + '\n')
+  if (!live) toHub(hub.renew)
 }
 
 function reattach(record: CallRecord) {
@@ -708,7 +558,7 @@ function reattach(record: CallRecord) {
     follow(socket, rest, {
       call: Call.resume(record),
       hello: [
-        `A call resumed: the voice plugin restarted during call ${record.id} and picked it back up. The caller is still on it, and the voice kept its own memory of the call.`,
+        `A call resumed: hex's service restarted during call ${record.id} and picked it back up. The caller is still on it, and the voice kept its own memory of the call.`,
         ...(record.why ? [`You placed it because: ${record.why}`] : []),
         ...(so.length ? ['The call so far:', transcript(so)] : []),
         ...(tasks.length ? [Call.resume(record).board()] : []),
@@ -932,38 +782,6 @@ function home(request: Request) {
   return new Response(String(page).replace('__VOICE_TOKEN__', local && TOKEN ? TOKEN : ''), { headers: { 'content-type': 'text/html; charset=utf-8' } })
 }
 
-function joinHub() {
-  const socket = (hub = connect(HUB!))
-  let buffer = ''
-  socket.setEncoding('utf8')
-  socket.on('connect', () => {
-    setTimeout(() => {
-      socket.write(JSON.stringify({ type: 'hello', thread: THREAD, session: process.env.CLAUDE_CODE_SESSION_ID }) + '\n')
-      if (standing) socket.write(JSON.stringify({ type: standing, thread: THREAD }) + '\n')
-    }, 1000)
-  })
-  socket.on('data', (chunk: string) => {
-    buffer += chunk
-    for (let end = buffer.indexOf('\n'); end >= 0; end = buffer.indexOf('\n')) {
-      const event = JSON.parse(buffer.slice(0, end))
-      buffer = buffer.slice(end + 1)
-      if (event.type === 'inbound') deliver(event.content, event.meta ?? {})
-    }
-  })
-  socket.on('close', () => setTimeout(joinHub, 2000))
-  socket.on('error', () => {})
-}
-
-mcp.oninitialized = () => {
-  if (HUB && THREAD) joinHub()
-  recover()
-}
-
-await mcp.connect(new StdioServerTransport())
-resume()
-process.stdin.on('end', () => process.exit(0))
-process.stdin.on('close', () => process.exit(0))
-
 async function showActivity(url: URL) {
   const after = url.searchParams.get('after')
   if (after) await activity.changes(Number(after), 25_000)
@@ -974,7 +792,7 @@ async function showActivity(url: URL) {
 // that the call isn't already following, so a call shows all of it and not only what it sent.
 function elsewhere(call: Live): (Task & { line?: string })[] {
   const following = new Set(call.call.activity().flatMap(task => (task.state === 'running' && task.agent ? [task.agent] : [])))
-  return (hexTasks()?.tasks ?? [])
+  return board.tasks
     .filter(row => row.state === 'working' && row.app !== 'voice' && !following.has(row.thread))
     .map(row => ({ id: row.id, state: 'running', text: row.name, to: row.name, line: newest(row) }))
 }
@@ -988,21 +806,11 @@ function cards(call: Live) {
 }
 
 function topicOf(about?: string): Topic | undefined {
-  if (about === 'asks') return hexAsks() && walkTopic(hexAsks()!.view.asks)
-  const task = about ? hexTasks()?.get(about) : undefined
+  if (about === 'asks') return walkTopic(yours.view.asks)
+  const task = about ? board.get(about) : undefined
   return task && taskTopic(task)
 }
 
-function hexTasks() {
-  if (!HEX_STATE || board) return board
-  board = new Tasks(HEX_STATE, dirname(HEX_STATE))
-  board.listen(() => activity.changed())
-  return board
-}
-
-function hexAsks() {
-  return HEX_STATE ? (yours ??= new Asks(HEX_STATE)) : undefined
-}
 
 async function showTasks(url: URL, tasks: Tasks) {
   const after = url.searchParams.get('after')
@@ -1031,8 +839,7 @@ async function showAsks(url: URL, asks: Asks) {
 // What the app's tap on an ask, a stuck item or a new result does. Each answers once the hub has it;
 // the change itself comes back through the list.
 async function askRoutes(request: Request, url: URL) {
-  const asks = hexAsks()
-  if (!asks) return new Response('Asks are hex threads, and this voice plugin runs outside hex', { status: 404 })
+  const asks = yours
   if (url.pathname === '/asks' && request.method === 'GET') {
     if (!url.searchParams.get('after')) asks.opened()
     return showAsks(url, asks)
@@ -1060,15 +867,14 @@ async function askRoutes(request: Request, url: URL) {
 }
 
 function taskRoutes(request: Request, url: URL) {
-  const tasks = hexTasks()
-  if (!tasks) return new Response('Tasks are hex threads, and this voice plugin runs outside hex', { status: 404 })
+  const tasks = board
   if (url.pathname === '/tasks' && request.method === 'GET') return showTasks(url, tasks)
-  if (url.pathname === '/tasks/summary' && request.method === 'GET') return showSummary(url, tasks, hexAsks()!)
+  if (url.pathname === '/tasks/summary' && request.method === 'GET') return showSummary(url, tasks, yours)
   const [, id, talking] = url.pathname.match(/^\/tasks\/([^/]+)(\/talk)?$/) ?? []
   const task = id && tasks.get(decodeURIComponent(id))
   if (!task) return new Response('404', { status: 404 })
   if (talking && request.method === 'POST') return talkAbout(taskTopic(task))
-  if (!talking && request.method === 'GET') return Response.json({ ...task, ...hexAsks()!.of(task.id) })
+  if (!talking && request.method === 'GET') return Response.json({ ...task, ...yours.of(task.id) })
 }
 
 // A live call's record is read from the call itself, so it has every word heard so far, and a
@@ -1109,27 +915,38 @@ function routes(request: Request) {
     return dial().then(text => new Response(text), error => new Response(error.message, { status: 502 }))
 }
 
-if (SOCKET) rmSync(SOCKET, { force: true })
-Bun.serve<Phone>({
-  ...(SOCKET ? { unix: SOCKET } : { port: PORT, hostname: '127.0.0.1' }),
-  idleTimeout: 40,
-  fetch(request, server) {
-    const { pathname } = new URL(request.url)
-    if (pathname === '/twilio/incoming' && request.method === 'POST') return pickUp(request)
-    const [, statusToken] = pathname.match(/^\/twilio\/status\/([\w-]+)$/) ?? []
-    if (statusToken && request.method === 'POST') return phoneStatus(request, statusToken)
-    const [, token, twimlPath] = pathname.match(/^\/twilio\/([\w-]+)(\/twiml)?$/) ?? []
-    const dialed = dials.get(token)
-    if (token) trace(`Twilio ${request.method} ${twimlPath ? 'TwiML' : 'stream'}, ${dialed ? 'known' : 'unknown'} token`)
-    if (dialed && twimlPath) return stream(token)
-    if (dialed && dials.delete(token)) return server.upgrade(request, { data: { ...dialed } }) ? undefined : new Response('upgrade failed', { status: 400 })
-    if (pathname === '/') return home(request)
-    if (!allowed(request)) return new Response('Unauthorized', { status: 401, headers: { 'www-authenticate': 'Bearer' } })
-    return routes(request) ?? new Response('404', { status: 404 })
-  },
-  websocket: {
-    open: answer,
-    message: hearPhone,
-    close: hangUp,
-  },
-})
+// The call engine: it holds the voice page, the app's routes and the phone line on the voice port,
+// for as long as hex's service runs, and hands what the caller asks to the voice session.
+export function serve(voiceHub: Hub, state: string) {
+  hub = voiceHub
+  HEX_STATE = state
+  board = new Tasks(state, dirname(state))
+  board.listen(() => activity.changed())
+  yours = new Asks(state)
+  recover()
+  resume()
+  return Bun.serve<Phone>({
+    port: PORT,
+    hostname: '127.0.0.1',
+    idleTimeout: 40,
+    fetch(request, server) {
+      const { pathname } = new URL(request.url)
+      if (pathname === '/twilio/incoming' && request.method === 'POST') return pickUp(request)
+      const [, statusToken] = pathname.match(/^\/twilio\/status\/([\w-]+)$/) ?? []
+      if (statusToken && request.method === 'POST') return phoneStatus(request, statusToken)
+      const [, token, twimlPath] = pathname.match(/^\/twilio\/([\w-]+)(\/twiml)?$/) ?? []
+      const dialed = dials.get(token)
+      if (token) trace(`Twilio ${request.method} ${twimlPath ? 'TwiML' : 'stream'}, ${dialed ? 'known' : 'unknown'} token`)
+      if (dialed && twimlPath) return stream(token)
+      if (dialed && dials.delete(token)) return server.upgrade(request, { data: { ...dialed } }) ? undefined : new Response('upgrade failed', { status: 400 })
+      if (pathname === '/') return home(request)
+      if (!allowed(request)) return new Response('Unauthorized', { status: 401, headers: { 'www-authenticate': 'Bearer' } })
+      return routes(request) ?? new Response('404', { status: 404 })
+    },
+    websocket: {
+      open: answer,
+      message: hearPhone,
+      close: hangUp,
+    },
+  })
+}
