@@ -1,9 +1,9 @@
 diff --git a/hub/hub.test.ts b/hub/hub.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..4b96a56b3d2b22751eaaf5559a501804c06989a0
+index 0000000000000000000000000000000000000000..05eebf1eef924eec99bd311e1edbe06fd0818182
 --- /dev/null
 +++ b/hub/hub.test.ts
-@@ -0,0 +1,1287 @@
+@@ -0,0 +1,1301 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { connect, createServer, type Socket } from 'net'
 +import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, chmodSync, existsSync } from 'fs'
@@ -882,6 +882,20 @@ index 0000000000000000000000000000000000000000..4b96a56b3d2b22751eaaf5559a501804
 +  expect(await launched()).not.toContain('--resume')
 +})
 +
++test('a warm DM session the last hub started but never saved takes the next message, and hands over in its turn, instead of a second session', async () => {
++  bound('job99999', 'dm', NEXT)
++  dm([{ id: 'job99999', sessionId: NEXT, pid: 42, status: 'idle', startedAt: Date.now() + 60_000 }], { reconnect: 60_000 })
++  hub.deliver('dm', 'DM', message)
++  await Bun.sleep(50)
++  const { received, send } = await session('dm', NEXT)
++  await until(() => received.length)
++  expect(hub.session('dm')).toBe(NEXT)
++  said(1500, false, NEXT)
++  send({ type: 'state', thread: 'dm', busy: false })
++  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', NEXT.slice(0, 8)])
++  expect(calls().some(args => args[0] === '--bg')).toBe(false)
++})
++
 +test('a thread that asks to renew starts over as a new session once its turn ends', async () => {
 +  const old = Bun.spawn(['sleep', '30'])
 +  start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: old.pid, status: 'idle' }], reconnect: 60_000, fresh: () => true, capacity: 0 })
@@ -1293,10 +1307,10 @@ index 0000000000000000000000000000000000000000..4b96a56b3d2b22751eaaf5559a501804
 +})
 diff --git a/hub/hub.ts b/hub/hub.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..4eed0a2def88a2545a69c79b9c8d499c7f5edbb8
+index 0000000000000000000000000000000000000000..ab9e14342e837e635abdae7d395e701bd665a259
 --- /dev/null
 +++ b/hub/hub.ts
-@@ -0,0 +1,793 @@
+@@ -0,0 +1,792 @@
 +import { createServer } from 'net'
 +import { execFile, spawn } from 'child_process'
 +import { createHash } from 'crypto'
@@ -1681,7 +1695,6 @@ index 0000000000000000000000000000000000000000..4eed0a2def88a2545a69c79b9c8d499c
 +    if ((prompt && !quiet) || queued.has(thread)) setState(thread, true)
 +    launching.set(thread, undefined)
 +    if (fork) return start(known, thread, prompt, fork)
-+    if (fresh(thread)) return start(known, thread, prompt)
 +    sessionOf(thread, running => {
 +      if (running && live.has(thread)) return settle(thread)
 +      if (running) {
@@ -1689,7 +1702,7 @@ index 0000000000000000000000000000000000000000..4eed0a2def88a2545a69c79b9c8d499c
 +        return recover(thread)
 +      }
 +      const session = known.session
-+      if (!session) return start(known, thread, prompt)
++      if (!session || fresh(thread)) return start(known, thread, prompt)
 +      // `claude --bg --resume` copies the conversation to a new id while the old
 +      // session's job record exists, even once stopped; `claude rm` keeps the conversation.
 +      execFile('claude', ['rm', session.slice(0, 8)], () => start(known, thread, prompt))

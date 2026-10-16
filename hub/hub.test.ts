@@ -876,6 +876,20 @@ test('a fresh thread\'s warm session older than the hub starts over as a new one
   expect(await launched()).not.toContain('--resume')
 })
 
+test('a warm DM session the last hub started but never saved takes the next message, and hands over in its turn, instead of a second session', async () => {
+  bound('job99999', 'dm', NEXT)
+  dm([{ id: 'job99999', sessionId: NEXT, pid: 42, status: 'idle', startedAt: Date.now() + 60_000 }], { reconnect: 60_000 })
+  hub.deliver('dm', 'DM', message)
+  await Bun.sleep(50)
+  const { received, send } = await session('dm', NEXT)
+  await until(() => received.length)
+  expect(hub.session('dm')).toBe(NEXT)
+  said(1500, false, NEXT)
+  send({ type: 'state', thread: 'dm', busy: false })
+  expect(await until(() => calls().find(args => args[0] === 'stop'))).toEqual(['stop', NEXT.slice(0, 8)])
+  expect(calls().some(args => args[0] === '--bg')).toBe(false)
+})
+
 test('a thread that asks to renew starts over as a new session once its turn ends', async () => {
   const old = Bun.spawn(['sleep', '30'])
   start({ main: 'voice', registry: { voice: { name: 'voice', session: SESSION } }, agents: [{ sessionId: SESSION, pid: old.pid, status: 'idle' }], reconnect: 60_000, fresh: () => true, capacity: 0 })

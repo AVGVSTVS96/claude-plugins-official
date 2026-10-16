@@ -4,7 +4,7 @@ id: hub
 summary: Add a client-agnostic hub that gives every chat thread its own Claude Code session and moves threads between clients.
 baseline: b8e53f1c05dff3b6d751297f6527990ffc81c2f4
 patch_file: hub.patch
-patch_sha256: 87dfe0fd4c24ddd5dd9b3abac1543f26a5a0f5b55b137b3eab5566088dd89be2
+patch_sha256: dc5bdbde696cd4b14f71fc19175650e1d89b9510f917d899554eb144e454afd2
 ---
 
 ## Intent
@@ -138,9 +138,9 @@ renew (a voice call started in the meantime), even while the hub is still
 asking Claude whether the session is working. `renewal` resolves once a renew on
 its way is through (the new session connects) or off, at once when none is, and
 doesn't wait on one held up by background agents, so a client can hold a new
-call for the new session. A fresh main thread whose session outlived the hub (a
-hub restart) is left to reconnect instead of starting a new one, so it never
-runs twice.
+call for the new session. A fresh thread whose session outlived the hub (a
+hub restart), saved or not, is left to reconnect instead of starting a new one, so it never
+runs twice and a warm session is never left running unwatched.
 
 `hub/serve.ts` is the service: it runs every client (Telegram, Discord,
 Buzz, T3 Code) in one process. A thread is on a call from its `keep` until its
@@ -192,7 +192,8 @@ background agents, `renewal` holding for the new session and not for agents or a
 sessions older than the hub renewing at their
 next rest and never during a call, `free` waiting for calls to end, the launcher and its
 environment, failed starts, busy and idle, idle stops, compacting big sessions before they rest, fresh threads (warm delivery, never resuming, the handover once the context
-fills, even while Claude's status lags, or the cache expires, by its recorded tier, never compacting), stopping, closing, naming and
+fills, even while Claude's status lags, or the cache expires, by its recorded tier, never compacting, a warm session from before a hub
+restart found by its job instead of started twice), stopping, closing, naming and
 handoffs (release, adopt, fork), permission prompts and bad input against a fake `claude`, plus
 channels that drop and come back, sessions that restart in place once and are reported after,
 sessions that outlived the hub, unsaved sessions found by their job, a new stream held until

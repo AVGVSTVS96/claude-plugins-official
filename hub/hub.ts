@@ -382,7 +382,6 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
     if ((prompt && !quiet) || queued.has(thread)) setState(thread, true)
     launching.set(thread, undefined)
     if (fork) return start(known, thread, prompt, fork)
-    if (fresh(thread)) return start(known, thread, prompt)
     sessionOf(thread, running => {
       if (running && live.has(thread)) return settle(thread)
       if (running) {
@@ -390,7 +389,7 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
         return recover(thread)
       }
       const session = known.session
-      if (!session) return start(known, thread, prompt)
+      if (!session || fresh(thread)) return start(known, thread, prompt)
       // `claude --bg --resume` copies the conversation to a new id while the old
       // session's job record exists, even once stopped; `claude rm` keeps the conversation.
       execFile('claude', ['rm', session.slice(0, 8)], () => start(known, thread, prompt))
