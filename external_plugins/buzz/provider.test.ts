@@ -1,5 +1,5 @@
-import { beforeEach, expect, test } from 'bun:test'
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, chmodSync, statSync, existsSync } from 'fs'
+import { afterEach, beforeEach, expect, test } from 'bun:test'
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, chmodSync, statSync, existsSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { generateSecretKey, getPublicKey, nip19 } from 'nostr-tools'
@@ -70,6 +70,8 @@ HOME="${join(dir, 'home')}" exec sh -c "$last"
 `)
   chmodSync(ssh, 0o755)
 })
+
+afterEach(() => rmSync(dir, { recursive: true, force: true }))
 
 function fakeHex(home: string) {
   mkdirSync(join(home, '.hex', 'bin'), { recursive: true })

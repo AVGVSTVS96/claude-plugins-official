@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { createServer, type Server } from 'net'
 import { tmpdir } from 'os'
 import { join } from 'path'
@@ -49,6 +49,7 @@ beforeEach(async () => {
 afterEach(() => {
   asks?.close()
   hub.close()
+  rmSync(state, { recursive: true, force: true })
 })
 
 test('a question asked with buttons reads as its first line, its context and the pick its thread marked', () => {

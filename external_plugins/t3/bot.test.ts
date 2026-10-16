@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { connect, type Socket } from 'net'
 import { Readable, Writable } from 'stream'
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'fs'
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import type { Subprocess } from 'bun'
@@ -44,6 +44,7 @@ echo "backgrounded · job12345 · test"`)
 afterEach(() => {
   for (const socket of sockets.splice(0)) socket.destroy()
   bot.kill()
+  rmSync(dir, { recursive: true, force: true })
 })
 
 function script(name: string, body: string) {

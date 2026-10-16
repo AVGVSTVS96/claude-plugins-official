@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, setSystemTime, test } from 'bun:test'
-import { appendFileSync, mkdirSync, mkdtempSync, writeFileSync } from 'fs'
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { randomUUID } from 'crypto'
@@ -72,6 +72,7 @@ beforeEach(() => {
 afterEach(() => {
   activity.close()
   setSystemTime()
+  rmSync(dir, { recursive: true, force: true })
 })
 
 function line(entry: object) {

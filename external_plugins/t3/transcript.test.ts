@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { appendFileSync, mkdtempSync, writeFileSync } from 'fs'
+import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import type { SessionNotification } from '@agentclientprotocol/sdk'
@@ -26,7 +26,10 @@ beforeEach(() => {
   stopped = true
 })
 
-afterEach(() => reader?.close())
+afterEach(() => {
+  reader?.close()
+  rmSync(dir, { recursive: true, force: true })
+})
 
 function write(...entries: object[]) {
   appendFileSync(path, entries.map(entry => JSON.stringify(entry) + '\n').join(''))

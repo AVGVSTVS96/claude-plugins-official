@@ -154,10 +154,10 @@ index 0000000000000000000000000000000000000000..cb68ecc69cad62019f3ab051d5d5a924
 +}
 diff --git a/hub/hub.test.ts b/hub/hub.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..daada1a96ba1a7b54ed8142b53c42494661ff7c3
+index 0000000000000000000000000000000000000000..289b5bd79cce78d2bb1aa22c346fc7fab580f175
 --- /dev/null
 +++ b/hub/hub.test.ts
-@@ -0,0 +1,1496 @@
+@@ -0,0 +1,1497 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { connect, createServer, type Socket } from 'net'
 +import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, chmodSync, existsSync } from 'fs'
@@ -204,6 +204,7 @@ index 0000000000000000000000000000000000000000..daada1a96ba1a7b54ed8142b53c42494
 +  hub?.close()
 +  process.env.PATH = process.env.PATH!.split(':').slice(1).join(':')
 +  delete process.env.CLAUDE_CONFIG_DIR
++  rmSync(dir, { recursive: true, force: true })
 +})
 +
 +// stale: the registry's sessions started with what the hub no longer gives a session, as after an update.

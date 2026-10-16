@@ -1,7 +1,7 @@
-import { beforeAll, expect, mock, test } from 'bun:test'
+import { afterAll, beforeAll, expect, mock, test } from 'bun:test'
 import { connect as netConnect } from 'net'
 import { connect } from '../../hub/testing.ts'
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import * as discord from 'discord.js'
@@ -136,6 +136,7 @@ class Client {
 mock.module('discord.js', () => ({ ...discord, Client }))
 
 const state = mkdtempSync(join(tmpdir(), 'discord-'))
+afterAll(() => rmSync(state, { recursive: true, force: true }))
 let received: any[]
 let call: (tool: string, args: object) => Promise<any>
 

@@ -44,6 +44,7 @@ afterEach(() => {
   hub?.close()
   process.env.PATH = process.env.PATH!.split(':').slice(1).join(':')
   delete process.env.CLAUDE_CONFIG_DIR
+  rmSync(dir, { recursive: true, force: true })
 })
 
 // stale: the registry's sessions started with what the hub no longer gives a session, as after an update.

@@ -1,6 +1,6 @@
-import { beforeAll, expect, mock, test } from 'bun:test'
+import { afterAll, beforeAll, expect, mock, test } from 'bun:test'
 import { connect } from 'net'
-import { mkdtempSync, readFileSync, writeFileSync } from 'fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import * as grammy from 'grammy'
@@ -61,6 +61,11 @@ class Bot extends grammy.Bot {
 mock.module('grammy', () => ({ ...grammy, Bot }))
 
 const state = mkdtempSync(join(tmpdir(), 'telegram-'))
+const outbox = mkdtempSync(join(tmpdir(), 'telegram-outbox-'))
+afterAll(() => {
+  rmSync(state, { recursive: true, force: true })
+  rmSync(outbox, { recursive: true, force: true })
+})
 let received: any[] = []
 let call: (tool: string, args: object) => Promise<any>
 let ask: (request: object) => Promise<unknown>
@@ -207,7 +212,7 @@ test('edit_message changes a file\'s caption when it has no text, and replaces t
   captionOnly.add(42)
   await call('edit_message', { message_id: '42', text: 'new caption' })
   expect(await called('editMessageCaption')).toMatchObject({ message_id: 42, caption: 'new caption' })
-  const file = join(state, '..', `chart-${Date.now()}.png`)
+  const file = join(outbox, `chart-${Date.now()}.png`)
   writeFileSync(file, 'png')
   await call('edit_message', { message_id: '43', file })
   expect((await called('editMessageMedia')).media).toMatchObject({ type: 'photo' })
@@ -225,8 +230,8 @@ test('markdown goes out as Telegram\'s own rich markdown, and a code block cut b
 })
 
 test('files go without an empty message, short text rides as the caption, and a photo over 10MB goes as a document', async () => {
-  const small = join(state, '..', `small-${Date.now()}.jpg`)
-  const big = join(state, '..', `big-${Date.now()}.jpg`)
+  const small = join(outbox, `small-${Date.now()}.jpg`)
+  const big = join(outbox, `big-${Date.now()}.jpg`)
   writeFileSync(small, 'jpg')
   writeFileSync(big, Buffer.alloc(11 * 1024 * 1024))
   const before = calls.length

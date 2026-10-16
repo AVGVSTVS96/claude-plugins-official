@@ -4,7 +4,7 @@ id: discord-threads
 summary: Rework the Discord channel so every thread in a server is its own Claude Code session, Claude-tag style, through the thread hub.
 baseline: ea10b213686c90bb1984b2016937310e05336cf3
 patch_file: discord-threads.patch
-patch_sha256: 988fea37bb32a611a2376ce96d2d4fe18b14957b277e12f37bc7b536098ad5cd
+patch_sha256: b0abc43ed888571d3e700004bad2c41cab560c73318e4124b749787193f5c830
 ---
 
 ## Intent

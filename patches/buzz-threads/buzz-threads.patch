@@ -67,12 +67,12 @@ index 0000000000000000000000000000000000000000..44258925a2f978169b79c9cd4ee39986
 +The agent's credentials live in `~/.claude/channels/hex/buzz/.env` (or `BUZZ_STATE_DIR`) as `BUZZ_RELAY_URL`, `BUZZ_PRIVATE_KEY` and `BUZZ_AUTH_TAG`; the provider writes them. `access.json` there can hold `allowFrom` (pubkeys allowed to talk to it; default: the owner in the auth tag), `channel` (where handoffs open; default `general`), `share` (files shared through Agent Files; default `AGENTS.md`, `SOUL.md`, `MEMORY.md` and `schedules.json`) and `"panels": false` to turn the panels off.
 diff --git a/external_plugins/buzz/activity.test.ts b/external_plugins/buzz/activity.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..1e4e8d85e6f45b644b7fed44c01738edb2cc6f8f
+index 0000000000000000000000000000000000000000..40657a6004bab749d8376340c9d90495c67aad9a
 --- /dev/null
 +++ b/external_plugins/buzz/activity.test.ts
-@@ -0,0 +1,352 @@
+@@ -0,0 +1,353 @@
 +import { afterEach, beforeEach, expect, setSystemTime, test } from 'bun:test'
-+import { appendFileSync, mkdirSync, mkdtempSync, writeFileSync } from 'fs'
++import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 +import { tmpdir } from 'os'
 +import { join } from 'path'
 +import { randomUUID } from 'crypto'
@@ -145,6 +145,7 @@ index 0000000000000000000000000000000000000000..1e4e8d85e6f45b644b7fed44c01738ed
 +afterEach(() => {
 +  activity.close()
 +  setSystemTime()
++  rmSync(dir, { recursive: true, force: true })
 +})
 +
 +function line(entry: object) {
@@ -795,15 +796,15 @@ index 0000000000000000000000000000000000000000..e7f5fdf660dd123b4dd66c8d9946b647
 +}
 diff --git a/external_plugins/buzz/bot.test.ts b/external_plugins/buzz/bot.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..24a5a5fd5bf8e4aee9cb3bea9ca9764edb121435
+index 0000000000000000000000000000000000000000..cc2bb0441298bbfae3d14d0da54500633c963102
 --- /dev/null
 +++ b/external_plugins/buzz/bot.test.ts
-@@ -0,0 +1,730 @@
+@@ -0,0 +1,731 @@
 +import { afterAll, afterEach, expect, test } from 'bun:test'
 +import type { ServerWebSocket, Subprocess } from 'bun'
 +import { connect, type Socket } from 'net'
 +import { createHash } from 'crypto'
-+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, chmodSync, existsSync } from 'fs'
++import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, chmodSync, existsSync } from 'fs'
 +import { tmpdir } from 'os'
 +import { join } from 'path'
 +import { generateSecretKey, getPublicKey, finalizeEvent, verifyEvent, type Event } from 'nostr-tools/pure'
@@ -989,13 +990,14 @@ index 0000000000000000000000000000000000000000..24a5a5fd5bf8e4aee9cb3bea9ca9764e
 +})
 +
 +const SESSION = '0a1b2c3d-0000-4000-8000-000000000000'
-+const running: { bot: Subprocess; relay: ReturnType<typeof fakeRelay>; sockets: Socket[] }[] = []
++const running: { bot: Subprocess; relay: ReturnType<typeof fakeRelay>; sockets: Socket[]; dir: string }[] = []
 +
 +afterEach(() => {
-+  for (const { bot, relay, sockets } of running.splice(0)) {
++  for (const { bot, relay, sockets, dir } of running.splice(0)) {
 +    bot.kill(9)
 +    sockets.forEach(socket => socket.destroy())
 +    relay.stop()
++    rmSync(dir, { recursive: true, force: true })
 +  }
 +})
 +
@@ -1042,7 +1044,7 @@ index 0000000000000000000000000000000000000000..24a5a5fd5bf8e4aee9cb3bea9ca9764e
 +  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^(BUZZ_|HEX_|TELEGRAM_|DISCORD_)/.test(name)))
 +  const { process: bot, port } = await service(join(import.meta.dir, 'bot.ts'), { ...env, BUZZ_STATE_DIR: state, HEX_DIR: join(dir, 'hex'), CLAUDE_CONFIG_DIR: join(dir, 'config'), PATH: `${dir}:${process.env.PATH}` })
 +  const sockets: Socket[] = []
-+  running.push({ bot, relay, sockets })
++  running.push({ bot, relay, sockets, dir })
 +  await until(() => relay.frames.some(([type, , filter]: any[]) => type === 'REQ' && filter['#h']?.includes(dm)))
 +
 +  const published = (kind: number) => relay.events.filter(event => event.kind === kind && event.pubkey === me)
@@ -3676,12 +3678,12 @@ index 0000000000000000000000000000000000000000..fc63b5adbd92a19292e7f7d9b64846f1
 +}
 diff --git a/external_plugins/buzz/provider.test.ts b/external_plugins/buzz/provider.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..e198ca634cfd0ef0acbf1fd9a85c96f332561ac9
+index 0000000000000000000000000000000000000000..31df9d74d1b09cf1c632c66f067062b6f5312c90
 --- /dev/null
 +++ b/external_plugins/buzz/provider.test.ts
-@@ -0,0 +1,180 @@
-+import { beforeEach, expect, test } from 'bun:test'
-+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, writeFileSync, chmodSync, statSync, existsSync } from 'fs'
+@@ -0,0 +1,182 @@
++import { afterEach, beforeEach, expect, test } from 'bun:test'
++import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, chmodSync, statSync, existsSync } from 'fs'
 +import { tmpdir } from 'os'
 +import { join } from 'path'
 +import { generateSecretKey, getPublicKey, nip19 } from 'nostr-tools'
@@ -3752,6 +3754,8 @@ index 0000000000000000000000000000000000000000..e198ca634cfd0ef0acbf1fd9a85c96f3
 +`)
 +  chmodSync(ssh, 0o755)
 +})
++
++afterEach(() => rmSync(dir, { recursive: true, force: true }))
 +
 +function fakeHex(home: string) {
 +  mkdirSync(join(home, '.hex', 'bin'), { recursive: true })

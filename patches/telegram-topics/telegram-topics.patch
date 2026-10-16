@@ -306,13 +306,13 @@ index d72dbc1a759e601dd0188cc7a8c3b58edc04373c..f1a925f2b80e2c51876e266dd6fc8912
 +The bot token lives in `~/.claude/channels/hex/telegram/.env` as `TELEGRAM_BOT_TOKEN=…`, and `access.json` there holds `allowFrom`, the Telegram user ids allowed to talk to it.
 diff --git a/external_plugins/telegram/bot.test.ts b/external_plugins/telegram/bot.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..cd079ac3d9c83be7a2334ba67385aa1e539d851f
+index 0000000000000000000000000000000000000000..aca829fef65ae4a47b813f8c0cd32e9bf5b55ffe
 --- /dev/null
 +++ b/external_plugins/telegram/bot.test.ts
-@@ -0,0 +1,384 @@
-+import { beforeAll, expect, mock, test } from 'bun:test'
+@@ -0,0 +1,389 @@
++import { afterAll, beforeAll, expect, mock, test } from 'bun:test'
 +import { connect } from 'net'
-+import { mkdtempSync, readFileSync, writeFileSync } from 'fs'
++import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 +import { tmpdir } from 'os'
 +import { join } from 'path'
 +import * as grammy from 'grammy'
@@ -373,6 +373,11 @@ index 0000000000000000000000000000000000000000..cd079ac3d9c83be7a2334ba67385aa1e
 +mock.module('grammy', () => ({ ...grammy, Bot }))
 +
 +const state = mkdtempSync(join(tmpdir(), 'telegram-'))
++const outbox = mkdtempSync(join(tmpdir(), 'telegram-outbox-'))
++afterAll(() => {
++  rmSync(state, { recursive: true, force: true })
++  rmSync(outbox, { recursive: true, force: true })
++})
 +let received: any[] = []
 +let call: (tool: string, args: object) => Promise<any>
 +let ask: (request: object) => Promise<unknown>
@@ -519,7 +524,7 @@ index 0000000000000000000000000000000000000000..cd079ac3d9c83be7a2334ba67385aa1e
 +  captionOnly.add(42)
 +  await call('edit_message', { message_id: '42', text: 'new caption' })
 +  expect(await called('editMessageCaption')).toMatchObject({ message_id: 42, caption: 'new caption' })
-+  const file = join(state, '..', `chart-${Date.now()}.png`)
++  const file = join(outbox, `chart-${Date.now()}.png`)
 +  writeFileSync(file, 'png')
 +  await call('edit_message', { message_id: '43', file })
 +  expect((await called('editMessageMedia')).media).toMatchObject({ type: 'photo' })
@@ -537,8 +542,8 @@ index 0000000000000000000000000000000000000000..cd079ac3d9c83be7a2334ba67385aa1e
 +})
 +
 +test('files go without an empty message, short text rides as the caption, and a photo over 10MB goes as a document', async () => {
-+  const small = join(state, '..', `small-${Date.now()}.jpg`)
-+  const big = join(state, '..', `big-${Date.now()}.jpg`)
++  const small = join(outbox, `small-${Date.now()}.jpg`)
++  const big = join(outbox, `big-${Date.now()}.jpg`)
 +  writeFileSync(small, 'jpg')
 +  writeFileSync(big, Buffer.alloc(11 * 1024 * 1024))
 +  const before = calls.length

@@ -310,14 +310,14 @@ index ad04f6fa437bfa013f72f71de2b460f3eedeeeee..95f1befddecc9bd7251c7a7d4d363bdf
 +The bot token lives in `~/.claude/channels/hex/discord/.env` as `DISCORD_BOT_TOKEN=…`, and `access.json` there holds `allowFrom`, the Discord user ids allowed to talk to it. The bot needs the Message Content intent, and in its server: View Channels, Send Messages, Send Messages in Threads, Create Public Threads, Manage Threads, Read Message History, Attach Files and Add Reactions.
 diff --git a/external_plugins/discord/bot.test.ts b/external_plugins/discord/bot.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..c4b5b116620e57c380acdcd113cbb603f8f705be
+index 0000000000000000000000000000000000000000..fd43573fc284c10450fcbf20315cb31f3c0e342c
 --- /dev/null
 +++ b/external_plugins/discord/bot.test.ts
-@@ -0,0 +1,443 @@
-+import { beforeAll, expect, mock, test } from 'bun:test'
+@@ -0,0 +1,444 @@
++import { afterAll, beforeAll, expect, mock, test } from 'bun:test'
 +import { connect as netConnect } from 'net'
 +import { connect } from '../../hub/testing.ts'
-+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'fs'
++import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 +import { tmpdir } from 'os'
 +import { join } from 'path'
 +import * as discord from 'discord.js'
@@ -452,6 +452,7 @@ index 0000000000000000000000000000000000000000..c4b5b116620e57c380acdcd113cbb603
 +mock.module('discord.js', () => ({ ...discord, Client }))
 +
 +const state = mkdtempSync(join(tmpdir(), 'discord-'))
++afterAll(() => rmSync(state, { recursive: true, force: true }))
 +let received: any[]
 +let call: (tool: string, args: object) => Promise<any>
 +

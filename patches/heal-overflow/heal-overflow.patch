@@ -1,12 +1,12 @@
 diff --git a/external_plugins/voice/asks.test.ts b/external_plugins/voice/asks.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..d68fa6f79391a49fd07a74fbea61b2c47db2aac1
+index 0000000000000000000000000000000000000000..41a4f5a98bdbf2b214843f2479aa70d650bd1e98
 --- /dev/null
 +++ b/external_plugins/voice/asks.test.ts
-@@ -0,0 +1,205 @@
+@@ -0,0 +1,206 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { Database } from 'bun:sqlite'
-+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'fs'
++import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 +import { createServer, type Server } from 'net'
 +import { tmpdir } from 'os'
 +import { join } from 'path'
@@ -55,6 +55,7 @@ index 0000000000000000000000000000000000000000..d68fa6f79391a49fd07a74fbea61b2c4
 +afterEach(() => {
 +  asks?.close()
 +  hub.close()
++  rmSync(state, { recursive: true, force: true })
 +})
 +
 +test('a question asked with buttons reads as its first line, its context and the pick its thread marked', () => {
