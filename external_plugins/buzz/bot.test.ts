@@ -2,7 +2,7 @@ import { afterAll, afterEach, expect, test } from 'bun:test'
 import type { ServerWebSocket, Subprocess } from 'bun'
 import { connect, type Socket } from 'net'
 import { createHash } from 'crypto'
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, chmodSync, existsSync } from 'fs'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, chmodSync, existsSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { generateSecretKey, getPublicKey, finalizeEvent, verifyEvent, type Event } from 'nostr-tools/pure'
@@ -187,13 +187,14 @@ test('after a drop it reconnects, authenticates again, resubscribes from shortly
 })
 
 const SESSION = '0a1b2c3d-0000-4000-8000-000000000000'
-const running: { bot: Subprocess; relay: ReturnType<typeof fakeRelay>; sockets: Socket[] }[] = []
+const running: { bot: Subprocess; relay: ReturnType<typeof fakeRelay>; sockets: Socket[]; dir: string }[] = []
 
 afterEach(() => {
-  for (const { bot, relay, sockets } of running.splice(0)) {
+  for (const { bot, relay, sockets, dir } of running.splice(0)) {
     bot.kill(9)
     sockets.forEach(socket => socket.destroy())
     relay.stop()
+    rmSync(dir, { recursive: true, force: true })
   }
 })
 
@@ -244,7 +245,7 @@ exit 0
     stderr: 'ignore',
   })
   const sockets: Socket[] = []
-  running.push({ bot, relay, sockets })
+  running.push({ bot, relay, sockets, dir })
   await until(() => relay.frames.some(([type, , filter]: any[]) => type === 'REQ' && filter['#h']?.includes(dm)))
 
   const published = (kind: number) => relay.events.filter(event => event.kind === kind && event.pubkey === me)
