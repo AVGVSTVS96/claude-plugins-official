@@ -9,7 +9,7 @@ import { PORT, STATE_DIR, env } from './env.ts'
 import { Asks, type Ask } from './asks.ts'
 import { relay } from './relay.ts'
 import { Tasks, opener, type HexTask } from './tasks.ts'
-import type { Held, VoiceLine } from '../../hub/hub.ts'
+import { begin, title as oneWord, type Held, type VoiceLine } from '../../hub/hub.ts'
 import page from './page.html' with { type: 'text' }
 
 const KEY = env.OPENAI_API_KEY
@@ -106,7 +106,7 @@ export async function tool(name: string, args: Record<string, any>): Promise<str
   if (name === 'phone') return dial(args.to, args.why)
   if (name === 'title') return title(args.call, args)
   if (name === 'task') return task(args.id, args.state as Task['state'], args.text, args.call, args.agent)
-  if (name === 'send') return pass(args.thread, args.about, args.text)
+  if (name === 'send') return pass(args.thread, args.about, args.text, args.app, args.channel)
   if (name === 'answer') return answerAsk(args.id, args.label, 'call')
   if (name === 'note' && !live && ringing()) {
     briefing.push(args.text)
@@ -168,21 +168,31 @@ async function task(id: string, state: Task['state'], text: string, call = live?
   return agent && live?.id === call && !following ? `${result}, but no transcript of agent ${agent} turned up, so the caller won't see its steps` : result
 }
 
-async function pass(name: string, about: string, text: string, call = live?.id ?? ended) {
-  const thread = findThread(HEX_STATE, name)
-  if (!thread) throw new Error(`no hex thread is named ${name}`)
+// app: no thread has the work yet, so one named name opens there with it.
+async function pass(name: string, about: string, text: string, app?: string, where?: string, call = live?.id ?? ended) {
+  const known = app ? undefined : findThread(HEX_STATE, name)
+  if (!app && !known) throw new Error(`no hex thread is named ${name}; pass app to open one`)
   const id = call && fresh(call, about)
+  const meta = { user: 'hex voice', ...(id && { voice_task: `${call}:${id}` }) }
+  let thread = known
+  if (app) {
+    const opened = await begin(app, oneWord(name), { content: text, meta }, { about: `From a call: ${about}`, where })
+    thread = { app, id: opened.thread, name, threads: join(HEX_STATE, app, 'threads.json') }
+  }
   if (call && id) {
-    await mark(call, { id, state: 'running', text: about, to: thread.name, agent: thread.id })
-    watch(call, id, thread, false)
+    await mark(call, { id, state: 'running', text: about, to: thread!.name, agent: thread!.id })
+    watch(call, id, thread!, false)
   }
-  try {
-    await relay(HEX_STATE, thread.app, { type: 'inbound', thread: thread.id, content: text, meta: { user: 'hex voice', ...(id && { voice_task: `${call}:${id}` }) } })
-  } catch (error) {
-    if (call && id) see(call, id, { end: 'failed' })
-    throw error
+  if (!app) {
+    try {
+      await relay(HEX_STATE, thread!.app, { type: 'inbound', thread: thread!.id, content: text, meta })
+    } catch (error) {
+      if (call && id) see(call, id, { end: 'failed' })
+      throw error
+    }
   }
-  return id ? `sent to ${thread.name}, on the board as ${id}` : `sent to ${thread.name}`
+  const sent = app ? `opened ${name} in ${app}` : `sent to ${thread!.name}`
+  return id ? `${sent}, on the board as ${id}` : sent
 }
 
 // Work a past call sent out is picked back up when the engine starts, read from the start of its
@@ -384,7 +394,7 @@ function follow(socket: WebSocket, record: Live['record'], { call = new Call(), 
         ...(about ? [about.claude] : []),
         'Send the voice what it should know right away, with note.',
       ].join('\n'),
-    { call: record.id, started: 'true', ...(about && { task: about.id }) },
+    { call: record.id, started: 'true', from: record.from, ...(about && { task: about.id }) },
   )
   for (const text of briefing.splice(0)) void tell(current, 'note', text).catch(() => {})
   return current

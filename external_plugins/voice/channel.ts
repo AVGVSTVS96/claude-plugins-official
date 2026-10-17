@@ -7,7 +7,7 @@ export const server: ChannelServer = {
   title: 'voice',
   instructions: `This channel is a live voice call. A fast voice model (OpenAI gpt-live-1) talks with the caller in real time and hands work to you; you do the real work with your tools. The caller hears only the voice model, never your transcript output.
 
-When a call starts you get a "call started" message: send the voice, with note, what it should know right away about the caller and what's going on now, in a few short lines.
+When a call starts you get a "call started" message, whose from says where the caller is: app or web (hex's voice app or page), phone-in or phone-out (a phone call), or discord (a Discord voice channel they joined). Send the voice, with note, what it should know right away about the caller and what's going on now, in a few short lines.
 
 Each handoff arrives as <channel source="voice" delegation_id="..."> with the transcript since the last handoff, oldest first, timestamped from the start of the call: "you" is the caller, "voice" is the voice model. Speech transcripts can mishear words, and the latest correction wins. A late line can belong before one you already got; its timestamp places it.
 
@@ -17,7 +17,7 @@ Answer every handoff with say(delegation_id, text): the voice says only what you
 
 Keep each turn quick so the next handoff reaches you fast. Run anything longer than a quick lookup as a background subagent, put it on the board with task (running, then done or failed) with the agentId the Agent tool returned, and say its result when it arrives. The caller sees each step the agent takes. Running work keeps going unless the caller asks to stop that specific task.
 
-Work that belongs to a hex thread (a Telegram topic, or a Discord, Buzz or T3 Code thread) goes there with send: it puts the work on the board, the caller sees each step the thread takes, and the board shows it done when the thread is.
+Work that belongs to a hex thread (a Telegram topic, or a Discord, Buzz or T3 Code thread) goes there with send: it puts the work on the board, the caller sees each step the thread takes, and the board shows it done when the thread is. Work that has no thread yet gets a new one: send with app opens a thread by that name in Discord, Telegram or Buzz, with your message as its first.
 
 
 phone rings the caller's phone and holds the same kind of call there, for when you're asked to call them or have something worth a call. Give why, the reason you're calling in a plain sentence: the voice opens with it and the call's record keeps it. Notes you send while it rings reach the voice when the call connects. If nobody answers, the line is busy or the call fails, a message tells you.
@@ -75,7 +75,7 @@ A result too long to speak goes wherever the caller reads, if this session has a
     },
     {
       name: 'answer',
-      description: "Answer one of the caller's asks with the choice they said aloud: it reaches the thread that asked as their own tap would, and its Telegram buttons say it was answered on a call.",
+      description: "Answer one of the caller's asks with the choice they said aloud: it reaches the thread that asked as their own tap would, and its buttons in Telegram or Discord say it was answered on a call.",
       inputSchema: {
         type: 'object',
         properties: { id: { type: 'string' }, label: { type: 'string', description: "The option's label, or their own words when none fits" } },
@@ -90,9 +90,11 @@ A result too long to speak goes wherever the caller reads, if this session has a
       inputSchema: {
         type: 'object',
         properties: {
-          thread: { type: 'string', description: "The thread's name (like voiceapp) or id" },
+          thread: { type: 'string', description: "The thread's name (like voiceapp) or id; with app, the one-word name of the new thread" },
           about: { type: 'string', description: "A few words for what you sent, shown to the caller, like 'your orb-bounce feedback'" },
           text: { type: 'string', description: "The message, with the caller's own words" },
+          app: { type: 'string', enum: ['discord', 'telegram', 'buzz'], description: 'Open a new thread there for work that has none yet, instead of sending to one' },
+          channel: { type: 'string', description: 'With app discord or buzz: the channel to open it in, by name' },
         },
         required: ['thread', 'about', 'text'],
       },

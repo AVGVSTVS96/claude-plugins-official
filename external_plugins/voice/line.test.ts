@@ -27,6 +27,7 @@ async function lineCall() {
           socket.send(JSON.stringify({ type: 'session.started', session: { id: 'sess_discord', expires_at: Date.now() / 1000 + 3600 } }))
         }
         if (event.type === 'session.input_audio.append') heard.push(event.audio)
+        if (event.type === 'session.thinking.append') socket.send(JSON.stringify({ type: 'session.thinking.appended', client_event_id: event.event_id }))
         if (event.type === 'session.close') socket.send(JSON.stringify({ type: 'session.closed', reason: 'close_requested', client_event_id: event.event_id }))
       },
     },
@@ -35,9 +36,14 @@ async function lineCall() {
   writeFileSync(join(state, '.env'), [`OPENAI_API_KEY=test`, `OPENAI_BASE_URL=http://127.0.0.1:${openai.port}/v1`, `VOICE_PORT=${port}`].join('\n'))
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(VOICE|TWILIO|OPENAI|CALLER|HEX)_/.test(key)))
   const hex = join(home, 'hex', 'state')
-  mkdirSync(hex, { recursive: true })
-  const engine = `import { serve, take } from ${JSON.stringify(join(import.meta.dir, 'server.ts'))}
+  mkdirSync(join(hex, 'discord'), { recursive: true })
+  const engine = `import { serve, take, tool } from ${JSON.stringify(join(import.meta.dir, 'server.ts'))}
+import { clients } from ${JSON.stringify(join(import.meta.dir, '..', '..', 'hub', 'hub.ts'))}
 const step = (step, more = {}) => console.log(JSON.stringify({ step, ...more }))
+clients.set('discord', {
+  hub: { register: () => {}, deliver: (thread, name, message) => step('delivered', { thread, name, message }) },
+  place: async (name, where, about) => (step('placed', { name, where, about }), { thread: '9001', link: 'https://discord.com/channels/1/9001' }),
+})
 serve({
   deliver: (content, meta) => step('deliver', { content, meta }),
   keep: () => step('keep'),
@@ -50,6 +56,7 @@ for await (const line of console) {
   const [verb, audio] = line.split(' ')
   if (verb === 'hear') held.hear(audio)
   if (verb === 'hangup') held.hangUp()
+  if (verb === 'send') tool('send', JSON.parse(line.slice(5))).then(text => step('sent', { text }), error => step('sent', { error: error.message }))
 }`
   const plugin = Bun.spawn(['bun', '-e', engine], { env: { ...env, HOME: home }, stdin: 'pipe', stdout: 'pipe', stderr: 'ignore' })
   const steps: any[] = []
@@ -100,6 +107,16 @@ test("a call on another client's line is held like a phone call: PCM both ways, 
   call.speak('BBBB')
   expect(await until(() => call.steps.find(step => step.step === 'play'))).toEqual({ step: 'play', audio: 'BBBB' })
   expect((await fetch(`${call.base}/calls`).then(r => r.json())).live).toBe('sess_discord')
+
+  call.tell(`send ${JSON.stringify({ thread: 'Anchors', about: 'the anchors', text: 'look into the anchors', app: 'discord' })}`)
+  expect(await until(() => call.steps.find(step => step.step === 'sent'))).toEqual({ step: 'sent', text: 'opened Anchors in discord, on the board as the-anchors' })
+  expect(call.steps.find(step => step.step === 'placed')).toEqual({ step: 'placed', name: 'Anchors', about: 'From a call: the anchors' })
+  expect(call.steps.find(step => step.step === 'delivered')).toEqual({
+    step: 'delivered',
+    thread: '9001',
+    name: 'Anchors',
+    message: { content: 'look into the anchors', meta: { user: 'hex voice', voice_task: 'sess_discord:the-anchors' } },
+  })
 
   call.tell('hangup')
   await until(() => call.steps.find(step => step.step === 'end'))
