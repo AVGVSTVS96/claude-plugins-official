@@ -138,7 +138,7 @@ export function digest({ open, closed, pins, calls, t3 }: ReturnType<typeof gath
 }
 
 function prompt({ ledgers, ...records }: ReturnType<typeof gather>) {
-  return `You're hex's check. hex is Bassim's personal assistant: it works for him in many threads at once (Telegram topics, T3 Code threads, calls with its voice app), and each thread asks him things: questions with buttons, polls, the "waiting on you" part of its pinned status post, and the waiting lines of a call's wrap-up. They pile up in dozens of places and many go stale. Your pass turns them into one honest list in his voice app, where he answers each in place.
+  return `You're hex's check. hex is Bassim's personal assistant: it works for him in many threads at once (Telegram topics, Discord threads, T3 Code threads, calls with its voice app), and each thread asks him things: questions with buttons, polls, the "waiting on you" part of its pinned status post, and the waiting lines of a call's wrap-up. They pile up in dozens of places and many go stale. Your pass turns them into one honest list in his voice app, where he answers each in place.
 
 What he asked for, in his words: "the ability to better manage my tasks with hex ... we could give an even better idea for things that need to get done. And this could all be done by looking through the transcript, gathering, auditing, analyzing, figuring out, and also checking on any work that was done by other agents ... that might be waiting for other things ... older work from yesterday or two days ago, that might not have been done ... such that I can help ship more and get unblocked".
 
@@ -146,7 +146,7 @@ The records are below as JSON: every open question asked with buttons or a poll 
 
 Return:
 - asks: one entry per decision or action that is still his, however many places asked it. refs lists every open question it stands for (copy their ref objects), places names the threads that asked it. id is "check:" plus a short slug, the same slug as in your previous pass for the same thing. task is the thread it belongs to ("<app>:<thread id>", from threads). question is one short plain line (60 characters at most). context is one or two plain sentences on what it unblocks or costs. options are short labels; mark the thread's own pick with pick (one at most, only where the thread made one); when an option stands for a button, value is that button's exact text from the first ref. kind is pick (one of several), yesno (two ways), do (only his hands can do it, like a sign-in, a purchase, a recording: options like Done and Later, plus one with url when a page opens it) or look (something to watch or read, one option with url when there's a link). tag is "money" when an option spends money, or "unblocks N" when N other things wait on it. Order: what unblocks the most first, even when it costs money, then the quickest; other money and anything sent in his name last. Asks from pinned posts and call wrap-ups have no refs; their task is the thread they came from.
-- settle: open questions the records show are already decided or done: decided in a conversation or a call, replaced by a later question, or the thing already happened. note is what the question's Telegram buttons will say instead, like "Settled: Pro is on" (40 characters at most). Settle only what the records show; anything you're unsure of stays an ask.
+- settle: open questions the records show are already decided or done: decided in a conversation or a call, replaced by a later question, or the thing already happened. note is what the question's buttons in Telegram or Discord will say instead, like "Settled: Pro is on" (40 characters at most). Settle only what the records show; anything you're unsure of stays an ask.
 - fixed: what you settled or merged, the way he'd read it: title (the thing), text (the evidence, with message numbers), did (what you did, in a few words).
 - flagged: what he should look at that you can't settle yourself, like the same thing asked with different options, or a question days old whose work has stalled: title and text.
 - stuck: work stopped with nobody moving it that the t3 list doesn't already show, like a failing service a pinned post mentions: id (a short slug), title, why (one sentence), action (one or two words, like Restore or Look), mark (paused or failed), at, and request: what hex should do when he taps the action, as a message to hex.
@@ -157,7 +157,7 @@ ${JSON.stringify(records)}`
 }
 
 const NOTE = { type: 'object', properties: { title: { type: 'string' }, text: { type: 'string' }, did: { type: 'string' } }, required: ['title', 'text'] }
-const REF = { type: 'object', properties: { app: { type: 'string' }, thread: { type: 'string' }, message: { type: 'number' } }, required: ['app', 'thread', 'message'] }
+const REF = { type: 'object', properties: { app: { type: 'string' }, thread: { type: 'string' }, message: { type: ['number', 'string'] } }, required: ['app', 'thread', 'message'] }
 const SCHEMA = {
   type: 'object',
   properties: {

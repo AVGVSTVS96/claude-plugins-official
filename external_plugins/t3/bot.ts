@@ -7,7 +7,7 @@ import { basename, join } from 'path'
 import { fileURLToPath } from 'url'
 import { randomUUID } from 'crypto'
 import { agent, ndJsonStream, PROTOCOL_VERSION, RequestError, type AgentContext, type ContentBlock, type McpServer, type PromptResponse, type SessionConfigOption, type SessionNotification, type StopReason } from '@agentclientprotocol/sdk'
-import { startHub } from '../../hub/hub.ts'
+import { startHub, begin, move, title, MODELS, EFFORTS } from '../../hub/hub.ts'
 import { server } from './channel.ts'
 import { follow, transcriptPath } from './transcript.ts'
 import { version } from './package.json'
@@ -20,20 +20,6 @@ const HOME = homedir()
 const SCRATCH = join(HOME, '.t3', 'scratch')
 const CLAUDE_JSON = join(HOME, '.claude.json')
 const COMMANDS = [{ name: 'compact', description: 'Summarize the conversation so far to free up context' }]
-const MODELS = [
-  { value: 'claude-opus-5-5', name: 'Opus 5.5', alias: 'opus' },
-  { value: 'claude-sonnet-5-5', name: 'Sonnet 5.5', alias: 'sonnet' },
-  { value: 'claude-haiku-5-5', name: 'Haiku 5.5', alias: 'haiku' },
-  { value: 'claude-fable-5-1', name: 'Fable 5.1', alias: 'fable' },
-]
-const EFFORTS = [
-  { value: 'low', name: 'Low' },
-  { value: 'medium', name: 'Medium' },
-  { value: 'high', name: 'High' },
-  { value: 'xhigh', name: 'Extra High' },
-  { value: 'max', name: 'Max' },
-]
-
 type Turn = {
   client: AgentContext
   reader?: ReturnType<typeof follow>
@@ -57,7 +43,12 @@ const hub = startHub({
   stateDir: STATE_DIR,
   channel: process.env.T3_CHANNEL ?? 'plugin:t3@hex',
   server,
-  call: async (_, tool) => {
+  // T3 Code owns its threads, so a handoff leaves this one here and a copy carries on there.
+  call: async (thread, tool, args) => {
+    const name = title(args.title as string)
+    const where = args.channel as string | undefined
+    if (tool === 'new_thread') return `started thread "${name}" in ${args.app}: ${(await begin(args.app as string, name, args.prompt as string, { about: args.about as string | undefined, where, cwd: hub.cwd(thread) })).link}`
+    if (tool === 'handoff') return `a copy of this conversation continues in ${args.to}: ${await move(hub, thread, args.to as string, name, where, true)}. You stay here.`
     throw new Error(`unknown tool: ${tool}`)
   },
   // A new thread's session starts with its first prompt and is only known once its channel connects.

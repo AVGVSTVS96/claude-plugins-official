@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync, renameSync, watch, writeFileSync } from 'fs'
 import { join } from 'path'
-import type { Ask as Asked } from '../../hub/ledger.ts'
+import type { Ask as Asked, MessageId } from '../../hub/ledger.ts'
 import { Changes } from './changes.ts'
 import { Check } from './check.ts'
 import { relay } from './relay.ts'
@@ -10,7 +10,7 @@ export type Kind = 'pick' | 'yesno' | 'do' | 'look'
 // value: the button's own label, when the option stands for one; url: an option that opens a page.
 export type Option = { label: string; value?: string; pick?: boolean; url?: string }
 export type Answer = { label: string; at: string; via: string }
-export type Ref = { app: string; thread: string; message: number }
+export type Ref = { app: string; thread: string; message: MessageId }
 export type Ask = {
   id: string
   kind: Kind
@@ -62,6 +62,7 @@ export class Asks extends Changes {
   private ledgers = new Map<string, Asked[]>()
   private names = new Map<string, string>()
   private pins = new Map<string, string>()
+  private guild?: string
   private result?: CheckResult
   private marks: Marks
   private pending?: ReturnType<typeof setTimeout>
@@ -167,8 +168,11 @@ export class Asks extends Changes {
   private refs(id: string): Ref[] {
     const curated = this.result?.asks.find(ask => ask.id === id)
     if (curated) return curated.refs ?? []
-    const ref = parseRef(id)
-    return ref ? [ref] : []
+    for (const [app, asks] of this.ledgers) {
+      const asked = asks.find(ask => refId({ app, ...ask }) === id)
+      if (asked) return [{ app, thread: asked.thread, message: asked.message }]
+    }
+    return []
   }
 
   private asked(ref: Ref) {
@@ -205,6 +209,7 @@ export class Asks extends Changes {
       for (const [thread, pin] of Object.entries<any>(book?.pins ?? {})) if (pin.text) this.pins.set(`${app}:${thread}`, pin.text)
       for (const [thread, known] of Object.entries<any>(readJson(join(this.state, app, 'threads.json')) ?? {})) this.names.set(`${app}:${thread}`, known.name ?? thread)
     }
+    this.guild = readJson(join(this.state, 'discord', 'guild.json'))?.id
     this.result = readJson(join(this.state, 'voice', 'check.json'))
     this.notice()
     const used = new Set<string>()
@@ -252,7 +257,7 @@ export class Asks extends Changes {
       ...rest,
       app: ref?.app ?? ask.task.split(':')[0]!,
       topic: this.names.get(ask.task) ?? ask.task.split(':').at(-1)!,
-      ...(ref && link(ref) && { link: link(ref) }),
+      ...(ref && link(ref, this.guild) && { link: link(ref, this.guild) }),
     }
   }
 
@@ -295,12 +300,8 @@ export function refId({ app, thread, message }: Ref) {
   return `${app}:${thread}:${message}`
 }
 
-function parseRef(id: string): Ref | undefined {
-  const [, app, thread, message] = id.match(/^(\w+):(.+):(\d+)$/) ?? []
-  return app && thread ? { app, thread, message: Number(message) } : undefined
-}
-
-function link({ app, thread, message }: Ref) {
+function link({ app, thread, message }: Ref, guild?: string) {
+  if (app === 'discord') return guild && `https://discord.com/channels/${guild}/${thread}/${message}`
   if (app !== 'telegram' || !thread.startsWith('-100')) return
   const [chat, topic] = thread.slice(4).split(':')
   return topic ? `https://t.me/c/${chat}/${topic}/${message}` : `https://t.me/c/${chat}/${message}`

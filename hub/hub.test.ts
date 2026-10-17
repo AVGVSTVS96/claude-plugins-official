@@ -3,7 +3,7 @@ import { connect, createServer, type Socket } from 'net'
 import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, chmodSync, existsSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { free, stamp, startHub, tappable, transcribe, type ChannelServer, type Message, type Permission } from './hub.ts'
+import { begin, clients, free, move, stamp, startHub, tappable, transcribe, type ChannelServer, type Message, type Permission } from './hub.ts'
 import { hangUpAll, http as line, port } from './testing.ts'
 
 const CHANNEL = 'plugin:telegram@hex'
@@ -1494,4 +1494,36 @@ test('a session that restarts in place and then ends is reported, and the thread
   expect(await until(() => failures[0])).toEqual(['chat:7', 'its session ended before its channel connected'])
   hub.deliver('chat:7', 'Desk anchors', message)
   await launched()
+})
+
+test('begin opens a thread on another client and starts its session on a prompt, or on a message it delivers under the thread\'s name', async () => {
+  start({ agents: [] })
+  const placed: (string | undefined)[][] = []
+  clients.set('elsewhere', { hub, place: async (name, where, about) => (placed.push([name, where, about]), { thread: `chat:${placed.length + 8}`, link: `https://chat/${placed.length + 8}` }) })
+  try {
+    expect(await begin('elsewhere', 'Anchors', 'look at the anchors', { about: 'From Discord', where: 'desk' })).toEqual({ thread: 'chat:9', link: 'https://chat/9' })
+    expect((await launched()).at(-1)).toBe('look at the anchors')
+    await begin('elsewhere', 'Relay', { content: 'fix the relay', meta: { user: 'hex voice' } })
+    expect(placed).toEqual([['Anchors', 'desk', 'From Discord'], ['Relay', undefined, undefined]])
+    expect((await until(() => registry()['chat:10'])).name).toBe('Relay')
+    const { received } = await session('chat:10')
+    await until(() => received.length)
+    expect(received[0]).toMatchObject({ content: 'fix the relay', meta: { user: 'hex voice' } })
+    await expect(begin('nowhere', 'Anchors', 'x')).rejects.toThrow("nowhere isn't connected; threads open in elsewhere")
+  } finally {
+    clients.delete('elsewhere')
+  }
+})
+
+test('a move that copies forks the session there and leaves the thread here', async () => {
+  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } } })
+  const forked: unknown[][] = []
+  clients.set('elsewhere', { hub: { fork: (...args: unknown[]) => forked.push(args) } as any, place: async () => ({ thread: 'far:1', link: 'https://far/1' }) })
+  try {
+    expect(await move(hub, 'chat:7', 'elsewhere', 'Anchors', undefined, true)).toBe('https://far/1')
+    expect(forked).toEqual([['far:1', 'Anchors', SESSION, 'This conversation just moved to elsewhere, into the thread "Anchors". Your elsewhere tools now post there. Carry on where you left off.', undefined]])
+    expect(registry()['chat:7']).toEqual({ name: 'Desk anchors', session: SESSION })
+  } finally {
+    clients.delete('elsewhere')
+  }
 })

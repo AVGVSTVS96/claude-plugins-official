@@ -6,7 +6,7 @@ import { basename, join, sep } from 'path'
 import { finalizeEvent, type Event } from 'nostr-tools/pure'
 import { decode } from 'nostr-tools/nip19'
 import { hexToBytes } from 'nostr-tools/utils'
-import { startHub, clients, move, tappable, title, type Message } from '../../hub/hub.ts'
+import { startHub, clients, begin, move, tappable, title, type Message } from '../../hub/hub.ts'
 import { server } from './channel.ts'
 import { connectRelay } from './relay.ts'
 import { startActivity } from './activity.ts'
@@ -513,7 +513,10 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
   async function call(caller: string, tool: string, args: Record<string, unknown>): Promise<string> {
     if (tool === 'new_thread') {
       const name = title(args.title as string)
-      const { thread } = await place(name, (args.channel as string | undefined) ?? await channelOf(caller), args.about as string | undefined)
+      const app = (args.app as string | undefined) ?? 'buzz'
+      const about = args.about as string | undefined
+      if (app !== 'buzz') return `started thread "${name}" in ${app}: ${(await begin(app, name, args.prompt as string, { about, where: args.channel as string | undefined })).link}`
+      const { thread } = await place(name, (args.channel as string | undefined) ?? await channelOf(caller), about)
       hub.open(thread, name, args.prompt as string)
       return `started thread "${name}": ${link(homes.get(thread)!, thread)}`
     }
@@ -622,7 +625,7 @@ function serve(url: string, secretKey: Uint8Array, authTag: string[]) {
       case 'handoff': {
         const to = args.to as string
         const name = args.title ? title(args.title as string) : hub.name(thread) ?? 'Buzz'
-        const target = await move(hub, thread, to, name)
+        const target = await move(hub, thread, to, name, args.channel as string | undefined)
         await post(thread, `Moved to ${to}: ${target}`)
         return `moving to ${to}: ${target}. Your session stops here once this turn ends and resumes there.`
       }

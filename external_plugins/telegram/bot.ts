@@ -4,7 +4,7 @@ import type { Chat, MessageEntity, MessageOrigin, ReactionTypeEmoji } from 'gram
 import { readFileSync, writeFileSync, mkdirSync, statSync, realpathSync, chmodSync } from 'fs'
 import { homedir } from 'os'
 import { basename, join, extname, sep } from 'path'
-import { startHub, clients, move, tappable, title, transcribe, type Message, type Permission } from '../../hub/hub.ts'
+import { startHub, clients, begin, move, preview, tappable, title, transcribe, type Message, type Permission } from '../../hub/hub.ts'
 import { server } from './channel.ts'
 import { Ledger } from '../../hub/ledger.ts'
 
@@ -219,9 +219,10 @@ function showTyping(thread: string, busy: boolean): void {
 // turn can't end while one is open, so whatever is still asking by then is moot.
 const asking = new Map<string, Set<number>>()
 
-async function ask(thread: string, { request_id, tool_name, description, input_preview }: Permission): Promise<void> {
+async function ask(thread: string, request: Permission): Promise<void> {
+  const { request_id, tool_name, description } = request
   const { chat_id, extra } = target(thread)
-  const text = `🔐 ${tool_name}: ${description}\n\n${preview(input_preview, description)}`.slice(0, MAX_CHUNK_LIMIT)
+  const text = `🔐 ${tool_name}: ${description}\n\n${preview(request)}`.slice(0, MAX_CHUNK_LIMIT)
   const sent = await bot.api.sendMessage(chat_id, text, {
     ...extra,
     reply_markup: { inline_keyboard: [[
@@ -231,17 +232,6 @@ async function ask(thread: string, { request_id, tool_name, description, input_p
   })
   remember(thread, sent.message_id, { text, user: me() })
   asking.set(thread, (asking.get(thread) ?? new Set()).add(sent.message_id))
-}
-
-function preview(input: string, description: string): string {
-  try {
-    return Object.entries(JSON.parse(input))
-      .filter(([, value]) => value !== description)
-      .map(([key, value]) => `${key}: ${typeof value === 'string' ? value : JSON.stringify(value)}`)
-      .join('\n')
-  } catch {
-    return input
-  }
 }
 
 function settle(thread: string, busy: boolean): void {
@@ -457,12 +447,12 @@ async function call(caller: string, tool: string, args: Record<string, unknown>)
     case 'new_thread': {
       const name = title(args.title as string)
       const app = (args.app as string | undefined) ?? 'telegram'
-      const there = app === 'telegram' ? { hub, place } : clients.get(app)
-      if (!there) throw new Error(`${app} isn't connected`)
-      const opened = await there.place(name, args.channel as string | undefined, args.about as string | undefined)
-      if (app === 'telegram') await origin(caller, opened.thread).catch(err => process.stderr.write(`telegram hub: couldn't forward where "${name}" came from: ${err}\n`))
-      there.hub.open(opened.thread, name, args.prompt as string)
-      return `started thread "${name}" in ${app}: ${opened.link}`
+      const about = args.about as string | undefined
+      if (app !== 'telegram') return `started thread "${name}" in ${app}: ${(await begin(app, name, args.prompt as string, { about, where: args.channel as string | undefined })).link}`
+      const opened = await place(name, undefined, about)
+      await origin(caller, opened.thread).catch(err => process.stderr.write(`telegram hub: couldn't forward where "${name}" came from: ${err}\n`))
+      hub.open(opened.thread, name, args.prompt as string)
+      return `started thread "${name}" in telegram: ${opened.link}`
     }
     case 'handoff': {
       const to = args.to as string
@@ -573,9 +563,9 @@ const hub = startHub({
   fresh: thread => !thread.startsWith('-'),
   permission: (thread, request) => void ask(thread, request).catch(err => process.stderr.write(`telegram hub: couldn't relay a permission prompt to ${thread}: ${err}\n`)),
   asks: {
-    answer: (thread, message, label, via) => void answerAsk(thread, message, label, via),
-    settle: (thread, message, note) => void settleAsk(thread, message, note),
-    reopen: (thread, message, via) => void reopenAsk(thread, message, via),
+    answer: (thread, message, label, via) => void answerAsk(thread, Number(message), label, via),
+    settle: (thread, message, note) => void settleAsk(thread, Number(message), note),
+    reopen: (thread, message, via) => void reopenAsk(thread, Number(message), via),
   },
   failed: (thread, reason) => {
     const { chat_id, extra } = target(thread)

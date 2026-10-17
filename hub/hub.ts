@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync,
 import { basename, join } from 'path'
 import * as claude from './claude.ts'
 import { endpoint, type ChannelServer, type Line } from './mcp.ts'
+import type { MessageId } from './ledger.ts'
 
 export type { ChannelServer, Tool } from './mcp.ts'
 
@@ -14,12 +15,39 @@ export type State = (thread: string, busy: boolean, background: boolean) => void
 export type Failed = (thread: string, reason: string) => void
 export type Permission = { request_id: string; tool_name: string; description: string; input_preview: string }
 export type Settings = { model?: string; effort?: string }
+
+// The choices a client offers for a thread's settings.
+export const MODELS = [
+  { value: 'claude-opus-5-5', name: 'Opus 5.5', alias: 'opus' },
+  { value: 'claude-sonnet-5-5', name: 'Sonnet 5.5', alias: 'sonnet' },
+  { value: 'claude-haiku-5-5', name: 'Haiku 5.5', alias: 'haiku' },
+  { value: 'claude-fable-5-1', name: 'Fable 5.1', alias: 'fable' },
+]
+export const EFFORTS = [
+  { value: 'low', name: 'Low' },
+  { value: 'medium', name: 'Medium' },
+  { value: 'high', name: 'High' },
+  { value: 'xhigh', name: 'Extra High' },
+  { value: 'max', name: 'Max' },
+]
+
+// A permission prompt's input as one "key: value" line per field, leaving out what its description already says.
+export function preview({ input_preview, description }: Permission): string {
+  try {
+    return Object.entries(JSON.parse(input_preview))
+      .filter(([, value]) => value !== description)
+      .map(([key, value]) => `${key}: ${typeof value === 'string' ? value : JSON.stringify(value)}`)
+      .join('\n')
+  } catch {
+    return input_preview
+  }
+}
 // What another process (the voice app, hex's check) can do with a question the client asked
 // with buttons: answer it for the owner, settle it as no longer asked, or take an answer back.
 export type Asks = {
-  answer: (thread: string, message: number, label: string, via: string) => void
-  settle: (thread: string, message: number, note: string) => void
-  reopen: (thread: string, message: number, via: string) => void
+  answer: (thread: string, message: MessageId, label: string, via: string) => void
+  settle: (thread: string, message: MessageId, note: string) => void
+  reopen: (thread: string, message: MessageId, via: string) => void
 }
 export type Hub = ReturnType<typeof startHub>
 
@@ -777,17 +805,35 @@ export function startHub({ stateDir, channel, server, port = PORT, main, mainNam
   }
 }
 
-// Moves a thread to another client: its session stops here and resumes there,
-// memory intact. The main thread never leaves, so a copy of it continues instead.
-export async function move(from: Hub, thread: string, to: string, name: string, where?: string) {
-  const target = clients.get(to)
-  if (!target) throw new Error(`${to} isn't connected`)
+function client(app: string) {
+  const there = clients.get(app)
+  if (!there) throw new Error(`${app} isn't connected${clients.size ? `; threads open in ${[...clients.keys()].join(', ')}` : ''}`)
+  return there
+}
+
+// Opens a thread on any client and starts its session: on a prompt, its first message as the
+// session starts, or on a message that reaches it the way the app's own messages do.
+export async function begin(app: string, name: string, first: string | Message, { about, where, cwd }: { about?: string; where?: string; cwd?: string } = {}) {
+  const there = client(app)
+  const opened = await there.place(name, where, about)
+  if (typeof first === 'string') there.hub.open(opened.thread, name, first, cwd)
+  else {
+    there.hub.register(opened.thread, name, cwd)
+    there.hub.deliver(opened.thread, name, first)
+  }
+  return opened
+}
+
+// Moves a thread to another client: its session stops here and resumes there, memory intact.
+// The main thread never leaves, and a thread its app owns (copy) stays, so a copy continues instead.
+export async function move(from: Hub, thread: string, to: string, name: string, where?: string, copy = thread === from.main) {
+  const target = client(to)
   const session = from.session(thread)
   if (!session) throw new Error('this thread has no session yet')
   const { thread: dest, link } = await target.place(name, where)
   const prompt = `This conversation just moved to ${to}, into the thread "${name}". Your ${to} tools now post there. Carry on where you left off.`
   const cwd = from.cwd(thread)
-  if (thread === from.main) target.hub.fork(dest, name, session, prompt, cwd)
+  if (copy) target.hub.fork(dest, name, session, prompt, cwd)
   else void from.release(thread).then(session => target.hub.adopt(dest, name, session, prompt, cwd))
   return link
 }

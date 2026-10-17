@@ -2,17 +2,21 @@ import { readFileSync, renameSync, writeFileSync } from 'fs'
 
 // via: where the answer came from: the chat app's own buttons, hex's voice app, or a call.
 export type Answer = { label: string; at: string; via: string }
+// Telegram numbers its messages; Discord's snowflakes outgrow a JavaScript number, so they stay strings.
+export type MessageId = number | string
 export type Ask = {
   thread: string
-  message: number
+  message: MessageId
   text: string
   options: string[]
   at: string
   poll?: string
+  // Asked with a menu where any number of options can be picked, so a reopen puts the menu back.
+  multiple?: boolean
   answer?: Answer
   settled?: { note: string; at: string }
 }
-export type Pin = { message: number; text: string; at: string }
+export type Pin = { message: MessageId; text: string; at: string }
 type Book = { asks: Ask[]; pins: Record<string, Pin> }
 
 const KEEP = 14 * 24 * 60 * 60_000
@@ -35,7 +39,7 @@ export class Ledger {
     return this.book.pins[thread]
   }
 
-  find(thread: string, message: number) {
+  find(thread: string, message: MessageId) {
     return this.book.asks.find(ask => ask.thread === thread && ask.message === message)
   }
 
@@ -43,23 +47,23 @@ export class Ledger {
     return this.book.asks.find(ask => ask.poll === poll)
   }
 
-  ask(thread: string, message: number, text: string, options: string[], poll?: string) {
-    this.book.asks.push({ thread, message, text, options, at: now(), ...(poll && { poll }) })
+  ask(thread: string, message: MessageId, text: string, options: string[], poll?: string, multiple = false) {
+    this.book.asks.push({ thread, message, text, options, at: now(), ...(poll && { poll }), ...(multiple && { multiple }) })
     this.save()
   }
 
-  answered(thread: string, message: number, label: string, via: string) {
+  answered(thread: string, message: MessageId, label: string, via: string) {
     this.update(thread, message, ask => {
       ask.answer = { label, at: now(), via }
       delete ask.settled
     })
   }
 
-  settled(thread: string, message: number, note: string) {
+  settled(thread: string, message: MessageId, note: string) {
     this.update(thread, message, ask => (ask.settled = { note, at: now() }))
   }
 
-  reopened(thread: string, message: number) {
+  reopened(thread: string, message: MessageId) {
     this.update(thread, message, ask => {
       delete ask.answer
       delete ask.settled
@@ -68,7 +72,7 @@ export class Ledger {
 
   // A message's new text: a pinned post's latest status, or, for a question, the end of its
   // buttons, since an edit that doesn't send them again takes them off.
-  edited(thread: string, message: number, text: string) {
+  edited(thread: string, message: MessageId, text: string) {
     const pin = this.book.pins[thread]
     if (pin?.message === message) {
       this.book.pins[thread] = { message, text, at: now() }
@@ -78,18 +82,18 @@ export class Ledger {
     if (ask && !ask.answer && !ask.settled && !ask.poll) this.settled(thread, message, 'Edited')
   }
 
-  pinned(thread: string, message: number, text = '') {
+  pinned(thread: string, message: MessageId, text = '') {
     this.book.pins[thread] = { message, text, at: now() }
     this.save()
   }
 
-  unpinned(thread: string, message: number) {
+  unpinned(thread: string, message: MessageId) {
     if (this.book.pins[thread]?.message !== message) return
     delete this.book.pins[thread]
     this.save()
   }
 
-  deleted(thread: string, message: number) {
+  deleted(thread: string, message: MessageId) {
     this.book.asks = this.book.asks.filter(ask => !(ask.thread === thread && ask.message === message))
     if (this.book.pins[thread]?.message === message) delete this.book.pins[thread]
     this.save()
@@ -101,7 +105,7 @@ export class Ledger {
     this.save()
   }
 
-  private update(thread: string, message: number, change: (ask: Ask) => void) {
+  private update(thread: string, message: MessageId, change: (ask: Ask) => void) {
     const ask = this.find(thread, message)
     if (!ask) return
     change(ask)
