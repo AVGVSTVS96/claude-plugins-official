@@ -4,7 +4,7 @@ id: voice
 summary: Add a voice channel where OpenAI's gpt-live-1 holds a live call and hands every real request to the Claude Code session.
 baseline: ea10b213686c90bb1984b2016937310e05336cf3
 patch_file: voice.patch
-patch_sha256: cd194e88461d42bbe118f6f23506104e31af2481657eaa01803f38fa14d20c24
+patch_sha256: a0f593cf2e2f2c5a6c5b15c21a998050ae1696f74883e95a507389aa1ee31aae
 ---
 
 ## Intent
@@ -71,8 +71,10 @@ voice session ── HTTP ──► hub ──► call engine (server.ts) ◄─
   and plays the voice's, both base64 PCM at 24 kHz, mono, in a `gpt-live-1`
   WebSocket session, and the engine follows the call exactly like a phone
   call, the same session, record (`from: "discord"`) and board. The line ends
-  when the call does, and `hangUp` closes it as the caller's. Phone calls and
-  lines share one pass-through for the session's start, refusal and close.
+  when the call does, and `hangUp` closes it as the caller's. A session
+  refused, or hung up on before it starts, never becomes a call: a refusal is
+  reported once and ends the line. Phone calls and lines share one
+  pass-through for the session's start, refusal and close.
 - When the call closes, pending handoffs and the last words reach Claude
   with a "call ended" message.
 - Every call is saved as one record in `calls/` (turns, task changes, where

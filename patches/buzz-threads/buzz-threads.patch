@@ -2704,7 +2704,7 @@ index 0000000000000000000000000000000000000000..7112054b720266b866c74bc3b48350f6
 +optional = false
 diff --git a/external_plugins/buzz/channel.ts b/external_plugins/buzz/channel.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..f6366831afc368fa9953fd1d4ccf075af3469e8e
+index 0000000000000000000000000000000000000000..4d1b49f658fb4c6ca80e8495e29148035302176f
 --- /dev/null
 +++ b/external_plugins/buzz/channel.ts
 @@ -0,0 +1,209 @@
@@ -2897,7 +2897,7 @@ index 0000000000000000000000000000000000000000..f6366831afc368fa9953fd1d4ccf075a
 +          prompt: { type: 'string', description: "The user's request and the context the new session can't find itself: it starts from this prompt alone." },
 +          about: { type: 'string', description: 'One line the user sees first in the new thread, saying what it is for and where it came from.' },
 +          app: { type: 'string', enum: ['buzz', 'discord', 'telegram'], description: 'Where to open it. Default: buzz.' },
-+          channel: { type: 'string', description: 'Channel to open it in, by name. Defaults to this thread\'s channel; in Discord, the server\'s first channel.' },
++          channel: { type: 'string', description: 'Channel to open it in, by name. Defaults to this thread\'s channel; in Discord, the server\'s system channel.' },
 +        },
 +        required: ['title', 'prompt', 'about'],
 +      },
@@ -2910,7 +2910,7 @@ index 0000000000000000000000000000000000000000..f6366831afc368fa9953fd1d4ccf075a
 +        properties: {
 +          to: { type: 'string', enum: ['telegram', 'discord'] },
 +          title: titleProperty,
-+          channel: { type: 'string', description: 'Discord only: the channel to open it in, by name. Default: the server\'s first channel.' },
++          channel: { type: 'string', description: 'Discord only: the channel to open it in, by name. Default: the server\'s system channel.' },
 +        },
 +        required: ['to'],
 +      },

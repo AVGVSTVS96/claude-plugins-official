@@ -189,10 +189,10 @@ index 550f06acb7eec0c22b5e35bd91cf90ae632aeec7..00000000000000000000000000000000
 -}
 -```
 diff --git a/external_plugins/discord/README.md b/external_plugins/discord/README.md
-index ad04f6fa437bfa013f72f71de2b460f3eedeeeee..95f1befddecc9bd7251c7a7d4d363bdf0b9f4e8d 100644
+index ad04f6fa437bfa013f72f71de2b460f3eedeeeee..3c0463a35705a1501414b8f58e2d507760daaf68 100644
 --- a/external_plugins/discord/README.md
 +++ b/external_plugins/discord/README.md
-@@ -1,111 +1,8 @@
+@@ -1,111 +1,9 @@
  # Discord
  
 -Connect a Discord bot to your Claude Code with an MCP server.
@@ -201,6 +201,7 @@ index ad04f6fa437bfa013f72f71de2b460f3eedeeeee..95f1befddecc9bd7251c7a7d4d363bdf
 -When the bot receives a message, the MCP server forwards it to Claude and provides tools to reply, react, and edit messages.
 +- `bot.ts` holds the one gateway connection. It runs in the hub service (`bun hub/serve.ts`) next to Telegram, so a conversation can move between them. It starts sessions in `HEX_DIR` (the service's folder by default) through `HEX_LAUNCHER` (`claude` by default).
 +- `channel.ts` is the channel the hub serves each session over HTTP, so no process runs per session. `.mcp.json` points a session at the hub's port (`HEX_PORT`) with its thread (`HEX_THREAD`) and the hub's token (`HEX_TOKEN`, as `Authorization`) in headers.
++- `voice.ts` takes calls: join one of the server's voice channels and the bot joins you there, on a call with hex through the voice app's call engine, the same as calling hex's phone number. Leave, and it leaves.
  
 -## Prerequisites
 -
@@ -307,13 +308,13 @@ index ad04f6fa437bfa013f72f71de2b460f3eedeeeee..95f1befddecc9bd7251c7a7d4d363bdf
 -
 -Same path for attachments on historical messages found via `fetch_messages`
 -(messages with attachments are marked `+Natt`).
-+The bot token lives in `~/.claude/channels/hex/discord/.env` as `DISCORD_BOT_TOKEN=…`, and `access.json` there holds `allowFrom`, the Discord user ids allowed to talk to it. The bot needs the Message Content intent, and in its server: View Channels, Send Messages, Send Messages in Threads, Create Public Threads, Manage Threads, Read Message History, Attach Files and Add Reactions.
++The bot token lives in `~/.claude/channels/hex/discord/.env` as `DISCORD_BOT_TOKEN=…`, and `access.json` there holds `allowFrom`, the Discord user ids allowed to talk to it. The bot needs the Message Content intent, and in its server: View Channels, Send Messages, Send Messages in Threads, Create Public Threads, Manage Threads, Read Message History, Attach Files, Add Reactions, Pin Messages, Send Polls, and Connect and Speak for calls. Its slash commands (`/model`, `/effort`, `/compact`, `/stop`) register on connect.
 diff --git a/external_plugins/discord/bot.test.ts b/external_plugins/discord/bot.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..4c031d4869ba243d97158d0bb6ce1cf808191143
+index 0000000000000000000000000000000000000000..0cdf34bad072840b1bd1b22a906a578c96ff2c55
 --- /dev/null
 +++ b/external_plugins/discord/bot.test.ts
-@@ -0,0 +1,608 @@
+@@ -0,0 +1,622 @@
 +import { afterAll, beforeAll, expect, mock, test } from 'bun:test'
 +import { connect as netConnect } from 'net'
 +import { connect } from '../../hub/testing.ts'
@@ -809,6 +810,9 @@ index 0000000000000000000000000000000000000000..4c031d4869ba243d97158d0bb6ce1cf8
 +
 +  await ask(prompt('fghij'))
 +  const open = await until(() => here.posted.findLast((m: any) => m.content.startsWith('🔐') && m !== asked))
++  send({ type: 'state', thread: here.id, busy: false, background: true })
++  await Bun.sleep(100)
++  expect(done.some(d => d.edit === open.id)).toBe(false)
 +  send({ type: 'state', thread: here.id, busy: false })
 +  const moot = await until(() => done.find(d => d.edit === open.id))
 +  expect(labels(moot.options.components)).toEqual(['No longer waiting'])
@@ -834,6 +838,11 @@ index 0000000000000000000000000000000000000000..4c031d4869ba243d97158d0bb6ce1cf8
 +
 +  await call('reply', { text: 'Ship today?', buttons: ['Yes', 'No'] })
 +  const later = here.posted.at(-1)
++  await call('edit_message', { message_id: later.id, text: 'Ship today, before five?' })
++  expect(book().asks.find((a: any) => a.message === later.id).settled).toBeUndefined()
++  await call('pin', { message_id: later.id })
++  await call('edit_message', { message_id: later.id, text: 'Status: shipping' })
++  expect(book().pins[here.id]).toMatchObject({ message: later.id, text: 'Status: shipping' })
 +  send({ type: 'settle', thread: here.id, message: later.id, note: 'Settled: shipped' })
 +  await until(() => book().asks.find((a: any) => a.message === later.id).settled)
 +  expect(labels(done.findLast(d => d.edit === later.id).options.components)).toEqual(['Settled: shipped'])
@@ -913,21 +922,27 @@ index 0000000000000000000000000000000000000000..4c031d4869ba243d97158d0bb6ce1cf8
 +  command('stop', undefined, owner, general.id)
 +  command('stop', undefined, { id: '8888', username: 'someone', partial: false })
 +  await until(() => replies.length === 4)
++  send({ type: 'state', thread: here.id, busy: true })
++  await Bun.sleep(50)
++  command('compact', undefined, owner, here.id)
++  await until(() => replies.length === 5)
++  send({ type: 'state', thread: here.id, busy: false })
 +  expect(replies.map(reply => reply.content)).toEqual([
 +    "Model: Opus 5.5, from this thread's next message.",
 +    "Effort: Max, from this thread's next message.",
 +    "This channel has no session: use it in one of hex's threads or the DM.",
 +    'hex only answers its owner.',
++    "This thread is working; compact it once it's done.",
 +  ])
 +  expect(replies.every(reply => reply.flags === MessageFlags.Ephemeral)).toBe(true)
 +  expect(JSON.parse(readFileSync(join(state, 'threads.json'), 'utf8'))[desk.id]).toMatchObject({ model: 'claude-opus-5-5', effort: 'max' })
 +})
 diff --git a/external_plugins/discord/bot.ts b/external_plugins/discord/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..2d9318989f98cb6a9be78605cde6902d585ee2c8
+index 0000000000000000000000000000000000000000..b04e76da178e45a0b2b2560d9f643ed14b481ed6
 --- /dev/null
 +++ b/external_plugins/discord/bot.ts
-@@ -0,0 +1,974 @@
+@@ -0,0 +1,978 @@
 +#!/usr/bin/env bun
 +import {
 +  Client,
@@ -1385,9 +1400,10 @@ index 0000000000000000000000000000000000000000..2d9318989f98cb6a9be78605cde6902d
 +    asking.set(thread, (asking.get(thread) ?? new Set()).add(sent.id))
 +  }
 +
-+  function settle(thread: string, busy: boolean): void {
++  // A turn that ends with background agents out may still have one of their prompts open.
++  function settle(thread: string, busy: boolean, background: boolean): void {
 +    showTyping(thread, busy)
-+    if (busy) return
++    if (busy || background) return
 +    for (const id of asking.get(thread) ?? []) void threadChannel(thread).then(ch => ch.messages.edit(id, { components: only('No longer waiting') })).catch(() => {})
 +    asking.delete(thread)
 +  }
@@ -1521,7 +1537,8 @@ index 0000000000000000000000000000000000000000..2d9318989f98cb6a9be78605cde6902d
 +          ...(args.text !== undefined ? { content: tappable(args.text as string) } : {}),
 +          ...(files ? { files, attachments: [] } : {}),
 +        })
-+        if (args.text !== undefined) ledger.edited(thread, edited.id, args.text as string)
++        // Unlike Telegram's, a Discord edit keeps the message's buttons, so only a pinned post's text changes in the ledger.
++        if (args.text !== undefined && ledger.pin(thread)?.message === edited.id) ledger.edited(thread, edited.id, args.text as string)
 +        return `edited (id: ${edited.id})`
 +      }
 +      case 'delete_message': {
@@ -1778,19 +1795,19 @@ index 0000000000000000000000000000000000000000..2d9318989f98cb6a9be78605cde6902d
 +    })
 +  }
 +
++  // Discord wants an answer to a tap within three seconds, so the buttons change before anything is fetched.
 +  async function handleTap(tap: ButtonInteraction): Promise<void> {
 +    if (!allowed(tap.user.id)) return void (await tap.deferUpdate())
-+    const ch = await threadChannel(tap.channelId)
 +    const verdict = tap.customId.match(/^perm:(allow|deny):(\w+)$/)
 +    if (verdict) {
 +      await tap.update({ components: verdicts(verdict[2]!, verdict[1]) })
-+      asking.get(ch.id)?.delete(tap.message.id)
-+      return hub.answer(ch.id, verdict[2]!, verdict[1] as 'allow' | 'deny')
++      asking.get(tap.channelId)?.delete(tap.message.id)
++      return hub.answer(tap.channelId, verdict[2]!, verdict[1] as 'allow' | 'deny')
 +    }
 +    const labels = (tap.message.components as ActionRow<ButtonComponent>[]).flatMap(row => row.components.map(button => button.label!))
 +    const chosen = Number(tap.customId)
 +    await tap.update({ components: buttons(labels, chosen) })
-+    picked(ch, labels[chosen]!, tap.createdAt, tap.user, tap.message.id)
++    picked(await threadChannel(tap.channelId), labels[chosen]!, tap.createdAt, tap.user, tap.message.id)
 +  }
 +
 +  async function handleMenu(pick: StringSelectMenuInteraction): Promise<void> {
@@ -1816,6 +1833,8 @@ index 0000000000000000000000000000000000000000..2d9318989f98cb6a9be78605cde6902d
 +        return void (await answer(`${command.commandName === 'model' ? 'Model' : 'Effort'}: ${name}, from this thread's next message.`))
 +      }
 +      case 'compact':
++        if (dms.has(thread)) return void (await answer('The DM starts a fresh session whenever its last one is spent, so there\'s nothing to compact.'))
++        if (typing.has(thread)) return void (await answer('This thread is working; compact it once it\'s done.'))
 +        if (!hub.session(thread)) return void (await answer('This thread has nothing to compact yet.'))
 +        void hub.command(thread, '/compact')
 +        return void (await answer('Compacting this thread.'))
@@ -1904,7 +1923,7 @@ index 0000000000000000000000000000000000000000..2d9318989f98cb6a9be78605cde6902d
 +}
 diff --git a/external_plugins/discord/channel.ts b/external_plugins/discord/channel.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..aa3dfccc33bfc8548a8fe9c51fb6756e4f6cc10e
+index 0000000000000000000000000000000000000000..a7c315eee0126ee2f8813cdf4e26afdfed333d1e
 --- /dev/null
 +++ b/external_plugins/discord/channel.ts
 @@ -0,0 +1,224 @@
@@ -2111,7 +2130,7 @@ index 0000000000000000000000000000000000000000..aa3dfccc33bfc8548a8fe9c51fb6756e
 +          prompt: { type: 'string', description: "The user's request and the context the new session can't find itself: it starts from this prompt alone." },
 +          about: { type: 'string', description: 'One line the user sees first in the new thread, saying what it is for and where it came from.' },
 +          app: { type: 'string', enum: ['discord', 'telegram', 'buzz'], description: 'Where to open it. Default: discord.' },
-+          channel: { type: 'string', description: 'Channel to open it in, by name: a text or forum channel. Defaults to this thread\'s channel; in Buzz, the server\'s first channel.' },
++          channel: { type: 'string', description: 'Channel to open it in, by name: a text or forum channel. Defaults to this thread\'s channel; in Buzz, its #general.' },
 +          tags: { type: 'array', items: { type: 'string' }, description: 'Forum channel only: the post\'s tags, by name.' },
 +        },
 +        required: ['title', 'prompt', 'about'],
@@ -2125,7 +2144,7 @@ index 0000000000000000000000000000000000000000..aa3dfccc33bfc8548a8fe9c51fb6756e
 +        properties: {
 +          to: { type: 'string', enum: ['telegram', 'buzz'] },
 +          title: titleProperty,
-+          channel: { type: 'string', description: 'Buzz only: the channel to open it in, by name. Default: the server\'s first channel.' },
++          channel: { type: 'string', description: 'Buzz only: the channel to open it in, by name. Default: its #general.' },
 +        },
 +        required: ['to'],
 +      },
@@ -3312,10 +3331,10 @@ index a1e15f8b927ca7385a06ebf6eacacbd4e4acd527..00000000000000000000000000000000
 -  `/discord:access` take effect immediately, no restart.
 diff --git a/external_plugins/discord/voice.test.ts b/external_plugins/discord/voice.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..d556b7b281ea186348eace725e22f5e445a531d0
+index 0000000000000000000000000000000000000000..144be75c132be18c56a1ee72881da28820f12764
 --- /dev/null
 +++ b/external_plugins/discord/voice.test.ts
-@@ -0,0 +1,138 @@
+@@ -0,0 +1,141 @@
 +import { expect, mock, test } from 'bun:test'
 +import { EventEmitter } from 'events'
 +import { PassThrough } from 'stream'
@@ -3326,7 +3345,7 @@ index 0000000000000000000000000000000000000000..d556b7b281ea186348eace725e22f5e4
 +const OWNER = '2000'
 +const joined: { options: any; connection: any }[] = []
 +const resources: PassThrough[] = []
-+const player = { play: (resource: { stream: PassThrough }) => void resources.push(resource.stream) }
++const player = Object.assign(new EventEmitter(), { play: (resource: { stream: PassThrough }) => void resources.push(resource.stream) })
 +
 +function connection() {
 +  const voice = new PassThrough({ objectMode: true })
@@ -3397,6 +3416,9 @@ index 0000000000000000000000000000000000000000..d556b7b281ea186348eace725e22f5e4
 +  play(tick(0))
 +  play(tick(4000))
 +  expect(resources).toHaveLength(2)
++  player.emit(real.AudioPlayerStatus.Idle)
++  play(tick(4000))
++  expect(resources).toHaveLength(3)
 +})
 +
 +test('the owner\'s voice is decoded and sent on at 24 kHz, and quiet is sent as silence', async () => {
@@ -3456,10 +3478,10 @@ index 0000000000000000000000000000000000000000..d556b7b281ea186348eace725e22f5e4
 +})
 diff --git a/external_plugins/discord/voice.ts b/external_plugins/discord/voice.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..f459fb990d722bd8dbd38dfc4934508a754fd78b
+index 0000000000000000000000000000000000000000..ce5583e6d8f9bb181c1d7b4fd1c58e3ab0aa588f
 --- /dev/null
 +++ b/external_plugins/discord/voice.ts
-@@ -0,0 +1,158 @@
+@@ -0,0 +1,166 @@
 +import {
 +  joinVoiceChannel,
 +  createAudioPlayer,
@@ -3467,6 +3489,7 @@ index 0000000000000000000000000000000000000000..f459fb990d722bd8dbd38dfc4934508a
 +  entersState,
 +  EndBehaviorType,
 +  StreamType,
++  AudioPlayerStatus,
 +  VoiceConnectionStatus,
 +  type AudioPlayer,
 +} from '@discordjs/voice'
@@ -3514,10 +3537,12 @@ index 0000000000000000000000000000000000000000..f459fb990d722bd8dbd38dfc4934508a
 +
 +// The voice comes as one unbroken stream, its pauses as silence, and Discord shows the bot speaking
 +// for as long as it sends audio. So a pause longer than PAUSE ends a stretch of speech, and the next
-+// sound starts a new one behind a short cushion that absorbs the stream's jitter.
++// sound starts a new one behind a short cushion that absorbs the stream's jitter. A player that ran
++// dry and stopped mid-stretch takes the next sound as a new stretch.
 +export function speaker(player: AudioPlayer) {
 +  let stretch: PassThrough | undefined
 +  let quiet = 0
++  player.on(AudioPlayerStatus.Idle, () => (stretch = undefined))
 +  return (audio: string) => {
 +    const pcm = Buffer.from(audio, 'base64')
 +    quiet = silent(pcm) ? quiet + pcm.length / 48 : 0
@@ -3590,6 +3615,10 @@ index 0000000000000000000000000000000000000000..f459fb990d722bd8dbd38dfc4934508a
 +      Promise.race([entersState(connection, VoiceConnectionStatus.Signalling, 5_000), entersState(connection, VoiceConnectionStatus.Connecting, 5_000)]).catch(end)
 +    })
 +    connection.on(VoiceConnectionStatus.Destroyed, end)
++    connection.on('error', err => {
++      process.stderr.write(`discord hub: the voice connection failed: ${err}\n`)
++      end()
++    })
 +    try {
 +      await entersState(connection, VoiceConnectionStatus.Ready, 20_000)
 +    } catch (err) {
@@ -3598,6 +3627,7 @@ index 0000000000000000000000000000000000000000..f459fb990d722bd8dbd38dfc4934508a
 +    }
 +    if (over) return
 +    const player = createAudioPlayer({ behaviors: { maxMissedFrames: 50 } })
++    player.on('error', err => process.stderr.write(`discord hub: the voice's audio failed: ${err}\n`))
 +    connection.subscribe(player)
 +    try {
 +      held = take('discord', `They joined you in the Discord voice channel ${channel.name}. Answer briefly, then listen.`, { play: speaker(player), end })

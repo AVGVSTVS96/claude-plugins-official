@@ -1077,7 +1077,7 @@ index 0000000000000000000000000000000000000000..41a4f5a98bdbf2b214843f2479aa70d6
 +})
 diff --git a/external_plugins/voice/asks.ts b/external_plugins/voice/asks.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..b33aa3522e9a1a4fa6917530e004c6ef129fd976
+index 0000000000000000000000000000000000000000..85ad9db9dcf9d795daad83929ebf0ccddf60472a
 --- /dev/null
 +++ b/external_plugins/voice/asks.ts
 @@ -0,0 +1,351 @@
@@ -1259,7 +1259,7 @@ index 0000000000000000000000000000000000000000..b33aa3522e9a1a4fa6917530e004c6ef
 +  }
 +
 +  private asked(ref: Ref) {
-+    return this.ledgers.get(ref.app)?.find(ask => ask.thread === ref.thread && ask.message === ref.message)
++    return this.ledgers.get(ref.app)?.find(ask => ask.thread === ref.thread && String(ask.message) === String(ref.message))
 +  }
 +
 +  private open(ref: Ref) {
@@ -2337,7 +2337,7 @@ index 0000000000000000000000000000000000000000..b669c0c364d3eba280d49e6f605a73c9
 +}
 diff --git a/external_plugins/voice/check.ts b/external_plugins/voice/check.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..b8cacf7beff6159c4987f384f3f2f271b17ccd0e
+index 0000000000000000000000000000000000000000..852567aca10545217c2e5cee77920937fefbab9a
 --- /dev/null
 +++ b/external_plugins/voice/check.ts
 @@ -0,0 +1,290 @@
@@ -2569,7 +2569,7 @@ index 0000000000000000000000000000000000000000..b8cacf7beff6159c4987f384f3f2f271
 +// What the pass returned, held to the records: refs and settles name real open questions, a value
 +// is a real button, and a question it settles isn't also one it lists.
 +export function vet(verdict: Verdict, ledgers: Record<string, Asked[]>): Verdict {
-+  const find = (ref: Ref) => ledgers[ref.app]?.find(ask => ask.thread === ref.thread && ask.message === ref.message)
++  const find = (ref: Ref) => ledgers[ref.app]?.find(ask => ask.thread === ref.thread && String(ask.message) === String(ref.message))
 +  const open = (ref: Ref) => {
 +    const ask = find(ref)
 +    return !!ask && !ask.answer && !ask.settled
@@ -2660,10 +2660,10 @@ index 0000000000000000000000000000000000000000..fe72e2341287cae4c88d9d5db57557c4
 +export const PORT = Number(env.VOICE_PORT ?? 8790)
 diff --git a/external_plugins/voice/line.test.ts b/external_plugins/voice/line.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..19ff8f6f6fbe2e586a51bedd016543d4f48bddc8
+index 0000000000000000000000000000000000000000..f7b54c8e527985e41b57badfef0490c7abfb7d7f
 --- /dev/null
 +++ b/external_plugins/voice/line.test.ts
-@@ -0,0 +1,126 @@
+@@ -0,0 +1,148 @@
 +import { expect, test } from 'bun:test'
 +import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 +import { tmpdir } from 'os'
@@ -2672,7 +2672,8 @@ index 0000000000000000000000000000000000000000..19ff8f6f6fbe2e586a51bedd016543d4
 +// A call on a line another client holds (a Discord voice channel), end to end against a stand-in
 +// for OpenAI's live API: the engine runs on its own with a hub that takes everything, and the test
 +// plays the client holding the line, through lines on the engine's stdin and stdout.
-+async function lineCall() {
++// hold: OpenAI never starts the session; refuse: it answers the start with an error.
++async function lineCall({ hold = false, refuse = false } = {}) {
 +  const home = mkdtempSync(join(tmpdir(), 'line-'))
 +  const state = join(home, '.claude', 'channels', 'voice')
 +  mkdirSync(state, { recursive: true })
@@ -2690,7 +2691,8 @@ index 0000000000000000000000000000000000000000..19ff8f6f6fbe2e586a51bedd016543d4
 +        const event = JSON.parse(String(raw))
 +        if (event.type === 'session.start') {
 +          started.push(event.session)
-+          socket.send(JSON.stringify({ type: 'session.started', session: { id: 'sess_discord', expires_at: Date.now() / 1000 + 3600 } }))
++          if (refuse) socket.send(JSON.stringify({ type: 'error', error: { message: 'no capacity' } }))
++          else if (!hold) socket.send(JSON.stringify({ type: 'session.started', session: { id: 'sess_discord', expires_at: Date.now() / 1000 + 3600 } }))
 +        }
 +        if (event.type === 'session.input_audio.append') heard.push(event.audio)
 +        if (event.type === 'session.thinking.append') socket.send(JSON.stringify({ type: 'session.thinking.appended', client_event_id: event.event_id }))
@@ -2789,6 +2791,26 @@ index 0000000000000000000000000000000000000000..19ff8f6f6fbe2e586a51bedd016543d4
 +  await until(() => call.steps.find(step => step.step === 'renew'))
 +  const record = await fetch(`${call.base}/calls/sess_discord`).then(r => r.json())
 +  expect(record).toMatchObject({ id: 'sess_discord', from: 'discord', end: 'you', claude: 'brain' })
++}, 20_000)
++
++test('a line hung up on before its session starts never becomes a call, and one OpenAI refuses ends its line and is reported once', async () => {
++  {
++    await using call = await lineCall({ hold: true })
++    await until(() => call.started[0])
++    call.tell('hangup')
++    await until(() => call.steps.find(step => step.step === 'end'))
++    await Bun.sleep(200)
++    expect((await fetch(`${call.base}/calls`).then(r => r.json())).calls).toEqual([])
++    expect(call.steps.some(step => step.step === 'deliver' || step.step === 'keep')).toBe(false)
++  }
++  await using call = await lineCall({ refuse: true })
++  await until(() => call.steps.find(step => step.step === 'end'))
++  await Bun.sleep(200)
++  const told = call.steps.filter(step => step.step === 'deliver')
++  expect(told).toHaveLength(1)
++  expect(told[0].content).toBe("A call from a Discord voice channel didn't happen: it never connected (OpenAI refused the discord session: no capacity).")
++  const [record] = (await fetch(`${call.base}/calls`).then(r => r.json())).calls
++  expect(record).toMatchObject({ from: 'discord', end: 'no-connect' })
 +}, 20_000)
 diff --git a/external_plugins/voice/links.ts b/external_plugins/voice/links.ts
 new file mode 100644
@@ -3269,10 +3291,10 @@ index 0000000000000000000000000000000000000000..7619ff886830c93cc512bf50df04b012
 +}
 diff --git a/external_plugins/voice/server.ts b/external_plugins/voice/server.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..ad19084f0f99c1eee3573085dba2e02839cef7fc
+index 0000000000000000000000000000000000000000..addc6a240a7574030cce227a3b5312f10d026d01
 --- /dev/null
 +++ b/external_plugins/voice/server.ts
-@@ -0,0 +1,1022 @@
+@@ -0,0 +1,1035 @@
 +import { createHmac, timingSafeEqual } from 'crypto'
 +import { readFileSync } from 'fs'
 +import { dirname, join } from 'path'
@@ -3456,7 +3478,7 @@ index 0000000000000000000000000000000000000000..ad19084f0f99c1eee3573085dba2e028
 +  }
 +  if (call && id) {
 +    await mark(call, { id, state: 'running', text: about, to: thread!.name, agent: thread!.id })
-+    watch(call, id, thread!, false)
++    watch(call, id, thread!, !!app)
 +  }
 +  if (!app) {
 +    try {
@@ -3977,23 +3999,36 @@ index 0000000000000000000000000000000000000000..ad19084f0f99c1eee3573085dba2e028
 +
 +// A call on a line another client holds, like a Discord voice channel: it hands the engine the
 +// caller's audio and plays the voice's, both base64 PCM at 24 kHz, mono, and the engine holds the
-+// call as it does a phone call. The line ends when the call does.
++// call as it does a phone call. The line ends when the call does, and a session refused or hung up
++// on before it started never becomes a call.
 +export function take(from: Source, greeting: string, line: VoiceLine): Held {
 +  if (!KEY) throw new Error(`calls need OPENAI_API_KEY in ${join(STATE_DIR, '.env')}`)
 +  let up = false
-+  const openai = passThrough({
++  let gone = false
++  const openai: WebSocket = passThrough({
 +    name: from,
 +    from,
 +    greeting,
 +    format: { type: 'audio/pcm', rate: 24000 },
 +    play: line.play,
 +    started: () => (up = true),
-+    refused: reason => failed({ from, end: 'no-connect', reason }),
++    refused: reason => {
++      if (!gone) failed({ from, end: 'no-connect', reason })
++      gone = true
++      openai.close()
++      line.end()
++    },
 +    closed: line.end,
 +  })
 +  return {
 +    hear: audio => void (up && openai.send(JSON.stringify({ type: 'session.input_audio.append', audio }))),
-+    hangUp: () => void (openai.readyState === WebSocket.OPEN && openai.send(JSON.stringify({ type: 'session.close', event_id: `close-you-${from}` }))),
++    hangUp: () => {
++      if (!up) {
++        gone = true
++        return openai.close()
++      }
++      if (openai.readyState === WebSocket.OPEN) openai.send(JSON.stringify({ type: 'session.close', event_id: `close-you-${from}` }))
++    },
 +  }
 +}
 +

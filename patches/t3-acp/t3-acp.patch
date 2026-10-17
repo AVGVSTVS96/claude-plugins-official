@@ -447,10 +447,10 @@ index 0000000000000000000000000000000000000000..4f61ec6628b0e757eb267884c1ccaacb
 +})
 diff --git a/external_plugins/t3/bot.ts b/external_plugins/t3/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..3e3272faf43533e91b3117827fb9ea3e2076d5c0
+index 0000000000000000000000000000000000000000..13ea593a5031c2a3537f32dd6f2a5ca0d11de449
 --- /dev/null
 +++ b/external_plugins/t3/bot.ts
-@@ -0,0 +1,266 @@
+@@ -0,0 +1,269 @@
 +#!/usr/bin/env bun
 +import { createServer, type Socket } from 'net'
 +import { Readable, Writable } from 'stream'
@@ -498,10 +498,13 @@ index 0000000000000000000000000000000000000000..3e3272faf43533e91b3117827fb9ea3e
 +  server,
 +  // T3 Code owns its threads, so a handoff leaves this one here and a copy carries on there.
 +  call: async (thread, tool, args) => {
-+    const name = title(args.title as string)
 +    const where = args.channel as string | undefined
-+    if (tool === 'new_thread') return `started thread "${name}" in ${args.app}: ${(await begin(args.app as string, name, args.prompt as string, { about: args.about as string | undefined, where, cwd: hub.cwd(thread) })).link}`
-+    if (tool === 'handoff') return `a copy of this conversation continues in ${args.to}: ${await move(hub, thread, args.to as string, name, where, true)}. You stay here.`
++    if (tool === 'new_thread') {
++      const name = title(args.title as string)
++      const { link } = await begin(args.app as string, name, args.prompt as string, { about: args.about as string | undefined, where, cwd: hub.cwd(thread) })
++      return `started thread "${name}" in ${args.app}: ${link}`
++    }
++    if (tool === 'handoff') return `a copy of this conversation continues in ${args.to}: ${await move(hub, thread, args.to as string, title(args.title as string), where, true)}. You stay here.`
 +    throw new Error(`unknown tool: ${tool}`)
 +  },
 +  // A new thread's session starts with its first prompt and is only known once its channel connects.
@@ -975,7 +978,7 @@ index 0000000000000000000000000000000000000000..7112054b720266b866c74bc3b48350f6
 +optional = false
 diff --git a/external_plugins/t3/channel.ts b/external_plugins/t3/channel.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..0a0a7a7979ded43c3d5a850bb63f001eb140c7f9
+index 0000000000000000000000000000000000000000..55ff7093b0786a39e11c9a2bc40879d69bbd12ad
 --- /dev/null
 +++ b/external_plugins/t3/channel.ts
 @@ -0,0 +1,45 @@
@@ -1004,7 +1007,7 @@ index 0000000000000000000000000000000000000000..0a0a7a7979ded43c3d5a850bb63f001e
 +          title: titleProperty,
 +          prompt: { type: 'string', description: "The user's request and the context the new session can't find itself: it starts from this prompt alone." },
 +          about: { type: 'string', description: 'One line the user sees first in the new thread, saying what it is for and where it came from.' },
-+          channel: { type: 'string', description: 'Discord or Buzz only: the channel to open it in, by name. Default: the server\'s first channel.' },
++          channel: { type: 'string', description: 'Discord or Buzz only: the channel to open it in, by name. Default: Discord\'s system channel, or Buzz\'s #general.' },
 +        },
 +        required: ['app', 'title', 'prompt', 'about'],
 +      },
@@ -1017,7 +1020,7 @@ index 0000000000000000000000000000000000000000..0a0a7a7979ded43c3d5a850bb63f001e
 +        properties: {
 +          to: { type: 'string', enum: ['discord', 'telegram', 'buzz'] },
 +          title: titleProperty,
-+          channel: { type: 'string', description: 'Discord or Buzz only: the channel to open it in, by name. Default: the server\'s first channel.' },
++          channel: { type: 'string', description: 'Discord or Buzz only: the channel to open it in, by name. Default: Discord\'s system channel, or Buzz\'s #general.' },
 +        },
 +        required: ['to', 'title'],
 +      },

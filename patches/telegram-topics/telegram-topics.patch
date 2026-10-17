@@ -701,10 +701,10 @@ index 0000000000000000000000000000000000000000..aca829fef65ae4a47b813f8c0cd32e9b
 +})
 diff --git a/external_plugins/telegram/bot.ts b/external_plugins/telegram/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..2d428f2feaec1afb190d6c9560e50a6775c284ad
+index 0000000000000000000000000000000000000000..59403189eddd5807118f50ff934e7fd3c0bfe8e0
 --- /dev/null
 +++ b/external_plugins/telegram/bot.ts
-@@ -0,0 +1,968 @@
+@@ -0,0 +1,969 @@
 +#!/usr/bin/env bun
 +import { Bot, GrammyError, InputFile, type Context } from 'grammy'
 +import type { Chat, MessageEntity, MessageOrigin, ReactionTypeEmoji } from 'grammy/types'
@@ -941,9 +941,10 @@ index 0000000000000000000000000000000000000000..2d428f2feaec1afb190d6c9560e50a67
 +  asking.set(thread, (asking.get(thread) ?? new Set()).add(sent.message_id))
 +}
 +
-+function settle(thread: string, busy: boolean): void {
++// A turn that ends with background agents out may still have one of their prompts open.
++function settle(thread: string, busy: boolean, background: boolean): void {
 +  showTyping(thread, busy)
-+  if (busy) return
++  if (busy || background) return
 +  const { chat_id } = target(thread)
 +  for (const id of asking.get(thread) ?? []) {
 +    void bot.api.editMessageReplyMarkup(chat_id, id, {

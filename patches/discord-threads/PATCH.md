@@ -4,7 +4,7 @@ id: discord-threads
 summary: Rework the Discord channel so every thread in a server is its own Claude Code session, Claude-tag style, through the thread hub.
 baseline: ea10b213686c90bb1984b2016937310e05336cf3
 patch_file: discord-threads.patch
-patch_sha256: d3ee11e411b1bb3d90d4a59275adbe38f95901db2751c927570f449659a2f58f
+patch_sha256: 803cc26fd189b4466b7c42f787b516f4a2efaa6eb03f1ad2cf4c518809c649d6
 ---
 
 ## Intent
@@ -101,8 +101,8 @@ Discord is the place for deeper work, Claude-tag style:
 - Permission prompts (`claude/channel/permission`) ask in the session's own
   thread: the tool, its description and its input in a code block, with
   Allow and Deny buttons that lock on the choice. A prompt still open when
-  the turn ends was answered in the session itself, so its buttons say it's
-  no longer waiting. Claude Code relays no prompt for a tool that needs the
+  the turn ends with no background agents out was answered in the session
+  itself, so its buttons say it's no longer waiting. Claude Code relays no prompt for a tool that needs the
   user's own input (AskUserQuestion, ExitPlanMode), so those never come.
 - Images in a message arrive downloaded, as `image_path` (paths joined by
   `; `), as Telegram's photos do; other files stay listed for
@@ -110,7 +110,9 @@ Discord is the place for deeper work, Claude-tag style:
 - Slash commands, registered globally on connect for the server and the
   bot's DM, control a thread outside its conversation and answer only the
   owner, privately: `/model` and `/effort` (the hub's `MODELS` and
-  `EFFORTS`, from the thread's next message), `/compact` and `/stop`.
+  `EFFORTS`, from the thread's next message), `/compact` (once the thread
+  isn't working) and `/stop`. A tap is answered before anything is fetched,
+  inside Discord's three seconds.
 - A first login that fails (no network yet at boot) is tried again with
   backoff, up to a minute apart; only a bad token is final. discord.js
   reconnects a session it already has.
