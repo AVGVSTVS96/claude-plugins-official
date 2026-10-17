@@ -226,7 +226,7 @@ function claude(input: string, hexDir: string) {
 // What the pass returned, held to the records: refs and settles name real open questions, a value
 // is a real button, and a question it settles isn't also one it lists.
 export function vet(verdict: Verdict, ledgers: Record<string, Asked[]>): Verdict {
-  const find = (ref: Ref) => ledgers[ref.app]?.find(ask => ask.thread === ref.thread && ask.message === ref.message)
+  const find = (ref: Ref) => ledgers[ref.app]?.find(ask => ask.thread === ref.thread && String(ask.message) === String(ref.message))
   const open = (ref: Ref) => {
     const ask = find(ref)
     return !!ask && !ask.answer && !ask.settled

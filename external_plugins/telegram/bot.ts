@@ -234,9 +234,10 @@ async function ask(thread: string, request: Permission): Promise<void> {
   asking.set(thread, (asking.get(thread) ?? new Set()).add(sent.message_id))
 }
 
-function settle(thread: string, busy: boolean): void {
+// A turn that ends with background agents out may still have one of their prompts open.
+function settle(thread: string, busy: boolean, background: boolean): void {
   showTyping(thread, busy)
-  if (busy) return
+  if (busy || background) return
   const { chat_id } = target(thread)
   for (const id of asking.get(thread) ?? []) {
     void bot.api.editMessageReplyMarkup(chat_id, id, {

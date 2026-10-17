@@ -455,9 +455,10 @@ function serve(token: string) {
     asking.set(thread, (asking.get(thread) ?? new Set()).add(sent.id))
   }
 
-  function settle(thread: string, busy: boolean): void {
+  // A turn that ends with background agents out may still have one of their prompts open.
+  function settle(thread: string, busy: boolean, background: boolean): void {
     showTyping(thread, busy)
-    if (busy) return
+    if (busy || background) return
     for (const id of asking.get(thread) ?? []) void threadChannel(thread).then(ch => ch.messages.edit(id, { components: only('No longer waiting') })).catch(() => {})
     asking.delete(thread)
   }
@@ -591,7 +592,8 @@ function serve(token: string) {
           ...(args.text !== undefined ? { content: tappable(args.text as string) } : {}),
           ...(files ? { files, attachments: [] } : {}),
         })
-        if (args.text !== undefined) ledger.edited(thread, edited.id, args.text as string)
+        // Unlike Telegram's, a Discord edit keeps the message's buttons, so only a pinned post's text changes in the ledger.
+        if (args.text !== undefined && ledger.pin(thread)?.message === edited.id) ledger.edited(thread, edited.id, args.text as string)
         return `edited (id: ${edited.id})`
       }
       case 'delete_message': {
@@ -848,19 +850,19 @@ function serve(token: string) {
     })
   }
 
+  // Discord wants an answer to a tap within three seconds, so the buttons change before anything is fetched.
   async function handleTap(tap: ButtonInteraction): Promise<void> {
     if (!allowed(tap.user.id)) return void (await tap.deferUpdate())
-    const ch = await threadChannel(tap.channelId)
     const verdict = tap.customId.match(/^perm:(allow|deny):(\w+)$/)
     if (verdict) {
       await tap.update({ components: verdicts(verdict[2]!, verdict[1]) })
-      asking.get(ch.id)?.delete(tap.message.id)
-      return hub.answer(ch.id, verdict[2]!, verdict[1] as 'allow' | 'deny')
+      asking.get(tap.channelId)?.delete(tap.message.id)
+      return hub.answer(tap.channelId, verdict[2]!, verdict[1] as 'allow' | 'deny')
     }
     const labels = (tap.message.components as ActionRow<ButtonComponent>[]).flatMap(row => row.components.map(button => button.label!))
     const chosen = Number(tap.customId)
     await tap.update({ components: buttons(labels, chosen) })
-    picked(ch, labels[chosen]!, tap.createdAt, tap.user, tap.message.id)
+    picked(await threadChannel(tap.channelId), labels[chosen]!, tap.createdAt, tap.user, tap.message.id)
   }
 
   async function handleMenu(pick: StringSelectMenuInteraction): Promise<void> {
@@ -887,6 +889,7 @@ function serve(token: string) {
       }
       case 'compact':
         if (dms.has(thread)) return void (await answer('The DM starts a fresh session whenever its last one is spent, so there\'s nothing to compact.'))
+        if (typing.has(thread)) return void (await answer('This thread is working; compact it once it\'s done.'))
         if (!hub.session(thread)) return void (await answer('This thread has nothing to compact yet.'))
         void hub.command(thread, '/compact')
         return void (await answer('Compacting this thread.'))

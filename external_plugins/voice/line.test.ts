@@ -6,7 +6,8 @@ import { join } from 'path'
 // A call on a line another client holds (a Discord voice channel), end to end against a stand-in
 // for OpenAI's live API: the engine runs on its own with a hub that takes everything, and the test
 // plays the client holding the line, through lines on the engine's stdin and stdout.
-async function lineCall() {
+// hold: OpenAI never starts the session; refuse: it answers the start with an error.
+async function lineCall({ hold = false, refuse = false } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'line-'))
   const state = join(home, '.claude', 'channels', 'voice')
   mkdirSync(state, { recursive: true })
@@ -24,7 +25,8 @@ async function lineCall() {
         const event = JSON.parse(String(raw))
         if (event.type === 'session.start') {
           started.push(event.session)
-          socket.send(JSON.stringify({ type: 'session.started', session: { id: 'sess_discord', expires_at: Date.now() / 1000 + 3600 } }))
+          if (refuse) socket.send(JSON.stringify({ type: 'error', error: { message: 'no capacity' } }))
+          else if (!hold) socket.send(JSON.stringify({ type: 'session.started', session: { id: 'sess_discord', expires_at: Date.now() / 1000 + 3600 } }))
         }
         if (event.type === 'session.input_audio.append') heard.push(event.audio)
         if (event.type === 'session.thinking.append') socket.send(JSON.stringify({ type: 'session.thinking.appended', client_event_id: event.event_id }))
@@ -123,4 +125,24 @@ test("a call on another client's line is held like a phone call: PCM both ways, 
   await until(() => call.steps.find(step => step.step === 'renew'))
   const record = await fetch(`${call.base}/calls/sess_discord`).then(r => r.json())
   expect(record).toMatchObject({ id: 'sess_discord', from: 'discord', end: 'you', claude: 'brain' })
+}, 20_000)
+
+test('a line hung up on before its session starts never becomes a call, and one OpenAI refuses ends its line and is reported once', async () => {
+  {
+    await using call = await lineCall({ hold: true })
+    await until(() => call.started[0])
+    call.tell('hangup')
+    await until(() => call.steps.find(step => step.step === 'end'))
+    await Bun.sleep(200)
+    expect((await fetch(`${call.base}/calls`).then(r => r.json())).calls).toEqual([])
+    expect(call.steps.some(step => step.step === 'deliver' || step.step === 'keep')).toBe(false)
+  }
+  await using call = await lineCall({ refuse: true })
+  await until(() => call.steps.find(step => step.step === 'end'))
+  await Bun.sleep(200)
+  const told = call.steps.filter(step => step.step === 'deliver')
+  expect(told).toHaveLength(1)
+  expect(told[0].content).toBe("A call from a Discord voice channel didn't happen: it never connected (OpenAI refused the discord session: no capacity).")
+  const [record] = (await fetch(`${call.base}/calls`).then(r => r.json())).calls
+  expect(record).toMatchObject({ from: 'discord', end: 'no-connect' })
 }, 20_000)

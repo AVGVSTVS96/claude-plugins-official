@@ -493,6 +493,9 @@ test('a permission prompt asks in the thread with Allow and Deny, a tap answers 
 
   await ask(prompt('fghij'))
   const open = await until(() => here.posted.findLast((m: any) => m.content.startsWith('🔐') && m !== asked))
+  send({ type: 'state', thread: here.id, busy: false, background: true })
+  await Bun.sleep(100)
+  expect(done.some(d => d.edit === open.id)).toBe(false)
   send({ type: 'state', thread: here.id, busy: false })
   const moot = await until(() => done.find(d => d.edit === open.id))
   expect(labels(moot.options.components)).toEqual(['No longer waiting'])
@@ -518,6 +521,11 @@ test('a question with buttons goes in the ledger: a tap answers it there, and on
 
   await call('reply', { text: 'Ship today?', buttons: ['Yes', 'No'] })
   const later = here.posted.at(-1)
+  await call('edit_message', { message_id: later.id, text: 'Ship today, before five?' })
+  expect(book().asks.find((a: any) => a.message === later.id).settled).toBeUndefined()
+  await call('pin', { message_id: later.id })
+  await call('edit_message', { message_id: later.id, text: 'Status: shipping' })
+  expect(book().pins[here.id]).toMatchObject({ message: later.id, text: 'Status: shipping' })
   send({ type: 'settle', thread: here.id, message: later.id, note: 'Settled: shipped' })
   await until(() => book().asks.find((a: any) => a.message === later.id).settled)
   expect(labels(done.findLast(d => d.edit === later.id).options.components)).toEqual(['Settled: shipped'])
@@ -597,11 +605,17 @@ test('slash commands set a thread\'s model and effort, and answer only the owner
   command('stop', undefined, owner, general.id)
   command('stop', undefined, { id: '8888', username: 'someone', partial: false })
   await until(() => replies.length === 4)
+  send({ type: 'state', thread: here.id, busy: true })
+  await Bun.sleep(50)
+  command('compact', undefined, owner, here.id)
+  await until(() => replies.length === 5)
+  send({ type: 'state', thread: here.id, busy: false })
   expect(replies.map(reply => reply.content)).toEqual([
     "Model: Opus 5.5, from this thread's next message.",
     "Effort: Max, from this thread's next message.",
     "This channel has no session: use it in one of hex's threads or the DM.",
     'hex only answers its owner.',
+    "This thread is working; compact it once it's done.",
   ])
   expect(replies.every(reply => reply.flags === MessageFlags.Ephemeral)).toBe(true)
   expect(JSON.parse(readFileSync(join(state, 'threads.json'), 'utf8'))[desk.id]).toMatchObject({ model: 'claude-opus-5-5', effort: 'max' })

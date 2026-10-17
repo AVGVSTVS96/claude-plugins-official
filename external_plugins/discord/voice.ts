@@ -5,6 +5,7 @@ import {
   entersState,
   EndBehaviorType,
   StreamType,
+  AudioPlayerStatus,
   VoiceConnectionStatus,
   type AudioPlayer,
 } from '@discordjs/voice'
@@ -52,10 +53,12 @@ function silent(pcm: Buffer): boolean {
 
 // The voice comes as one unbroken stream, its pauses as silence, and Discord shows the bot speaking
 // for as long as it sends audio. So a pause longer than PAUSE ends a stretch of speech, and the next
-// sound starts a new one behind a short cushion that absorbs the stream's jitter.
+// sound starts a new one behind a short cushion that absorbs the stream's jitter. A player that ran
+// dry and stopped mid-stretch takes the next sound as a new stretch.
 export function speaker(player: AudioPlayer) {
   let stretch: PassThrough | undefined
   let quiet = 0
+  player.on(AudioPlayerStatus.Idle, () => (stretch = undefined))
   return (audio: string) => {
     const pcm = Buffer.from(audio, 'base64')
     quiet = silent(pcm) ? quiet + pcm.length / 48 : 0
@@ -128,6 +131,10 @@ export function voiceCalls(client: Client, owner: (user: string) => boolean) {
       Promise.race([entersState(connection, VoiceConnectionStatus.Signalling, 5_000), entersState(connection, VoiceConnectionStatus.Connecting, 5_000)]).catch(end)
     })
     connection.on(VoiceConnectionStatus.Destroyed, end)
+    connection.on('error', err => {
+      process.stderr.write(`discord hub: the voice connection failed: ${err}\n`)
+      end()
+    })
     try {
       await entersState(connection, VoiceConnectionStatus.Ready, 20_000)
     } catch (err) {
@@ -136,6 +143,7 @@ export function voiceCalls(client: Client, owner: (user: string) => boolean) {
     }
     if (over) return
     const player = createAudioPlayer({ behaviors: { maxMissedFrames: 50 } })
+    player.on('error', err => process.stderr.write(`discord hub: the voice's audio failed: ${err}\n`))
     connection.subscribe(player)
     try {
       held = take('discord', `They joined you in the Discord voice channel ${channel.name}. Answer briefly, then listen.`, { play: speaker(player), end })

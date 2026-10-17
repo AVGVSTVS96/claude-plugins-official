@@ -176,7 +176,7 @@ export class Asks extends Changes {
   }
 
   private asked(ref: Ref) {
-    return this.ledgers.get(ref.app)?.find(ask => ask.thread === ref.thread && ask.message === ref.message)
+    return this.ledgers.get(ref.app)?.find(ask => ask.thread === ref.thread && String(ask.message) === String(ref.message))
   }
 
   private open(ref: Ref) {

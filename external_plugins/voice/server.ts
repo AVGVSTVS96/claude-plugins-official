@@ -181,7 +181,7 @@ async function pass(name: string, about: string, text: string, app?: string, whe
   }
   if (call && id) {
     await mark(call, { id, state: 'running', text: about, to: thread!.name, agent: thread!.id })
-    watch(call, id, thread!, false)
+    watch(call, id, thread!, !!app)
   }
   if (!app) {
     try {
@@ -702,23 +702,36 @@ function answer(twilio: Bun.ServerWebSocket<Phone>) {
 
 // A call on a line another client holds, like a Discord voice channel: it hands the engine the
 // caller's audio and plays the voice's, both base64 PCM at 24 kHz, mono, and the engine holds the
-// call as it does a phone call. The line ends when the call does.
+// call as it does a phone call. The line ends when the call does, and a session refused or hung up
+// on before it started never becomes a call.
 export function take(from: Source, greeting: string, line: VoiceLine): Held {
   if (!KEY) throw new Error(`calls need OPENAI_API_KEY in ${join(STATE_DIR, '.env')}`)
   let up = false
-  const openai = passThrough({
+  let gone = false
+  const openai: WebSocket = passThrough({
     name: from,
     from,
     greeting,
     format: { type: 'audio/pcm', rate: 24000 },
     play: line.play,
     started: () => (up = true),
-    refused: reason => failed({ from, end: 'no-connect', reason }),
+    refused: reason => {
+      if (!gone) failed({ from, end: 'no-connect', reason })
+      gone = true
+      openai.close()
+      line.end()
+    },
     closed: line.end,
   })
   return {
     hear: audio => void (up && openai.send(JSON.stringify({ type: 'session.input_audio.append', audio }))),
-    hangUp: () => void (openai.readyState === WebSocket.OPEN && openai.send(JSON.stringify({ type: 'session.close', event_id: `close-you-${from}` }))),
+    hangUp: () => {
+      if (!up) {
+        gone = true
+        return openai.close()
+      }
+      if (openai.readyState === WebSocket.OPEN) openai.send(JSON.stringify({ type: 'session.close', event_id: `close-you-${from}` }))
+    },
   }
 }
 

@@ -23,7 +23,7 @@ export const server: ChannelServer = {
           title: titleProperty,
           prompt: { type: 'string', description: "The user's request and the context the new session can't find itself: it starts from this prompt alone." },
           about: { type: 'string', description: 'One line the user sees first in the new thread, saying what it is for and where it came from.' },
-          channel: { type: 'string', description: 'Discord or Buzz only: the channel to open it in, by name. Default: the server\'s first channel.' },
+          channel: { type: 'string', description: 'Discord or Buzz only: the channel to open it in, by name. Default: Discord\'s system channel, or Buzz\'s #general.' },
         },
         required: ['app', 'title', 'prompt', 'about'],
       },
@@ -36,7 +36,7 @@ export const server: ChannelServer = {
         properties: {
           to: { type: 'string', enum: ['discord', 'telegram', 'buzz'] },
           title: titleProperty,
-          channel: { type: 'string', description: 'Discord or Buzz only: the channel to open it in, by name. Default: the server\'s first channel.' },
+          channel: { type: 'string', description: 'Discord or Buzz only: the channel to open it in, by name. Default: Discord\'s system channel, or Buzz\'s #general.' },
         },
         required: ['to', 'title'],
       },

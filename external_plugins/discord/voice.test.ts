@@ -8,7 +8,7 @@ import { engine } from '../../hub/hub.ts'
 const OWNER = '2000'
 const joined: { options: any; connection: any }[] = []
 const resources: PassThrough[] = []
-const player = { play: (resource: { stream: PassThrough }) => void resources.push(resource.stream) }
+const player = Object.assign(new EventEmitter(), { play: (resource: { stream: PassThrough }) => void resources.push(resource.stream) })
 
 function connection() {
   const voice = new PassThrough({ objectMode: true })
@@ -79,6 +79,9 @@ test('the voice plays in stretches of speech: silence before it is skipped, a sh
   play(tick(0))
   play(tick(4000))
   expect(resources).toHaveLength(2)
+  player.emit(real.AudioPlayerStatus.Idle)
+  play(tick(4000))
+  expect(resources).toHaveLength(3)
 })
 
 test('the owner\'s voice is decoded and sent on at 24 kHz, and quiet is sent as silence', async () => {
