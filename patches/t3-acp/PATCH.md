@@ -4,7 +4,7 @@ id: t3-acp
 summary: Serve the agent to T3 Code as an ACP agent, where every T3 thread is its own Claude Code session in that thread's project, through the thread hub.
 baseline: ea10b213686c90bb1984b2016937310e05336cf3
 patch_file: t3-acp.patch
-patch_sha256: cb19cbc276e741c25ce80964ee92a73141dc6f5097806e0fe781a57260e70f18
+patch_sha256: 5b4db49e53e79e36333032ab53b6d93c7c222c8e96418d0be7f173b86313ee62
 ---
 
 ## Intent
@@ -48,7 +48,12 @@ agent's work itself, so the session's own output is the conversation:
   workspace Claude Code doesn't trust yet.
 - `channel.ts` is the channel the hub serves each session over HTTP
   (`.mcp.json`). It delivers T3's messages and tells the session that its
-  output is the reply; it has no tools.
+  output is the reply. Its tools reach the chat apps: `new_thread(app, title,
+  prompt, about)` opens a Discord, Telegram or Buzz thread whose session works
+  in this thread's project (the hub's `begin`), and `handoff(to, title)`
+  continues the conversation there as a copy (`move` with copy), since T3 Code
+  owns its threads and this one stays.
+- The model and effort pickers offer the hub's `MODELS` and `EFFORTS`.
 
 ## Invariants
 

@@ -1533,10 +1533,10 @@ index 0000000000000000000000000000000000000000..cc2bb0441298bbfae3d14d0da5450063
 +})
 diff --git a/external_plugins/buzz/bot.ts b/external_plugins/buzz/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..5c6804c39e952daf7a5e9cdcbac7c13cc60a08b8
+index 0000000000000000000000000000000000000000..1ed8764f8d18a3b1d41e15298564731ee1c1f0b0
 --- /dev/null
 +++ b/external_plugins/buzz/bot.ts
-@@ -0,0 +1,884 @@
+@@ -0,0 +1,887 @@
 +#!/usr/bin/env bun
 +import { readFileSync, writeFileSync, mkdirSync, statSync, realpathSync, chmodSync, renameSync } from 'fs'
 +import { createHash } from 'crypto'
@@ -1545,7 +1545,7 @@ index 0000000000000000000000000000000000000000..5c6804c39e952daf7a5e9cdcbac7c13c
 +import { finalizeEvent, type Event } from 'nostr-tools/pure'
 +import { decode } from 'nostr-tools/nip19'
 +import { hexToBytes } from 'nostr-tools/utils'
-+import { startHub, clients, move, tappable, title, type Message } from '../../hub/hub.ts'
++import { startHub, clients, begin, move, tappable, title, type Message } from '../../hub/hub.ts'
 +import { server } from './channel.ts'
 +import { connectRelay } from './relay.ts'
 +import { startActivity } from './activity.ts'
@@ -2052,7 +2052,10 @@ index 0000000000000000000000000000000000000000..5c6804c39e952daf7a5e9cdcbac7c13c
 +  async function call(caller: string, tool: string, args: Record<string, unknown>): Promise<string> {
 +    if (tool === 'new_thread') {
 +      const name = title(args.title as string)
-+      const { thread } = await place(name, (args.channel as string | undefined) ?? await channelOf(caller), args.about as string | undefined)
++      const app = (args.app as string | undefined) ?? 'buzz'
++      const about = args.about as string | undefined
++      if (app !== 'buzz') return `started thread "${name}" in ${app}: ${(await begin(app, name, args.prompt as string, { about, where: args.channel as string | undefined })).link}`
++      const { thread } = await place(name, (args.channel as string | undefined) ?? await channelOf(caller), about)
 +      hub.open(thread, name, args.prompt as string)
 +      return `started thread "${name}": ${link(homes.get(thread)!, thread)}`
 +    }
@@ -2161,7 +2164,7 @@ index 0000000000000000000000000000000000000000..5c6804c39e952daf7a5e9cdcbac7c13c
 +      case 'handoff': {
 +        const to = args.to as string
 +        const name = args.title ? title(args.title as string) : hub.name(thread) ?? 'Buzz'
-+        const target = await move(hub, thread, to, name)
++        const target = await move(hub, thread, to, name, args.channel as string | undefined)
 +        await post(thread, `Moved to ${to}: ${target}`)
 +        return `moving to ${to}: ${target}. Your session stops here once this turn ends and resumes there.`
 +      }
@@ -2701,10 +2704,10 @@ index 0000000000000000000000000000000000000000..7112054b720266b866c74bc3b48350f6
 +optional = false
 diff --git a/external_plugins/buzz/channel.ts b/external_plugins/buzz/channel.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..cd0dc032eff9e0170fe3c26aa8a4a2207c20b2ab
+index 0000000000000000000000000000000000000000..f6366831afc368fa9953fd1d4ccf075af3469e8e
 --- /dev/null
 +++ b/external_plugins/buzz/channel.ts
-@@ -0,0 +1,207 @@
+@@ -0,0 +1,209 @@
 +import type { ChannelServer } from '../../hub/hub.ts'
 +
 +const titleProperty = { type: 'string', description: 'One word, like a chat name ("Anchors", "Frontier").' }
@@ -2721,7 +2724,7 @@ index 0000000000000000000000000000000000000000..cd0dc032eff9e0170fe3c26aa8a4a220
 +    '',
 +    'Each channel has one shared canvas, a Markdown document the user opens from the channel\'s details: canvas() reads it with its revision, and canvas(text, revision) replaces it, refused if someone changed it since that revision. presence tells you whether the user is online, away or offline.',
 +    '',
-+    'new_thread opens another thread with its own fresh session and hands it your prompt. Use it for work the user will want to follow or talk to on its own. handoff moves this whole conversation to another app, such as telegram, when the user asks: you stop here and continue there with your memory.',
++    'new_thread opens another thread with its own fresh session and hands it your prompt. Use it for work the user will want to follow or talk to on its own. With app: "discord" or "telegram" it opens the thread there instead. handoff moves this whole conversation to Telegram or Discord when the user asks: you stop here and continue there with your memory.',
 +    '',
 +    "fetch_messages pulls real Buzz history, from this thread by default. The tag's channel attribute names the channel this thread is in: fetch_messages(channel) reads that channel's top-level messages, a message with a thread shows its reply count, and fetch_messages(thread: that message's id) reads the thread. When the user refers to earlier work or talk in the channel, read it rather than saying you can't see it. search_messages finds older messages by their words.",
 +  ].join('\n'),
@@ -2893,7 +2896,8 @@ index 0000000000000000000000000000000000000000..cd0dc032eff9e0170fe3c26aa8a4a220
 +          title: titleProperty,
 +          prompt: { type: 'string', description: "The user's request and the context the new session can't find itself: it starts from this prompt alone." },
 +          about: { type: 'string', description: 'One line the user sees first in the new thread, saying what it is for and where it came from.' },
-+          channel: { type: 'string', description: 'Channel to open it in, by name. Defaults to this thread\'s channel.' },
++          app: { type: 'string', enum: ['buzz', 'discord', 'telegram'], description: 'Where to open it. Default: buzz.' },
++          channel: { type: 'string', description: 'Channel to open it in, by name. Defaults to this thread\'s channel; in Discord, the server\'s first channel.' },
 +        },
 +        required: ['title', 'prompt', 'about'],
 +      },
@@ -2906,6 +2910,7 @@ index 0000000000000000000000000000000000000000..cd0dc032eff9e0170fe3c26aa8a4a220
 +        properties: {
 +          to: { type: 'string', enum: ['telegram', 'discord'] },
 +          title: titleProperty,
++          channel: { type: 'string', description: 'Discord only: the channel to open it in, by name. Default: the server\'s first channel.' },
 +        },
 +        required: ['to'],
 +      },

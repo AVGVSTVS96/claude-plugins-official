@@ -447,10 +447,10 @@ index 0000000000000000000000000000000000000000..4f61ec6628b0e757eb267884c1ccaacb
 +})
 diff --git a/external_plugins/t3/bot.ts b/external_plugins/t3/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..7bbcaa42d88e1699da93337f18bac2003590b6ec
+index 0000000000000000000000000000000000000000..3e3272faf43533e91b3117827fb9ea3e2076d5c0
 --- /dev/null
 +++ b/external_plugins/t3/bot.ts
-@@ -0,0 +1,275 @@
+@@ -0,0 +1,266 @@
 +#!/usr/bin/env bun
 +import { createServer, type Socket } from 'net'
 +import { Readable, Writable } from 'stream'
@@ -460,7 +460,7 @@ index 0000000000000000000000000000000000000000..7bbcaa42d88e1699da93337f18bac200
 +import { fileURLToPath } from 'url'
 +import { randomUUID } from 'crypto'
 +import { agent, ndJsonStream, PROTOCOL_VERSION, RequestError, type AgentContext, type ContentBlock, type McpServer, type PromptResponse, type SessionConfigOption, type SessionNotification, type StopReason } from '@agentclientprotocol/sdk'
-+import { startHub } from '../../hub/hub.ts'
++import { startHub, begin, move, title, MODELS, EFFORTS } from '../../hub/hub.ts'
 +import { server } from './channel.ts'
 +import { follow, transcriptPath } from './transcript.ts'
 +import { version } from './package.json'
@@ -473,20 +473,6 @@ index 0000000000000000000000000000000000000000..7bbcaa42d88e1699da93337f18bac200
 +const SCRATCH = join(HOME, '.t3', 'scratch')
 +const CLAUDE_JSON = join(HOME, '.claude.json')
 +const COMMANDS = [{ name: 'compact', description: 'Summarize the conversation so far to free up context' }]
-+const MODELS = [
-+  { value: 'claude-opus-5-5', name: 'Opus 5.5', alias: 'opus' },
-+  { value: 'claude-sonnet-5-5', name: 'Sonnet 5.5', alias: 'sonnet' },
-+  { value: 'claude-haiku-5-5', name: 'Haiku 5.5', alias: 'haiku' },
-+  { value: 'claude-fable-5-1', name: 'Fable 5.1', alias: 'fable' },
-+]
-+const EFFORTS = [
-+  { value: 'low', name: 'Low' },
-+  { value: 'medium', name: 'Medium' },
-+  { value: 'high', name: 'High' },
-+  { value: 'xhigh', name: 'Extra High' },
-+  { value: 'max', name: 'Max' },
-+]
-+
 +type Turn = {
 +  client: AgentContext
 +  reader?: ReturnType<typeof follow>
@@ -510,7 +496,12 @@ index 0000000000000000000000000000000000000000..7bbcaa42d88e1699da93337f18bac200
 +  stateDir: STATE_DIR,
 +  channel: process.env.T3_CHANNEL ?? 'plugin:t3@hex',
 +  server,
-+  call: async (_, tool) => {
++  // T3 Code owns its threads, so a handoff leaves this one here and a copy carries on there.
++  call: async (thread, tool, args) => {
++    const name = title(args.title as string)
++    const where = args.channel as string | undefined
++    if (tool === 'new_thread') return `started thread "${name}" in ${args.app}: ${(await begin(args.app as string, name, args.prompt as string, { about: args.about as string | undefined, where, cwd: hub.cwd(thread) })).link}`
++    if (tool === 'handoff') return `a copy of this conversation continues in ${args.to}: ${await move(hub, thread, args.to as string, name, where, true)}. You stay here.`
 +    throw new Error(`unknown tool: ${tool}`)
 +  },
 +  // A new thread's session starts with its first prompt and is only known once its channel connects.
@@ -984,11 +975,13 @@ index 0000000000000000000000000000000000000000..7112054b720266b866c74bc3b48350f6
 +optional = false
 diff --git a/external_plugins/t3/channel.ts b/external_plugins/t3/channel.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..20cb5c46ca51b5dcb034d463719c0aaf961a1db0
+index 0000000000000000000000000000000000000000..0a0a7a7979ded43c3d5a850bb63f001eb140c7f9
 --- /dev/null
 +++ b/external_plugins/t3/channel.ts
-@@ -0,0 +1,12 @@
+@@ -0,0 +1,45 @@
 +import type { ChannelServer } from '../../hub/hub.ts'
++
++const titleProperty = { type: 'string', description: 'One word, like a chat name ("Anchors", "Frontier").' }
 +
 +// What each session's channel says and offers; the hub serves it over HTTP.
 +export const server: ChannelServer = {
@@ -997,8 +990,39 @@ index 0000000000000000000000000000000000000000..20cb5c46ca51b5dcb034d463719c0aaf
 +    'This session is one T3 Code thread. Unlike the chat apps, the user reads this session itself: T3 Code shows your text, tool calls and edits live as you work. So answer in plain text, as you would in a terminal; there is no reply tool here.',
 +    '',
 +    'Messages arrive as <channel source="t3" ts="...">. Images and files the user attaches show up in them as absolute paths: Read them. Your working directory is the project this thread was opened in.',
++    '',
++    'new_thread opens a thread in one of hex\'s chat apps (Discord, Telegram or Buzz) with its own fresh session, working in this project, and hands it your prompt. handoff continues this conversation in one of them when the user asks: a copy of this session carries on there with your memory, and you stay here.',
 +  ].join('\n'),
-+  tools: [],
++  tools: [
++    {
++      name: 'new_thread',
++      description: 'Open a thread in Discord, Telegram or Buzz, start a fresh session for it in this project, and give that session the prompt as its first message.',
++      inputSchema: {
++        type: 'object',
++        properties: {
++          app: { type: 'string', enum: ['discord', 'telegram', 'buzz'] },
++          title: titleProperty,
++          prompt: { type: 'string', description: "The user's request and the context the new session can't find itself: it starts from this prompt alone." },
++          about: { type: 'string', description: 'One line the user sees first in the new thread, saying what it is for and where it came from.' },
++          channel: { type: 'string', description: 'Discord or Buzz only: the channel to open it in, by name. Default: the server\'s first channel.' },
++        },
++        required: ['app', 'title', 'prompt', 'about'],
++      },
++    },
++    {
++      name: 'handoff',
++      description: 'Continue this conversation in Discord, Telegram or Buzz when the user asks. It opens a thread there, where a copy of this session carries on with its full memory; this thread stays here.',
++      inputSchema: {
++        type: 'object',
++        properties: {
++          to: { type: 'string', enum: ['discord', 'telegram', 'buzz'] },
++          title: titleProperty,
++          channel: { type: 'string', description: 'Discord or Buzz only: the channel to open it in, by name. Default: the server\'s first channel.' },
++        },
++        required: ['to', 'title'],
++      },
++    },
++  ],
 +}
 diff --git a/external_plugins/t3/package.json b/external_plugins/t3/package.json
 new file mode 100644

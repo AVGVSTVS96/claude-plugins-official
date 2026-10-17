@@ -8,11 +8,13 @@ python3 scripts/test_fork_sync.py
 jq -e '.name == "hex" and any(.plugins[]; .name == "telegram") and any(.plugins[]; .name == "discord") and any(.plugins[]; .name == "buzz") and any(.plugins[]; .name == "t3")' .claude-plugin/marketplace.json >/dev/null
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
+# Discord's voice (prism-media) requires ffmpeg-static only when it's installed, which a bundle can't tell.
+build="bun build --target bun --external ffmpeg-static"
 for plugin in telegram discord buzz t3 voice; do
   bun install --cwd "external_plugins/$plugin" --silent
-  bun build "external_plugins/$plugin/bot.ts" --target bun --outdir "$out/$plugin" >/dev/null
+  $build "external_plugins/$plugin/bot.ts" --outdir "$out/$plugin" >/dev/null
   jq -e --arg plugin "$plugin" '.mcpServers[$plugin].type == "http"' "external_plugins/$plugin/.mcp.json" >/dev/null
 done
 bun test hub external_plugins/buzz external_plugins/discord external_plugins/telegram external_plugins/t3 external_plugins/voice
-bun build external_plugins/buzz/provider.ts --target bun --outdir "$out/provider" >/dev/null
-bun build hub/serve.ts --target bun --outdir "$out/hub" >/dev/null
+$build external_plugins/buzz/provider.ts --outdir "$out/provider" >/dev/null
+$build hub/serve.ts --outdir "$out/hub" >/dev/null

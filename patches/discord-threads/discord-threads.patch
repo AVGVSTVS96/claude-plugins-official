@@ -310,19 +310,20 @@ index ad04f6fa437bfa013f72f71de2b460f3eedeeeee..95f1befddecc9bd7251c7a7d4d363bdf
 +The bot token lives in `~/.claude/channels/hex/discord/.env` as `DISCORD_BOT_TOKEN=…`, and `access.json` there holds `allowFrom`, the Discord user ids allowed to talk to it. The bot needs the Message Content intent, and in its server: View Channels, Send Messages, Send Messages in Threads, Create Public Threads, Manage Threads, Read Message History, Attach Files and Add Reactions.
 diff --git a/external_plugins/discord/bot.test.ts b/external_plugins/discord/bot.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..fd43573fc284c10450fcbf20315cb31f3c0e342c
+index 0000000000000000000000000000000000000000..4c031d4869ba243d97158d0bb6ce1cf808191143
 --- /dev/null
 +++ b/external_plugins/discord/bot.test.ts
-@@ -0,0 +1,444 @@
+@@ -0,0 +1,608 @@
 +import { afterAll, beforeAll, expect, mock, test } from 'bun:test'
 +import { connect as netConnect } from 'net'
 +import { connect } from '../../hub/testing.ts'
++import { clients } from '../../hub/hub.ts'
 +import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 +import { tmpdir } from 'os'
 +import { join } from 'path'
 +import * as discord from 'discord.js'
 +
-+const { ChannelType, Collection, MessageFlags, MessageFlagsBitField, MessageType, SnowflakeUtil } = discord
++const { ButtonStyle, ChannelType, Collection, ComponentType, MessageFlags, MessageFlagsBitField, MessageType, SnowflakeUtil } = discord
 +const TRANSCRIBER = 'http://transcriber/v1/audio/transcriptions'
 +const BOT = '1000'
 +const OWNER = '2000'
@@ -337,6 +338,9 @@ index 0000000000000000000000000000000000000000..fd43573fc284c10450fcbf20315cb31f
 +const bot = { id: BOT, username: 'hex', bot: true }
 +const done: any[] = []
 +let found: object = {}
++let sent = 0
++let opened = 0
++let logins = 0
 +
 +// A guild channel or thread whose messages the fake REST answers newest-first, as Discord does.
 +function channel(id: string, fields: Channel): Channel {
@@ -352,9 +356,10 @@ index 0000000000000000000000000000000000000000..fd43573fc284c10450fcbf20315cb31f
 +    isDMBased: () => ch.type === ChannelType.DM,
 +    permissionsFor: () => ({ has: () => ch.visible }),
 +    sendTyping: async () => {},
-+    send: async (options: Channel) => {
++    send: async (input: string | Channel) => {
++      const options = typeof input === 'string' ? { content: input } : input
 +      done.push({ send: options, in: id })
-+      return say(ch, 59, options.content ?? '', { author: bot, components: options.components?.map((row: any) => row.toJSON()) })
++      return say(ch, 59, options.content ?? '', { id: String(BigInt(snowflake(59)) + BigInt(++sent)), author: bot, components: options.components?.map((row: any) => row.toJSON()) })
 +    },
 +    fetchStarterMessage: async () => (ch.parent.isThreadOnly() ? ch : ch.parent).messages.fetch(id),
 +    posted: messages,
@@ -368,6 +373,15 @@ index 0000000000000000000000000000000000000000..fd43573fc284c10450fcbf20315cb31f
 +          .slice(0, limit)
 +          .map(m => [m.id, m]))
 +      },
++      edit: async (message: string, options: Channel) => (done.push({ edit: message, options }), messages.find(m => m.id === message)),
++    },
++    threads: {
++      create: async ({ name, message, appliedTags }: Channel) => {
++        done.push({ create: name, in: id, ...(message && { message: message.content }), ...(appliedTags && { appliedTags }) })
++        return channel(String(9000 + ++opened), { name, type: ChannelType.PublicThread, parent: ch, parentId: id })
++      },
++      fetchActive: async () => ({ threads: new Collection([...channels].filter(([, c]) => c.parent === ch && !c.archived)) }),
++      fetchArchived: async () => ({ threads: new Collection([...channels].filter(([, c]) => c.parent === ch && c.archived)) }),
 +    },
 +    ...fields,
 +  }
@@ -446,7 +460,10 @@ index 0000000000000000000000000000000000000000..fd43573fc284c10450fcbf20315cb31f
 +  once(event: string, handler: (...args: any[]) => void) {
 +    return this.on(event, handler)
 +  }
-+  login = async () => 'token'
++  login = async () => {
++    if (++logins === 1) throw new Error('getaddrinfo ETIMEOUT discord.com')
++    return 'token'
++  }
 +}
 +
 +mock.module('discord.js', () => ({ ...discord, Client }))
@@ -455,6 +472,8 @@ index 0000000000000000000000000000000000000000..fd43573fc284c10450fcbf20315cb31f
 +afterAll(() => rmSync(state, { recursive: true, force: true }))
 +let received: any[]
 +let call: (tool: string, args: object) => Promise<any>
++let send: (payload: object) => void
++let ask: (request: object) => Promise<Response>
 +
 +async function until<T>(check: () => T | undefined, timeout = 3000): Promise<T> {
 +  for (const end = Date.now() + timeout; Date.now() < end; await Bun.sleep(20)) {
@@ -470,11 +489,12 @@ index 0000000000000000000000000000000000000000..fd43573fc284c10450fcbf20315cb31f
 +  const fetch = globalThis.fetch
 +  globalThis.fetch = (async (url: string, init?: RequestInit) => {
 +    if (url === 'https://cdn.discord/voice-message.ogg') return new Response('ogg')
++    if (url === 'https://cdn.discord/shot.png') return new Response('png bytes')
 +    if (url !== TRANSCRIBER) return fetch(url, init)
 +    return Response.json({ text: (init!.body as FormData).get('model') === 'whisper' ? ' anchors ship friday ' : 'wrong model' })
 +  }) as any
 +  await import('./bot.ts')
-+  ;({ received, call } = await session(here.id))
++  ;({ received, call, send, ask } = await session(here.id))
 +})
 +
 +// A session bound to thread, connected once the hub has registered it, with its hooks on hub.sock.
@@ -484,8 +504,11 @@ index 0000000000000000000000000000000000000000..fd43573fc284c10450fcbf20315cb31f
 +  await new Promise(resolve => hooks.on('connect', resolve))
 +  const send = (payload: object) => hooks.write(JSON.stringify(payload) + '\n')
 +  await line.call('list_channels', {})
-+  return { received: line.received, call: line.call, send }
++  return { received: line.received, call: line.call, send, ask: line.ask }
 +}
++
++const book = () => JSON.parse(readFileSync(join(state, 'ledger.json'), 'utf8'))
++const labels = (components: any[]) => components[0].toJSON().components.map((c: any) => c.label)
 +
 +test('a message in a thread names the channel the thread is in', async () => {
 +  const message = { ...say(here, 6, 'what did we decide in open-source?'), ...live(here) }
@@ -543,13 +566,13 @@ index 0000000000000000000000000000000000000000..fd43573fc284c10450fcbf20315cb31f
 +test('sessions read only text channels and threads in the server the bot can see, never a DM', async () => {
 +  const refused = (id: string) => `the bot can't read ${id}; list_channels shows the channels it can`
 +  expect((await call('fetch_messages', { channel: 'hidden' })).error).toBe(refused(hidden.id))
-+  expect((await call('fetch_messages', { channel: 'nowhere' })).error).toBe('no text channel named #nowhere')
++  expect((await call('fetch_messages', { channel: 'nowhere' })).error).toBe('no text or forum channel named #nowhere')
 +  expect((await call('fetch_messages', { thread: '4003' })).error).toBe(refused('4003'))
 +  expect((await call('fetch_messages', { thread: elsewhere.id })).error).toBe(refused(elsewhere.id))
 +})
 +
-+test('list_channels names the text and announcement channels the bot can read', async () => {
-+  expect((await call('list_channels', {})).text).toBe(`#open-source  (id: ${openSource.id})\n#general  (id: ${general.id})\n#news  (id: ${news.id})`)
++test('list_channels names the text, announcement and forum channels the bot can read', async () => {
++  expect((await call('list_channels', {})).text).toBe(`#open-source  (id: ${openSource.id})\n#general  (id: ${general.id})\n#news  (id: ${news.id})\n#ideas  (id: ${ideas.id}, forum)`)
 +})
 +
 +const inbound = (lines: any[], check: (line: any) => boolean) => until(() => lines.find(line => line.type === 'inbound' && check(line)))
@@ -754,16 +777,157 @@ index 0000000000000000000000000000000000000000..fd43573fc284c10450fcbf20315cb31f
 +  expect((await mine.call('close_thread', {})).error).toBe('a DM is not a thread')
 +})
 +
-+test('once connected the bot leaves the id of its server in guild.json, so the voice app can link a thread', () => {
-+  handlers.get('clientReady')!({ user: { tag: 'hex#0000' } })
++test('once connected the bot leaves the id of its server in guild.json, so the voice app can link a thread, and registers its slash commands', async () => {
++  let registered: any[] = []
++  handlers.get('clientReady')!({ user: { tag: 'hex#0000' }, application: { commands: { set: async (commands: any[]) => (registered = commands) } } })
 +  expect(JSON.parse(readFileSync(join(state, 'guild.json'), 'utf8'))).toEqual({ id: GUILD })
++  await until(() => registered.length)
++  expect(registered.map(command => command.name)).toEqual(['model', 'effort', 'compact', 'stop'])
++})
++
++test('a first login that fails, as with no network at boot, is tried again', async () => {
++  await until(() => logins >= 2)
++})
++
++test('a permission prompt asks in the thread with Allow and Deny, a tap answers it, and one still open when the turn ends stops asking', async () => {
++  const prompt = (request_id: string) => ({ request_id, tool_name: 'Bash', description: 'Run the tests', input_preview: JSON.stringify({ command: 'bun test', description: 'Run the tests' }) })
++  await ask(prompt('abcde'))
++  const asked = await until(() => here.posted.findLast((m: any) => m.content.startsWith('🔐')))
++  expect(asked.content).toBe('🔐 **Bash**: Run the tests\n```\ncommand: bun test\n```')
++  expect(asked.components[0].components.map((b: any) => [b.label, b.custom_id, b.style])).toEqual([
++    ['Allow', 'perm:allow:abcde', ButtonStyle.Success],
++    ['Deny', 'perm:deny:abcde', ButtonStyle.Danger],
++  ])
++
++  let update: any
++  handlers.get('interactionCreate')!({ isButton: () => true, user: owner, customId: 'perm:allow:abcde', channelId: here.id, createdAt: at(41), message: asked, update: async (options: any) => (update = options) })
++  expect(await until(() => received.find(line => line.type === 'permission'))).toMatchObject({ request_id: 'abcde', behavior: 'allow' })
++  expect(update.components[0].toJSON().components.map((b: any) => [b.label, b.disabled, b.style])).toEqual([
++    ['Allow', true, ButtonStyle.Success],
++    ['Deny', true, ButtonStyle.Secondary],
++  ])
++
++  await ask(prompt('fghij'))
++  const open = await until(() => here.posted.findLast((m: any) => m.content.startsWith('🔐') && m !== asked))
++  send({ type: 'state', thread: here.id, busy: false })
++  const moot = await until(() => done.find(d => d.edit === open.id))
++  expect(labels(moot.options.components)).toEqual(['No longer waiting'])
++})
++
++test('a question with buttons goes in the ledger: a tap answers it there, and one answered in hex\'s app closes its buttons, reaches the thread, and can be taken back', async () => {
++  await call('reply', { text: 'Which anchors?\nThe left ones are cheaper.', buttons: ['Left', 'Right'] })
++  const asked = here.posted.at(-1)
++  expect(book().asks.find((a: any) => a.message === asked.id)).toMatchObject({ thread: here.id, text: 'Which anchors?\nThe left ones are cheaper.', options: ['Left', 'Right'] })
++
++  send({ type: 'answer', thread: here.id, message: asked.id, label: 'Right', via: 'app' })
++  const answered = await inbound(received, line => line.meta.answered_in === 'in the app')
++  expect(answered).toMatchObject({ content: 'Right', meta: { user: 'hex app', button: 'true', button_message_id: asked.id } })
++  expect(labels(done.findLast(d => d.edit === asked.id).options.components)).toEqual(['✓ Answered in the app: Right'])
++  expect(book().asks.find((a: any) => a.message === asked.id).answer).toMatchObject({ label: 'Right', via: 'app' })
++
++  send({ type: 'reopen', thread: here.id, message: asked.id, via: 'app' })
++  expect((await inbound(received, line => line.meta.took_back === 'Right')).content).toBe('(took back: Right)')
++  expect(labels(done.findLast(d => d.edit === asked.id).options.components)).toEqual(['Left', 'Right'])
++
++  handlers.get('interactionCreate')!({ isButton: () => true, user: owner, customId: '0', channelId: here.id, createdAt: at(44), message: asked, update: async () => {} })
++  await until(() => book().asks.find((a: any) => a.message === asked.id).answer?.via === 'discord')
++
++  await call('reply', { text: 'Ship today?', buttons: ['Yes', 'No'] })
++  const later = here.posted.at(-1)
++  send({ type: 'settle', thread: here.id, message: later.id, note: 'Settled: shipped' })
++  await until(() => book().asks.find((a: any) => a.message === later.id).settled)
++  expect(labels(done.findLast(d => d.edit === later.id).options.components)).toEqual(['Settled: shipped'])
++})
++
++test('buttons with multiple come as a menu, and a pick of several comes back as their labels and locks the menu on them', async () => {
++  await call('reply', { text: 'Which files?', buttons: ['a.ts', 'b.ts', 'c.ts'], multiple: true })
++  const asked = here.posted.at(-1)
++  const select = asked.components[0].components[0]
++  expect(select).toMatchObject({ type: ComponentType.StringSelect, custom_id: 'menu', min_values: 1, max_values: 3 })
++  expect(book().asks.find((a: any) => a.message === asked.id)).toMatchObject({ options: ['a.ts', 'b.ts', 'c.ts'], multiple: true })
++
++  let update: any
++  handlers.get('interactionCreate')!({ isButton: () => false, isStringSelectMenu: () => true, user: owner, values: ['0', '2'], component: { options: select.options }, channelId: here.id, createdAt: at(45), message: asked, update: async (options: any) => (update = options) })
++  const pick = await inbound(received, line => line.meta.button_message_id === asked.id)
++  expect(pick.content).toBe('a.ts; c.ts')
++  const locked = update.components[0].toJSON().components[0]
++  expect(locked.disabled).toBe(true)
++  expect(locked.options.filter((o: any) => o.default).map((o: any) => o.label)).toEqual(['a.ts', 'c.ts'])
++})
++
++test('an image arrives already downloaded, as image_path, next to its listing', async () => {
++  const shot = { id: '62', name: 'shot.png', url: 'https://cdn.discord/shot.png', contentType: 'image/png', size: 1024 }
++  const message = { ...say(here, 46, 'what is this?'), ...live(here), attachments: new Collection([[shot.id, shot]]) }
++  handlers.get('messageCreate')!(message)
++  const arrived = await inbound(received, line => line.meta.message_id === message.id)
++  expect(arrived.meta.image_path).toMatch(/inbox\/\d+-62\.png$/)
++  expect(readFileSync(arrived.meta.image_path, 'utf8')).toBe('png bytes')
++  expect(arrived.meta.attachments).toBe('shot.png (image/png, 1KB)')
++})
++
++test('new_thread opens with the request that asked for it and the replies since, forwarded', async () => {
++  const desk = channel('5100', { name: 'desk', type: ChannelType.PublicThread, parent: general })
++  const s = await session(desk.id)
++  say(desk, 31, 'earlier chatter')
++  say(desk, 32, 'old answer', { author: bot })
++  const asked = say(desk, 33, 'spin off the anchors work')
++  const reply = say(desk, 34, 'on it', { author: bot })
++  s.send({ type: 'state', thread: desk.id, busy: true })
++  await Bun.sleep(50)
++  const result = await s.call('new_thread', { title: 'Anchors', prompt: 'work on the anchors', about: 'Spun off from desk' })
++  s.send({ type: 'state', thread: desk.id, busy: false })
++  const thread = [...channels.values()].find(ch => ch.name === 'Anchors')!
++  await session(thread.id)
++  expect(result.text).toBe(`started thread "Anchors": https://discord.com/channels/${GUILD}/${thread.id}`)
++  expect(done.find(d => d.create === 'Anchors')).toEqual({ create: 'Anchors', in: general.id })
++  expect(thread.posted[0].content).toBe('Spun off from desk')
++  expect(done.filter(d => d.forward && d.to === thread.id).map(d => d.forward)).toEqual([asked.id, reply.id])
++})
++
++test('new_thread in a forum opens a post with its tags, and fetch_messages lists a forum\'s posts', async () => {
++  ideas.availableTags = [{ id: 't1', name: 'Bug' }, { id: 't2', name: 'Idea' }]
++  await call('new_thread', { title: 'Glare', prompt: 'look into the glare', about: 'Glare on the desk', channel: 'ideas', tags: ['idea'] })
++  expect(done.find(d => d.create === 'Glare')).toEqual({ create: 'Glare', in: ideas.id, message: 'Glare on the desk', appliedTags: ['t2'] })
++  expect((await call('new_thread', { title: 'Nope', prompt: 'x', about: 'x', channel: 'ideas', tags: ['urgent'] })).error).toBe('#ideas has the tags Bug, Idea')
++  const post = [...channels.values()].find(ch => ch.name === 'Glare')!
++  await session(post.id)
++  expect((await call('fetch_messages', { channel: 'ideas' })).text).toContain(`Glare  (post ${post.id}, 0 replies)`)
++})
++
++test('new_thread with another app opens the thread there through the hub', async () => {
++  const opened: any[] = []
++  clients.set('buzz', { hub: { open: (...args: any[]) => opened.push(args) } as any, place: async (name, where, about) => (opened.push(['place', name, where, about]), { thread: 'b1', link: 'buzz://b1' }) })
++  expect((await call('new_thread', { title: 'Relay', prompt: 'fix the relay', about: 'From Discord', app: 'buzz' })).text).toBe('started thread "Relay" in buzz: buzz://b1')
++  expect(opened).toEqual([['place', 'Relay', undefined, 'From Discord'], ['b1', 'Relay', 'fix the relay', undefined]])
++  clients.delete('buzz')
++  expect((await call('new_thread', { title: 'Relay', prompt: 'x', about: 'x', app: 'buzz' })).error).toBe("buzz isn't connected; threads open in discord")
++})
++
++test('slash commands set a thread\'s model and effort, and answer only the owner in a thread with a session', async () => {
++  const desk = channels.get('5100')!
++  const replies: any[] = []
++  const command = (commandName: string, value?: string, user = owner, channelId = desk.id) =>
++    handlers.get('interactionCreate')!({ isButton: () => false, isStringSelectMenu: () => false, isChatInputCommand: () => true, commandName, user, channelId, options: { getString: () => value }, reply: async (options: any) => replies.push(options) })
++  command('model', 'claude-opus-5-5')
++  command('effort', 'max')
++  command('stop', undefined, owner, general.id)
++  command('stop', undefined, { id: '8888', username: 'someone', partial: false })
++  await until(() => replies.length === 4)
++  expect(replies.map(reply => reply.content)).toEqual([
++    "Model: Opus 5.5, from this thread's next message.",
++    "Effort: Max, from this thread's next message.",
++    "This channel has no session: use it in one of hex's threads or the DM.",
++    'hex only answers its owner.',
++  ])
++  expect(replies.every(reply => reply.flags === MessageFlags.Ephemeral)).toBe(true)
++  expect(JSON.parse(readFileSync(join(state, 'threads.json'), 'utf8'))[desk.id]).toMatchObject({ model: 'claude-opus-5-5', effort: 'max' })
 +})
 diff --git a/external_plugins/discord/bot.ts b/external_plugins/discord/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..316b841c4b0337696a6bf1ce58e8cea55dd20162
+index 0000000000000000000000000000000000000000..2d9318989f98cb6a9be78605cde6902d585ee2c8
 --- /dev/null
 +++ b/external_plugins/discord/bot.ts
-@@ -0,0 +1,708 @@
+@@ -0,0 +1,974 @@
 +#!/usr/bin/env bun
 +import {
 +  Client,
@@ -777,6 +941,11 @@ index 0000000000000000000000000000000000000000..316b841c4b0337696a6bf1ce58e8cea5
 +  ActionRowBuilder,
 +  ButtonBuilder,
 +  ButtonStyle,
++  StringSelectMenuBuilder,
++  ApplicationCommandOptionType,
++  ApplicationIntegrationType,
++  InteractionContextType,
++  DiscordjsErrorCodes,
 +  Routes,
 +  parseEmoji,
 +  type Message as DiscordMessage,
@@ -786,15 +955,20 @@ index 0000000000000000000000000000000000000000..316b841c4b0337696a6bf1ce58e8cea5
 +  type User,
 +  type PartialUser,
 +  type ButtonInteraction,
++  type StringSelectMenuInteraction,
++  type ChatInputCommandInteraction,
++  type ChatInputApplicationCommandData,
 +  type PollAnswer,
 +  type PartialPollAnswer,
 +  type ActionRow,
 +  type ButtonComponent,
++  type StringSelectMenuComponent,
 +  type RESTGetAPIGuildMessagesSearchResult,
 +  type Attachment,
 +  type Collection,
 +  type Channel,
 +  type NewsChannel,
++  type ForumChannel,
 +  type TextChannel,
 +  type ThreadChannel,
 +  type DMChannel,
@@ -802,8 +976,10 @@ index 0000000000000000000000000000000000000000..316b841c4b0337696a6bf1ce58e8cea5
 +import { readFileSync, writeFileSync, mkdirSync, statSync, realpathSync, chmodSync } from 'fs'
 +import { homedir } from 'os'
 +import { basename, join, sep } from 'path'
-+import { startHub, clients, move, tappable, title, transcribe, type Message } from '../../hub/hub.ts'
++import { startHub, clients, begin, move, preview, tappable, title, transcribe, MODELS, EFFORTS, type Message, type Permission } from '../../hub/hub.ts'
++import { Ledger, type Ask, type MessageId } from '../../hub/ledger.ts'
 +import { server } from './channel.ts'
++import { voiceCalls } from './voice.ts'
 +
 +const STATE_DIR = process.env.DISCORD_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'hex', 'discord')
 +const ACCESS_FILE = join(STATE_DIR, 'access.json')
@@ -887,6 +1063,8 @@ index 0000000000000000000000000000000000000000..316b841c4b0337696a6bf1ce58e8cea5
 +
 +const isText = (ch: Channel | null | undefined): ch is TextChannel | NewsChannel =>
 +  ch?.type === ChannelType.GuildText || ch?.type === ChannelType.GuildAnnouncement
++const isForum = (ch: Channel | null | undefined): ch is ForumChannel => ch?.type === ChannelType.GuildForum
++const isPostable = (ch: Channel | null | undefined): ch is TextChannel | NewsChannel | ForumChannel => isText(ch) || isForum(ch)
 +
 +// A tapped set stays on its message, disabled, with the choice highlighted.
 +function buttons(labels: string[], chosen?: number): ActionRowBuilder<ButtonBuilder>[] {
@@ -901,6 +1079,57 @@ index 0000000000000000000000000000000000000000..316b841c4b0337696a6bf1ce58e8cea5
 +  })
 +  return rows
 +}
++
++// A menu takes any number of picks at once, and stays showing them, disabled, once sent.
++function menu(labels: string[], picked?: string[]): ActionRowBuilder<StringSelectMenuBuilder>[] {
++  return [new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(new StringSelectMenuBuilder()
++    .setCustomId('menu')
++    .setPlaceholder(picked ? picked.join(', ').slice(0, 150) : 'Pick any')
++    .setMinValues(1)
++    .setMaxValues(labels.length)
++    .setDisabled(picked !== undefined)
++    .addOptions(labels.map((label, i) => ({ label, value: String(i), default: !!picked?.includes(label) }))))]
++}
++
++function choices(labels: string[], multiple: boolean) {
++  return multiple ? menu(labels) : buttons(labels)
++}
++
++// One disabled button saying what became of a question: answered elsewhere, settled, or moot.
++function only(text: string): ActionRowBuilder<ButtonBuilder>[] {
++  return [new ActionRowBuilder<ButtonBuilder>().addComponents(new ButtonBuilder().setCustomId('done').setLabel(text.slice(0, 80)).setStyle(ButtonStyle.Secondary).setDisabled(true))]
++}
++
++const VERDICTS = [['allow', 'Allow', ButtonStyle.Success], ['deny', 'Deny', ButtonStyle.Danger]] as const
++
++function verdicts(request: string, chosen?: string): ActionRowBuilder<ButtonBuilder>[] {
++  return [new ActionRowBuilder<ButtonBuilder>().addComponents(VERDICTS.map(([verdict, label, style]) => new ButtonBuilder()
++    .setCustomId(`perm:${verdict}:${request}`)
++    .setLabel(label)
++    .setStyle(chosen && chosen !== verdict ? ButtonStyle.Secondary : style)
++    .setDisabled(chosen !== undefined)))]
++}
++
++// A fence inside the preview would close the block early, so its backticks are split.
++function block(text: string, limit: number): string {
++  const body = text.replaceAll('```', '`​``')
++  return '```\n' + (body.length > limit ? `${body.slice(0, limit - 1)}…` : body) + '\n```'
++}
++
++const COMMANDS: ChatInputApplicationCommandData[] = [
++  {
++    name: 'model',
++    description: "Switch this thread's model; its next message starts with it",
++    options: [{ type: ApplicationCommandOptionType.String as const, name: 'model', description: 'Model', required: true, choices: MODELS.map(({ value, name }) => ({ name, value })) }],
++  },
++  {
++    name: 'effort',
++    description: "Set this thread's effort; its next message starts with it",
++    options: [{ type: ApplicationCommandOptionType.String as const, name: 'effort', description: 'Effort', required: true, choices: EFFORTS.map(({ value, name }) => ({ name, value })) }],
++  },
++  { name: 'compact', description: "Compact this thread's conversation to free up context" },
++  { name: 'stop', description: "Stop this thread's session; its next message resumes it" },
++].map(command => ({ ...command, contexts: [InteractionContextType.Guild, InteractionContextType.BotDM], integrationTypes: [ApplicationIntegrationType.GuildInstall] }))
 +
 +function chunk(text: string, limit: number, mode: 'length' | 'newline'): string[] {
 +  if (text.length <= limit) return [text]
@@ -973,11 +1202,19 @@ index 0000000000000000000000000000000000000000..316b841c4b0337696a6bf1ce58e8cea5
 +  }
 +}
 +
++// Images are fetched on arrival, as Telegram's photos are, so a screenshot is one Read away.
++async function images(attachments: Collection<string, Attachment>): Promise<string[]> {
++  const shown = attachments.filter(att => att.contentType?.startsWith('image/') && att.size <= MAX_ATTACHMENT_BYTES)
++  const paths = await Promise.all(shown.map(att => downloadAttachment(att).catch(err => void process.stderr.write(`discord hub: image download failed: ${err}\n`))))
++  return paths.filter((path): path is string => !!path)
++}
++
 +function serve(token: string) {
 +  const client = new Client({
-+    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.GuildMessageReactions, GatewayIntentBits.GuildMessagePolls, GatewayIntentBits.MessageContent, GatewayIntentBits.DirectMessages, GatewayIntentBits.DirectMessageReactions, GatewayIntentBits.DirectMessagePolls],
++    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.GuildMessageReactions, GatewayIntentBits.GuildMessagePolls, GatewayIntentBits.GuildVoiceStates, GatewayIntentBits.MessageContent, GatewayIntentBits.DirectMessages, GatewayIntentBits.DirectMessageReactions, GatewayIntentBits.DirectMessagePolls],
 +    partials: [Partials.Channel, Partials.Message, Partials.Reaction, Partials.User, Partials.Poll, Partials.PollAnswer],
 +  })
++  const ledger = new Ledger(join(STATE_DIR, 'ledger.json'))
 +
 +  // A session talks in a thread, or in a DM, which is one conversation.
 +  async function threadChannel(thread: string): Promise<ThreadChannel | DMChannel> {
@@ -999,13 +1236,16 @@ index 0000000000000000000000000000000000000000..316b841c4b0337696a6bf1ce58e8cea5
 +    return guild
 +  }
 +
-+  async function textChannel(name?: string): Promise<TextChannel | NewsChannel> {
++  async function textChannel(name?: string): Promise<TextChannel | NewsChannel>
++  async function textChannel(name: string | undefined, forums: true): Promise<TextChannel | NewsChannel | ForumChannel>
++  async function textChannel(name?: string, forums = false): Promise<TextChannel | NewsChannel | ForumChannel> {
++    const fits = forums ? isPostable : isText
 +    const g = guild()
 +    const wanted = name?.replace(/^#/, '').toLowerCase()
 +    const found = wanted
-+      ? (await g.channels.fetch()).find(ch => isText(ch) && (ch.id === wanted || ch.name.toLowerCase() === wanted))
++      ? (await g.channels.fetch()).find(ch => fits(ch) && (ch.id === wanted || ch.name.toLowerCase() === wanted))
 +      : g.systemChannel
-+    if (!isText(found)) throw new Error(wanted ? `no text channel named #${wanted}` : 'name a channel to open the thread in')
++    if (!fits(found)) throw new Error(wanted ? `no ${forums ? 'text or forum' : 'text'} channel named #${wanted}` : 'name a channel to open the thread in')
 +    return found
 +  }
 +
@@ -1027,7 +1267,9 @@ index 0000000000000000000000000000000000000000..316b841c4b0337696a6bf1ce58e8cea5
 +  async function history(caller: string, args: Record<string, unknown>): Promise<string> {
 +    const limit = Math.min((args.limit as number) ?? 20, 100)
 +    const named = args.thread as string | undefined
-+    const id = named ? (/^\d+$/.test(named) ? named : hub.find(named)) : args.channel ? (await textChannel(args.channel as string)).id : caller
++    const channel = !named && args.channel ? await textChannel(args.channel as string, true) : undefined
++    if (isForum(channel)) return posts(channel, limit)
++    const id = named ? (/^\d+$/.test(named) ? named : hub.find(named)) : channel ? channel.id : caller
 +    const ch = id === caller ? await threadChannel(caller) : await readable(id)
 +    const msgs = await ch.messages.fetch({ limit, ...(args.before ? { before: args.before as string } : {}) })
 +    const arr = [...msgs.values()].reverse()
@@ -1040,6 +1282,17 @@ index 0000000000000000000000000000000000000000..316b841c4b0337696a6bf1ce58e8cea5
 +        return row(m.createdAt, m.author, m.content, `id: ${m.id}${atts}${thread}`)
 +      })
 +      .join('\n')
++  }
++
++  // A forum's posts are its threads: each one's title, newest activity last, read by its id.
++  async function posts(forum: ForumChannel, limit: number): Promise<string> {
++    if (!forum.permissionsFor(client.user!)?.has(READ)) throw new Error(`the bot can't read ${forum.id}; list_channels shows the channels it can`)
++    const [active, archived] = await Promise.all([forum.threads.fetchActive(), forum.threads.fetchArchived({ limit })])
++    const all = [...active.threads.values(), ...archived.threads.values()].filter(post => post.parentId === forum.id)
++    const latest = (post: ThreadChannel) => SnowflakeUtil.timestampFrom(post.lastMessageId ?? post.id)
++    const rows = all.sort((a, b) => latest(a) - latest(b)).slice(-limit).map(post =>
++      `[${new Date(latest(post)).toISOString()}] ${post.name.replace(/[\r\n]+/g, ' ')}  (post ${post.id}, ${post.messageCount ?? 0} replies${post.archived ? ', archived' : ''})`)
++    return rows.join('\n') || '(no posts)'
 +  }
 +
 +  async function search(args: Record<string, unknown>): Promise<string> {
@@ -1058,16 +1311,38 @@ index 0000000000000000000000000000000000000000..316b841c4b0337696a6bf1ce58e8cea5
 +  }
 +
 +  async function listChannels(): Promise<string> {
-+    const found = (await guild().channels.fetch()).filter(ch => isText(ch) && !!ch.permissionsFor(client.user!)?.has(READ))
-+    return found.map(ch => `#${ch!.name}  (id: ${ch!.id})`).join('\n') || '(none)'
++    const found = (await guild().channels.fetch()).filter(ch => isPostable(ch) && !!ch.permissionsFor(client.user!)?.has(READ))
++    return found.map(ch => `#${ch!.name}  (id: ${ch!.id}${isForum(ch) ? ', forum' : ''})`).join('\n') || '(none)'
 +  }
 +
 +  const link = (thread: string) => `https://discord.com/channels/${guild().id}/${thread}`
 +
-+  async function place(name: string, where?: string, about?: string) {
-+    const thread = await (await textChannel(where)).threads.create({ name })
-+    if (about) await thread.send(about)
-+    return { thread: thread.id, link: link(thread.id) }
++  // A forum takes a thread only as a post, which opens with a message: the about line, or its title.
++  async function place(name: string, where?: string, about?: string, tags: string[] = []) {
++    const parent = await textChannel(where, true)
++    if (!isForum(parent)) {
++      const thread = await parent.threads.create({ name })
++      if (about) await thread.send(about)
++      return { thread: thread.id, link: link(thread.id) }
++    }
++    const wanted = tags.map(tag => tag.toLowerCase())
++    const applied = parent.availableTags.filter(tag => wanted.includes(tag.name.toLowerCase()))
++    if (applied.length < wanted.length) throw new Error(`#${parent.name} has the tags ${parent.availableTags.map(tag => tag.name).join(', ') || '(none)'}`)
++    const post = await parent.threads.create({ name, message: { content: about ?? name }, appliedTags: applied.map(tag => tag.id) })
++    return { thread: post.id, link: link(post.id) }
++  }
++
++  // A new thread opens with the request that asked for it and what the session said since, when a
++  // message from the user started the caller's current turn. A thread's first message is its starter.
++  async function origin(from: string, to: string) {
++    if (!typing.has(from)) return
++    const ch = await threadChannel(from)
++    const recent = [...(await ch.messages.fetch({ limit: 50 })).values()].reverse()
++    const asked = recent.findLastIndex(m => !m.author.bot)
++    if (asked < 0) return
++    const picked = recent.slice(asked).filter((m, i) => i === 0 || m.author.id === client.user!.id)
++    if (picked[0]!.type === MessageType.ThreadStarterMessage && ch.isThread()) picked[0] = (await ch.fetchStarterMessage())!
++    for (const m of picked) await m.forward(to)
 +  }
 +
 +  // A thread's starter message lives in the channel it hangs off, under the thread's own id.
@@ -1096,12 +1371,88 @@ index 0000000000000000000000000000000000000000..316b841c4b0337696a6bf1ce58e8cea5
 +    typing.set(thread, setInterval(() => sendTyping(thread), 8000))
 +  }
 +
++  // Claude Code sends no event when a prompt is answered in the session itself, but a
++  // turn can't end while one is open, so whatever is still asking by then is moot.
++  const asking = new Map<string, Set<string>>()
++
++  async function ask(thread: string, request: Permission): Promise<void> {
++    const ch = await threadChannel(thread)
++    const shown = preview(request)
++    const sent = await ch.send({
++      content: `🔐 **${request.tool_name}**: ${request.description.slice(0, 300)}${shown ? `\n${block(shown, 1500)}` : ''}`,
++      components: verdicts(request.request_id),
++    })
++    asking.set(thread, (asking.get(thread) ?? new Set()).add(sent.id))
++  }
++
++  function settle(thread: string, busy: boolean): void {
++    showTyping(thread, busy)
++    if (busy) return
++    for (const id of asking.get(thread) ?? []) void threadChannel(thread).then(ch => ch.messages.edit(id, { components: only('No longer waiting') })).catch(() => {})
++    asking.delete(thread)
++  }
++
++  // A question answered somewhere else (hex's voice app, a call) reaches the thread as the owner's
++  // own tap would, and its buttons say where it was answered. A poll can't take a vote from the bot,
++  // so one answered elsewhere ends instead.
++  const ANSWERED_IN: Record<string, string> = { app: 'in the app', call: 'on a call' }
++
++  async function closeAsk(thread: string, ask: Ask, text: string) {
++    const ch = await threadChannel(thread)
++    const msg = await ch.messages.fetch(String(ask.message))
++    await (ask.poll ? msg.poll!.end() : msg.edit({ components: only(text) }))
++  }
++
++  async function answerAsk(thread: string, message: MessageId, label: string, via: string) {
++    const ask = ledger.find(thread, message)
++    if (!ask || ask.answer) return
++    await closeAsk(thread, ask, `✓ Answered ${ANSWERED_IN[via] ?? via}: ${label}`).catch(err => process.stderr.write(`discord hub: couldn't close the buttons on ${thread} ${message}: ${err}\n`))
++    ledger.answered(thread, message, label, via)
++    hub.deliver(thread, hub.name(thread) ?? thread, {
++      content: ask.poll ? `(vote: ${label})` : label,
++      meta: {
++        chat_id: thread,
++        user: `hex ${via}`,
++        ts: new Date().toISOString(),
++        ...(ask.poll ? { vote: label, poll_message_id: String(message), poll: ask.text } : { button: 'true', button_message_id: String(message) }),
++        answered_in: ANSWERED_IN[via] ?? via,
++      },
++    })
++  }
++
++  async function settleAsk(thread: string, message: MessageId, note: string) {
++    const ask = ledger.find(thread, message)
++    if (!ask || ask.answer || ask.settled) return
++    await closeAsk(thread, ask, note).catch(err => process.stderr.write(`discord hub: couldn't close the buttons on ${thread} ${message}: ${err}\n`))
++    ledger.settled(thread, message, note)
++  }
++
++  // Takes back an answer given elsewhere, or a settle: the buttons come back, and the thread hears
++  // that the answer it got no longer stands. An ended poll stays ended.
++  async function reopenAsk(thread: string, message: MessageId, via: string) {
++    const ask = ledger.find(thread, message)
++    if (!ask || !(ask.answer || ask.settled)) return
++    if (!ask.poll) await threadChannel(thread).then(ch => ch.messages.edit(String(message), { components: choices(ask.options, !!ask.multiple) })).catch(err => process.stderr.write(`discord hub: couldn't put the buttons back on ${thread} ${message}: ${err}\n`))
++    const taken = ask.answer?.label
++    ledger.reopened(thread, message)
++    if (!taken) return
++    hub.deliver(thread, hub.name(thread) ?? thread, {
++      content: `(took back: ${taken})`,
++      meta: { chat_id: thread, user: `hex ${via}`, ts: new Date().toISOString(), took_back: taken, [ask.poll ? 'poll_message_id' : 'button_message_id']: String(message) },
++    })
++  }
++
 +  async function call(caller: string, tool: string, args: Record<string, unknown>): Promise<string> {
 +    if (tool === 'new_thread') {
 +      const name = title(args.title as string)
++      const app = (args.app as string | undefined) ?? 'discord'
++      const about = args.about as string | undefined
++      const where = args.channel as string | undefined
++      if (app !== 'discord') return `started thread "${name}" in ${app}: ${(await begin(app, name, args.prompt as string, { about, where })).link}`
 +      const here = await threadChannel(caller)
-+      const parent = (args.channel as string | undefined) ?? (here.isThread() ? here.parent?.name : undefined)
-+      const { thread, link } = await place(name, parent, args.about as string | undefined)
++      const parent = where ?? (here.isThread() ? here.parent?.name : undefined)
++      const { thread, link } = await place(name, parent, about, args.tags as string[] | undefined)
++      await origin(caller, thread).catch(err => process.stderr.write(`discord hub: couldn't forward where "${name}" came from: ${err}\n`))
 +      hub.open(thread, name, args.prompt as string)
 +      return `started thread "${name}": ${link}`
 +    }
@@ -1123,7 +1474,8 @@ index 0000000000000000000000000000000000000000..316b841c4b0337696a6bf1ce58e8cea5
 +        const reply_to = args.reply_to as string | undefined
 +        const files = sendable((args.files as string[] | undefined) ?? [])
 +        const labels = args.buttons as string[] | undefined
-+        const components = labels?.length ? buttons(labels) : undefined
++        const multiple = !!args.multiple
++        const components = labels?.length ? choices(labels, multiple) : undefined
 +
 +        const limit = Math.max(100, Math.min(access.textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT))
 +        const replyMode = access.replyToMode ?? 'first'
@@ -1146,6 +1498,7 @@ index 0000000000000000000000000000000000000000..316b841c4b0337696a6bf1ce58e8cea5
 +          const msg = err instanceof Error ? err.message : String(err)
 +          throw new Error(`reply failed after ${sentIds.length} of ${chunks.length} chunk(s) sent: ${msg}`)
 +        }
++        if (labels?.length) ledger.ask(thread, sentIds.at(-1)!, text, labels, undefined, multiple)
 +
 +        return sentIds.length === 1 ? `sent (id: ${sentIds[0]})` : `sent ${sentIds.length} parts (ids: ${sentIds.join(', ')})`
 +      }
@@ -1168,6 +1521,7 @@ index 0000000000000000000000000000000000000000..316b841c4b0337696a6bf1ce58e8cea5
 +          ...(args.text !== undefined ? { content: tappable(args.text as string) } : {}),
 +          ...(files ? { files, attachments: [] } : {}),
 +        })
++        if (args.text !== undefined) ledger.edited(thread, edited.id, args.text as string)
 +        return `edited (id: ${edited.id})`
 +      }
 +      case 'delete_message': {
@@ -1178,11 +1532,14 @@ index 0000000000000000000000000000000000000000..316b841c4b0337696a6bf1ce58e8cea5
 +          deleting.delete(msg.id)
 +          throw err
 +        })
++        ledger.deleted(thread, msg.id)
 +        return 'deleted'
 +      }
 +      case 'pin': {
 +        const msg = await message(ch, args.message_id as string)
 +        await (args.unpin ? msg.unpin() : msg.pin())
++        if (args.unpin) ledger.unpinned(thread, msg.id)
++        else ledger.pinned(thread, msg.id, msg.content)
 +        return args.unpin ? 'unpinned' : 'pinned'
 +      }
 +      case 'poll': {
@@ -1194,6 +1551,7 @@ index 0000000000000000000000000000000000000000..316b841c4b0337696a6bf1ce58e8cea5
 +            duration: 24,
 +          },
 +        })
++        ledger.ask(thread, sent.id, args.question as string, args.options as string[], sent.id)
 +        return `sent poll (id: ${sent.id})`
 +      }
 +      case 'download_attachment': {
@@ -1223,7 +1581,7 @@ index 0000000000000000000000000000000000000000..316b841c4b0337696a6bf1ce58e8cea5
 +      case 'handoff': {
 +        const to = args.to as string
 +        const name = args.title ? title(args.title as string) : nameOf(ch)
-+        const target = await move(hub, thread, to, name)
++        const target = await move(hub, thread, to, name, args.channel as string | undefined)
 +        await ch.send(`Moved to ${to}: ${target}`)
 +        if (ch.isThread()) await ch.setArchived(true)
 +        return `moving to ${to}: ${target}. Your session stops here once this turn ends and resumes there.`
@@ -1239,16 +1597,25 @@ index 0000000000000000000000000000000000000000..316b841c4b0337696a6bf1ce58e8cea5
 +    channel: 'plugin:discord@hex',
 +    server,
 +    call,
-+    state: showTyping,
++    state: settle,
 +    fresh: thread => dms.has(thread),
 +    failed: (thread, reason) => {
 +      void threadChannel(thread).then(ch => ch.send(`Couldn't start this thread's session: ${reason}`)).catch(() => {})
++    },
++    permission: (thread, request) => void ask(thread, request).catch(err => process.stderr.write(`discord hub: couldn't relay a permission prompt to ${thread}: ${err}\n`)),
++    asks: {
++      answer: (thread, message, label, via) => void answerAsk(thread, message, label, via),
++      settle: (thread, message, note) => void settleAsk(thread, message, note),
++      reopen: (thread, message, via) => void reopenAsk(thread, message, via),
 +    },
 +    hexDir: process.env.HEX_DIR,
 +    launcher: process.env.HEX_LAUNCHER,
 +  })
 +
-+  clients.set('discord', { hub, place })
++  clients.set('discord', { hub, place: (name, where, about) => place(name, where, about) })
++
++  const allowed = (user: string) => loadAccess().allowFrom.includes(user)
++  voiceCalls(client, allowed)
 +
 +  // A tag in a channel starts a thread on that message, Claude-tag style;
 +  // inside a thread every message reaches its session without one.
@@ -1287,15 +1654,17 @@ index 0000000000000000000000000000000000000000..316b841c4b0337696a6bf1ce58e8cea5
 +    void ch.sendTyping().catch(() => {})
 +    if (access.ackReaction) void msg.react(access.ackReaction).catch(() => {})
 +
-+    // Attachments are listed (name/type/size) but not downloaded: the model
-+    // calls download_attachment when it wants them. The listing goes in meta
-+    // only, since an in-content annotation is forgeable by the sender.
++    // Attachments are listed (name/type/size) and only images are downloaded: the model
++    // calls download_attachment for the rest. The listing goes in meta only, since an
++    // in-content annotation is forgeable by the sender.
 +    const forwarded = msg.messageSnapshots.first()
 +    const source = forwarded ?? msg
 +    const atts = listed(source.attachments)
 +    const stickers = source.stickers.map(s => `${s.name} (${s.url})`)
 +    const poll = msg.poll
-+    const heard = source.flags.has(MessageFlags.IsVoiceMessage) ? await hear(source.attachments.first()) : undefined
++    const voiced = source.flags.has(MessageFlags.IsVoiceMessage)
++    const heard = voiced ? await hear(source.attachments.first()) : undefined
++    const shots = edited || voiced ? [] : await images(source.attachments)
 +
 +    const message: Message = {
 +      content: heard ? `(voice message) ${heard}` : source.content.replace(/<@[!&]?\d+>/g, '').trim() || (atts.length > 0 ? '(attachment)' : stickers.length > 0 ? '(sticker)' : poll ? '(poll)' : ''),
@@ -1308,6 +1677,7 @@ index 0000000000000000000000000000000000000000..316b841c4b0337696a6bf1ce58e8cea5
 +        ...(ch.isThread() && ch.parent ? { channel: ch.parent.name } : {}),
 +        ...(opened && !forum ? { new_thread: 'true' } : {}),
 +        ...(opened && forum ? { post_title: nameOf(ch) } : {}),
++        ...(shots.length > 0 ? { image_path: shots.join('; ') } : {}),
 +        ...(atts.length > 0 ? { attachment_count: String(atts.length), attachments: atts.join('; ') } : {}),
 +        ...(stickers.length > 0 ? { stickers: stickers.join('; ') } : {}),
 +        ...(poll ? { poll: poll.question.text!, poll_options: poll.answers.map(a => a.text).join('; '), ...(poll.allowMultiselect ? { poll_multiple: 'true' } : {}) } : {}),
@@ -1327,7 +1697,7 @@ index 0000000000000000000000000000000000000000..316b841c4b0337696a6bf1ce58e8cea5
 +  }
 +
 +  async function handleReaction(reaction: MessageReaction | PartialMessageReaction, user: User | PartialUser, removed: boolean): Promise<void> {
-+    if (!loadAccess().allowFrom.includes(user.id)) return
++    if (!allowed(user.id)) return
 +    const ch = await servedThread(reaction.message)
 +    if (!ch) return
 +    const target = reaction.message.partial ? await reaction.message.fetch().catch(() => undefined) : reaction.message
@@ -1355,6 +1725,7 @@ index 0000000000000000000000000000000000000000..316b841c4b0337696a6bf1ce58e8cea5
 +    if (deleting.delete(msg.id)) return
 +    const ch = await servedThread(msg)
 +    if (!ch) return
++    ledger.deleted(ch.id, msg.id)
 +    hub.deliver(ch.id, nameOf(ch), {
 +      content: '(deleted a message)',
 +      meta: {
@@ -1368,13 +1739,15 @@ index 0000000000000000000000000000000000000000..316b841c4b0337696a6bf1ce58e8cea5
 +  }
 +
 +  async function handleVote(answer: PollAnswer | PartialPollAnswer, userId: string, removed: boolean): Promise<void> {
-+    if (!loadAccess().allowFrom.includes(userId)) return
++    if (!allowed(userId)) return
 +    const ch = await servedThread(answer.poll.message)
 +    if (!ch) return
 +    const msg = answer.poll.message.partial ? await answer.poll.message.fetch() : answer.poll.message
 +    if (msg.author.id !== client.user!.id || !msg.poll) return
 +    const vote = msg.poll.answers.get(answer.id)?.text ?? ''
 +    const who = await client.users.fetch(userId)
++    if (!removed) ledger.answered(ch.id, msg.id, vote, 'discord')
++    else if (ledger.find(ch.id, msg.id)?.answer?.label === vote) ledger.reopened(ch.id, msg.id)
 +    hub.deliver(ch.id, nameOf(ch), {
 +      content: `(${removed ? 'vote removed' : 'vote'}: ${vote})`,
 +      meta: {
@@ -1390,23 +1763,66 @@ index 0000000000000000000000000000000000000000..316b841c4b0337696a6bf1ce58e8cea5
 +    })
 +  }
 +
++  function picked(ch: ThreadChannel | DMChannel, label: string, at: Date, user: { id: string; username: string }, message: string) {
++    ledger.answered(ch.id, message, label, 'discord')
++    hub.deliver(ch.id, nameOf(ch), {
++      content: label,
++      meta: {
++        chat_id: ch.id,
++        user: user.username,
++        user_id: user.id,
++        ts: at.toISOString(),
++        button: 'true',
++        button_message_id: message,
++      },
++    })
++  }
++
 +  async function handleTap(tap: ButtonInteraction): Promise<void> {
-+    if (!loadAccess().allowFrom.includes(tap.user.id)) return void (await tap.deferUpdate())
++    if (!allowed(tap.user.id)) return void (await tap.deferUpdate())
++    const ch = await threadChannel(tap.channelId)
++    const verdict = tap.customId.match(/^perm:(allow|deny):(\w+)$/)
++    if (verdict) {
++      await tap.update({ components: verdicts(verdict[2]!, verdict[1]) })
++      asking.get(ch.id)?.delete(tap.message.id)
++      return hub.answer(ch.id, verdict[2]!, verdict[1] as 'allow' | 'deny')
++    }
 +    const labels = (tap.message.components as ActionRow<ButtonComponent>[]).flatMap(row => row.components.map(button => button.label!))
 +    const chosen = Number(tap.customId)
 +    await tap.update({ components: buttons(labels, chosen) })
-+    const ch = await threadChannel(tap.channelId)
-+    hub.deliver(ch.id, nameOf(ch), {
-+      content: labels[chosen]!,
-+      meta: {
-+        chat_id: ch.id,
-+        user: tap.user.username,
-+        user_id: tap.user.id,
-+        ts: tap.createdAt.toISOString(),
-+        button: 'true',
-+        button_message_id: tap.message.id,
-+      },
-+    })
++    picked(ch, labels[chosen]!, tap.createdAt, tap.user, tap.message.id)
++  }
++
++  async function handleMenu(pick: StringSelectMenuInteraction): Promise<void> {
++    if (!allowed(pick.user.id)) return void (await pick.deferUpdate())
++    const labels = (pick.component as StringSelectMenuComponent).options.map(option => option.label)
++    const chosen = pick.values.map(value => labels[Number(value)]!)
++    await pick.update({ components: menu(labels, chosen) })
++    picked(await threadChannel(pick.channelId), chosen.join('; '), pick.createdAt, pick.user, pick.message.id)
++  }
++
++  // A thread's own controls, outside its conversation: its session never sees them.
++  async function handleCommand(command: ChatInputCommandInteraction): Promise<void> {
++    const answer = (content: string) => command.reply({ content, flags: MessageFlags.Ephemeral })
++    if (!allowed(command.user.id)) return void (await answer('hex only answers its owner.'))
++    const thread = command.channelId
++    if (!hub.name(thread)) return void (await answer('This channel has no session: use it in one of hex\'s threads or the DM.'))
++    switch (command.commandName) {
++      case 'model':
++      case 'effort': {
++        const value = command.options.getString(command.commandName, true)
++        hub.configure(thread, { [command.commandName]: value })
++        const name = [...MODELS, ...EFFORTS].find(choice => choice.value === value)?.name ?? value
++        return void (await answer(`${command.commandName === 'model' ? 'Model' : 'Effort'}: ${name}, from this thread's next message.`))
++      }
++      case 'compact':
++        if (!hub.session(thread)) return void (await answer('This thread has nothing to compact yet.'))
++        void hub.command(thread, '/compact')
++        return void (await answer('Compacting this thread.'))
++      case 'stop':
++        hub.stop(thread)
++        return void (await answer('Stopped. The next message resumes it.'))
++    }
 +  }
 +
 +  const failure = (what: string) => (e: unknown) => process.stderr.write(`discord hub: ${what} failed: ${e}\n`)
@@ -1437,6 +1853,8 @@ index 0000000000000000000000000000000000000000..316b841c4b0337696a6bf1ce58e8cea5
 +
 +  client.on('interactionCreate', interaction => {
 +    if (interaction.isButton()) handleTap(interaction).catch(failure('handleTap'))
++    else if (interaction.isStringSelectMenu()) handleMenu(interaction).catch(failure('handleMenu'))
++    else if (interaction.isChatInputCommand()) handleCommand(interaction).catch(failure('handleCommand'))
 +  })
 +
 +  client.on('messageCreate', msg => {
@@ -1455,6 +1873,7 @@ index 0000000000000000000000000000000000000000..316b841c4b0337696a6bf1ce58e8cea5
 +
 +  client.on('threadDelete', thread => {
 +    process.stderr.write(`discord hub: thread ${thread.id} was deleted, forgetting it\n`)
++    ledger.forget(thread.id)
 +    void hub.retire(thread.id)
 +  })
 +
@@ -1466,18 +1885,29 @@ index 0000000000000000000000000000000000000000..316b841c4b0337696a6bf1ce58e8cea5
 +    process.stderr.write(`discord hub: gateway connected as ${c.user.tag}\n`)
 +    const id = client.guilds.cache.first()?.id
 +    if (id) writeFileSync(GUILD_FILE, JSON.stringify({ id }) + '\n')
++    void c.application?.commands.set(COMMANDS).catch(failure('registering slash commands'))
 +  })
 +
-+  client.login(token).catch(err => {
-+    process.stderr.write(`discord hub: login failed: ${err}\n`)
-+  })
++  // discord.js reconnects a session it has, but not a first login that fails, as when the
++  // network isn't up yet at boot. Only a bad token is final.
++  async function login(attempt = 1): Promise<void> {
++    try {
++      await client.login(token)
++    } catch (err) {
++      if ((err as { code?: string }).code === DiscordjsErrorCodes.TokenInvalid) return void process.stderr.write(`discord hub: login failed: ${err}\n`)
++      const delay = Math.min(1000 * 2 ** (attempt - 1), 60_000)
++      process.stderr.write(`discord hub: login failed: ${err}, retrying in ${delay / 1000}s\n`)
++      setTimeout(login, delay, attempt + 1)
++    }
++  }
++  void login()
 +}
 diff --git a/external_plugins/discord/channel.ts b/external_plugins/discord/channel.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..0ef6533587e4073332a8a7a247d5bbc95dc43036
+index 0000000000000000000000000000000000000000..aa3dfccc33bfc8548a8fe9c51fb6756e4f6cc10e
 --- /dev/null
 +++ b/external_plugins/discord/channel.ts
-@@ -0,0 +1,219 @@
+@@ -0,0 +1,224 @@
 +import type { ChannelServer } from '../../hub/hub.ts'
 +
 +const titleProperty = { type: 'string', description: 'One word, like a chat name ("Anchors", "Frontier").' }
@@ -1485,14 +1915,15 @@ index 0000000000000000000000000000000000000000..0ef6533587e4073332a8a7a247d5bbc9
 +// What each session's channel says and offers; the hub serves it over HTTP.
 +export const server: ChannelServer = {
 +  title: 'Discord',
++  permission: true,
 +  instructions: [
 +    'The sender reads Discord, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat. Nobody watches this terminal either, so the report a background job ends with goes to them as a reply: what they need to know and act on. Once it\'s sent, end the turn without repeating it here.',
 +    '',
-+    'This session is one Discord thread, the place for deeper work. Discord renders Markdown, so answers can be longer and structured: headings, lists, and code blocks with a language. Its messages arrive as <channel source="discord" chat_id="..." message_id="..." user="..." ts="...">, and everything you send with these tools lands back in that same thread. If the tag has new_thread="true", this thread was just opened from that message and named after its first word: give it a fitting name with rename_thread first. If the tag has attachment_count, the attachments attribute lists name/type/size — call download_attachment(message_id) to fetch them. If the tag has reply_to_message_id, the sender replied to that earlier message: reply_to_text is its text and reply_to_attachments lists its files (download_attachment with that id). edited="true" means the sender edited the message with that message_id and this is its new text; forwarded="true" means it is a message they forwarded. stickers lists sent stickers with their image URLs; poll is a poll question, with poll_options and poll_multiple when several answers are allowed. post_title is the title of a new forum post. A reaction arrives as "(reaction: 👍)" with reaction, reaction_to_message_id, reaction_to_user and reaction_to_text, plus reaction_removed="true" when taken off. deleted="true" means the message with that message_id was deleted, with deleted_text when known. button="true" means the sender tapped the button with this label on button_message_id. A vote on your poll arrives as "(vote: Tacos)" with vote, poll and poll_message_id, plus vote_removed="true" when taken back. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply.',
++    'This session is one Discord thread, the place for deeper work. Discord renders Markdown, so answers can be longer and structured: headings (#, ##, ###), lists, quotes, bold and italic, and code blocks with a language (```ts) for syntax highlighting. It has no tables: use a list, or line columns up in a code block. -# at the start of a line makes it small grey subtext, [text](https://...) masks a link, and a link wrapped in <> shows no preview. Its messages arrive as <channel source="discord" chat_id="..." message_id="..." user="..." ts="...">, and everything you send with these tools lands back in that same thread. If the tag has new_thread="true", this thread was just opened from that message and named after its first word: give it a fitting name with rename_thread first. If the tag has image_path, Read it: those are the images the sender attached, already downloaded. If the tag has attachment_count, the attachments attribute lists name/type/size — call download_attachment(message_id) to fetch the other files. If the tag has reply_to_message_id, the sender replied to that earlier message: reply_to_text is its text and reply_to_attachments lists its files (download_attachment with that id). edited="true" means the sender edited the message with that message_id and this is its new text; forwarded="true" means it is a message they forwarded. stickers lists sent stickers with their image URLs; poll is a poll question, with poll_options and poll_multiple when several answers are allowed. post_title is the title of a new forum post. A reaction arrives as "(reaction: 👍)" with reaction, reaction_to_message_id, reaction_to_user and reaction_to_text, plus reaction_removed="true" when taken off. deleted="true" means the message with that message_id was deleted, with deleted_text when known. button="true" means the sender tapped the button with this label on button_message_id, or picked these labels (joined by "; ") from its menu. answered_in says a question was answered somewhere else, in hex\'s app or on a call, and took_back that an answer given there no longer stands. A vote on your poll arrives as "(vote: Tacos)" with vote, poll and poll_message_id, plus vote_removed="true" when taken back. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply.',
 +    '',
-+    'reply accepts file paths (files: ["/abs/path.png"]) for attachments, silent: true to skip the notification, and buttons: ["Yes", "No"] for tappable choices. Use react to add emoji reactions, and edit_message for interim progress updates or to swap a sent file. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',
++    'reply accepts file paths (files: ["/abs/path.png"]) for attachments, silent: true to skip the notification, and buttons: ["Yes", "No"] for tappable choices; with multiple: true they come as a menu where the user picks any number of them. Use react to add emoji reactions, and edit_message for interim progress updates or to swap a sent file. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',
 +    '',
-+    'new_thread opens another thread with its own fresh session and hands it your prompt. Use it for work the user will want to follow or talk to on its own. handoff moves this whole conversation to another app, such as telegram, when the user asks: you stop here and continue there with your memory.',
++    'new_thread opens another thread with its own fresh session and hands it your prompt; the thread starts with the user\'s request and your replies since, forwarded. Use it for work the user will want to follow or talk to on its own. In a forum channel it opens a post, with tags if you name them. With app: "telegram" or "buzz" it opens the thread there instead. handoff moves this whole conversation to Telegram or Buzz when the user asks: you stop here and continue there with your memory.',
 +    '',
 +    "fetch_messages pulls real Discord history, from this thread by default. The tag's channel attribute names the channel this thread is in: fetch_messages(channel) reads that channel's top-level messages, a message with a thread shows its reply count, and fetch_messages(thread: that message's id) reads the thread. When the user refers to earlier work or talk in the channel, read it rather than saying you can't see it. To find an old message anywhere in the server, use search_messages.",
 +  ].join('\n'),
@@ -1521,6 +1952,7 @@ index 0000000000000000000000000000000000000000..0ef6533587e4073332a8a7a247d5bbc9
 +            items: { type: 'string' },
 +            description: 'Button labels shown under the message (max 25, 80 chars each). A tap comes back as a message with button="true", and the buttons then lock showing the choice.',
 +          },
++          multiple: { type: 'boolean', description: 'Show the buttons as a menu where any number can be picked at once (labels up to 100 chars). The picks come back as one message.' },
 +        },
 +        required: ['text'],
 +      },
@@ -1618,7 +2050,7 @@ index 0000000000000000000000000000000000000000..0ef6533587e4073332a8a7a247d5bbc9
 +    },
 +    {
 +      name: 'fetch_messages',
-+      description: 'Fetch recent messages from this thread, or from a channel or another thread. Returns oldest-first with message IDs. In a channel, a message that has a thread shows its reply count and last reply; pass its id as thread to read the thread.',
++      description: 'Fetch recent messages from this thread, or from a channel or another thread. Returns oldest-first with message IDs. In a channel, a message that has a thread shows its reply count and last reply; pass its id as thread to read the thread. A forum channel lists its posts; pass a post\'s id as thread to read it.',
 +      inputSchema: {
 +        type: 'object',
 +        properties: {
@@ -1645,7 +2077,7 @@ index 0000000000000000000000000000000000000000..0ef6533587e4073332a8a7a247d5bbc9
 +    },
 +    {
 +      name: 'list_channels',
-+      description: 'List the Discord channels you can read, with their IDs.',
++      description: 'List the Discord text, announcement and forum channels you can read, with their IDs.',
 +      inputSchema: { type: 'object', properties: {} },
 +    },
 +    {
@@ -1678,7 +2110,9 @@ index 0000000000000000000000000000000000000000..0ef6533587e4073332a8a7a247d5bbc9
 +          title: titleProperty,
 +          prompt: { type: 'string', description: "The user's request and the context the new session can't find itself: it starts from this prompt alone." },
 +          about: { type: 'string', description: 'One line the user sees first in the new thread, saying what it is for and where it came from.' },
-+          channel: { type: 'string', description: 'Channel to open it in, by name. Defaults to this thread\'s channel.' },
++          app: { type: 'string', enum: ['discord', 'telegram', 'buzz'], description: 'Where to open it. Default: discord.' },
++          channel: { type: 'string', description: 'Channel to open it in, by name: a text or forum channel. Defaults to this thread\'s channel; in Buzz, the server\'s first channel.' },
++          tags: { type: 'array', items: { type: 'string' }, description: 'Forum channel only: the post\'s tags, by name.' },
 +        },
 +        required: ['title', 'prompt', 'about'],
 +      },
@@ -1691,6 +2125,7 @@ index 0000000000000000000000000000000000000000..0ef6533587e4073332a8a7a247d5bbc9
 +        properties: {
 +          to: { type: 'string', enum: ['telegram', 'buzz'] },
 +          title: titleProperty,
++          channel: { type: 'string', description: 'Buzz only: the channel to open it in, by name. Default: the server\'s first channel.' },
 +        },
 +        required: ['to'],
 +      },
@@ -1698,10 +2133,10 @@ index 0000000000000000000000000000000000000000..0ef6533587e4073332a8a7a247d5bbc9
 +  ],
 +}
 diff --git a/external_plugins/discord/package.json b/external_plugins/discord/package.json
-index eac89c3befd8ebb90758a9acdf7f400de8c9f298..37abf2f3bd65cf542e97a9b87d49904f711e3b57 100644
+index eac89c3befd8ebb90758a9acdf7f400de8c9f298..fdfb6d947889bfc570c83c927a237f093c73ad34 100644
 --- a/external_plugins/discord/package.json
 +++ b/external_plugins/discord/package.json
-@@ -1,14 +1,12 @@
+@@ -1,14 +1,14 @@
  {
    "name": "claude-channel-discord",
 -  "version": "0.0.1",
@@ -1715,7 +2150,10 @@ index eac89c3befd8ebb90758a9acdf7f400de8c9f298..37abf2f3bd65cf542e97a9b87d49904f
    },
    "dependencies": {
 -    "@modelcontextprotocol/sdk": "^1.0.0",
-     "discord.js": "^14.14.0"
+-    "discord.js": "^14.14.0"
++    "@discordjs/voice": "^0.19.2",
++    "discord.js": "^14.27.0",
++    "opusscript": "^0.1.1"
    }
  }
 diff --git a/external_plugins/discord/server.ts b/external_plugins/discord/server.ts
@@ -2872,3 +3310,311 @@ index a1e15f8b927ca7385a06ebf6eacacbd4e4acd527..00000000000000000000000000000000
 -  or `/reload-plugins`. Say so after saving.
 -- `access.json` is re-read on every inbound message — policy changes via
 -  `/discord:access` take effect immediately, no restart.
+diff --git a/external_plugins/discord/voice.test.ts b/external_plugins/discord/voice.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..d556b7b281ea186348eace725e22f5e445a531d0
+--- /dev/null
++++ b/external_plugins/discord/voice.test.ts
+@@ -0,0 +1,138 @@
++import { expect, mock, test } from 'bun:test'
++import { EventEmitter } from 'events'
++import { PassThrough } from 'stream'
++import OpusScript from 'opusscript'
++import * as real from '@discordjs/voice'
++import { engine } from '../../hub/hub.ts'
++
++const OWNER = '2000'
++const joined: { options: any; connection: any }[] = []
++const resources: PassThrough[] = []
++const player = { play: (resource: { stream: PassThrough }) => void resources.push(resource.stream) }
++
++function connection() {
++  const voice = new PassThrough({ objectMode: true })
++  const emitter = Object.assign(new EventEmitter(), {
++    state: { status: real.VoiceConnectionStatus.Ready as string },
++    voice,
++    subscribed: undefined as unknown,
++    subscribe: (to: unknown) => void (emitter.subscribed = to),
++    receiver: { subscribe: (user: string) => ((emitter as any).listening = user, voice) },
++    destroy: () => {
++      emitter.state.status = real.VoiceConnectionStatus.Destroyed
++      emitter.emit(real.VoiceConnectionStatus.Destroyed)
++    },
++  })
++  return emitter
++}
++
++mock.module('@discordjs/voice', () => ({
++  ...real,
++  joinVoiceChannel: (options: any) => {
++    const made = connection()
++    joined.push({ options, connection: made })
++    return made
++  },
++  entersState: async () => {},
++  createAudioPlayer: () => player,
++  createAudioResource: (stream: PassThrough) => ({ stream }),
++}))
++
++const { narrow, widen, speaker, listener, voiceCalls } = await import('./voice.ts')
++
++const pcm = (...samples: number[]) => {
++  const buffer = Buffer.alloc(samples.length * 2)
++  samples.forEach((sample, i) => buffer.writeInt16LE(sample, i * 2))
++  return buffer
++}
++const samples = (buffer: Buffer) => Array.from({ length: buffer.length / 2 }, (_, i) => buffer.readInt16LE(i * 2))
++const tick = (value: number) => pcm(...Array(2400).fill(value)).toString('base64')
++
++async function until<T>(check: () => T | undefined, timeout = 3000): Promise<T> {
++  for (const end = Date.now() + timeout; Date.now() < end; await Bun.sleep(10)) {
++    const value = check()
++    if (value) return value
++  }
++  throw new Error('timed out')
++}
++
++test('Discord\'s 48 kHz stereo becomes the engine\'s 24 kHz mono, and back, each new sample halfway to the next', () => {
++  expect(samples(narrow(pcm(100, 300, 200, 200, -50, -150, 0, 0)))).toEqual([200, -50])
++  expect(samples(widen(pcm(0, 100)))).toEqual([0, 0, 50, 50, 100, 100, 100, 100])
++})
++
++test('the voice plays in stretches of speech: silence before it is skipped, a short pause stays, and a long one ends the stretch', () => {
++  resources.length = 0
++  const play = speaker(player as any)
++  play(tick(0))
++  expect(resources).toHaveLength(0)
++  play(tick(5000))
++  expect(resources).toHaveLength(1)
++  const stretch = resources[0]!
++  const cushion = stretch.read(19200) as Buffer
++  expect(samples(cushion).every(sample => sample === 0)).toBe(true)
++  expect(samples(stretch.read() as Buffer).slice(0, 4)).toEqual([5000, 5000, 5000, 5000])
++  for (let i = 0; i < 3; i++) play(tick(0))
++  expect(stretch.writableEnded).toBe(false)
++  play(tick(0))
++  expect(stretch.writableEnded).toBe(true)
++  play(tick(0))
++  play(tick(4000))
++  expect(resources).toHaveLength(2)
++})
++
++test('the owner\'s voice is decoded and sent on at 24 kHz, and quiet is sent as silence', async () => {
++  const heard: Buffer[] = []
++  const ear = listener(audio => void heard.push(Buffer.from(audio, 'base64')))
++  const encoder = new OpusScript(48_000, 2, OpusScript.Application.VOIP)
++  ear.packet(Buffer.from(encoder.encode(pcm(...Array(1920).fill(1000)), 960)))
++  expect(heard[0]).toHaveLength(960)
++  await until(() => heard.length > 1)
++  expect(heard[1]).toHaveLength(4800)
++  expect(samples(heard[1]!).every(sample => sample === 0)).toBe(true)
++  ear.close()
++  encoder.delete()
++})
++
++test('the owner joining a voice channel calls hex there through the call engine, and leaving hangs up and leaves', async () => {
++  const handlers = new Map<string, (...args: any[]) => void>()
++  const client = { on: (event: string, handler: (...args: any[]) => void) => handlers.set(event, handler) }
++  const heard: string[] = []
++  const calls: { greeting: string; line: any; hungUp: boolean }[] = []
++  engine.take = (from, greeting, line) => {
++    expect(from).toBe('discord')
++    const call = { greeting, line, hungUp: false }
++    calls.push(call)
++    return { hear: audio => void heard.push(audio), hangUp: () => void (call.hungUp = true) }
++  }
++  voiceCalls(client as any, user => user === OWNER)
++  const channel = { id: '6000', name: 'General', guild: { id: '3000', voiceAdapterCreator: () => ({}) } }
++  const state = (channelId: string | null, id = OWNER) => ({ id, channelId, channel: channelId ? channel : null })
++
++  handlers.get('voiceStateUpdate')!(state(null, '8888'), state('6000', '8888'))
++  handlers.get('voiceStateUpdate')!(state(null), state('6000'))
++  const call = await until(() => calls[0])
++  expect(joined).toHaveLength(1)
++  expect(joined[0]!.options).toMatchObject({ channelId: '6000', guildId: '3000', selfDeaf: false })
++  expect(call.greeting).toBe('They joined you in the Discord voice channel General. Answer briefly, then listen.')
++  const { connection } = joined[0]!
++  expect(connection.listening).toBe(OWNER)
++  expect(connection.subscribed).toBe(player)
++
++  const encoder = new OpusScript(48_000, 2, OpusScript.Application.VOIP)
++  connection.voice.write(Buffer.from(encoder.encode(pcm(...Array(1920).fill(800)), 960)))
++  await until(() => heard.length)
++  encoder.delete()
++
++  handlers.get('voiceStateUpdate')!(state('6000'), state('6000'))
++  expect(call.hungUp).toBe(false)
++  handlers.get('voiceStateUpdate')!(state('6000'), state(null))
++  expect(call.hungUp).toBe(true)
++  expect(connection.state.status).toBe(real.VoiceConnectionStatus.Destroyed)
++
++  handlers.get('voiceStateUpdate')!(state(null), state('6000'))
++  const next = await until(() => calls[1])
++  next.line.end()
++  expect(joined[1]!.connection.state.status).toBe(real.VoiceConnectionStatus.Destroyed)
++  delete engine.take
++})
+diff --git a/external_plugins/discord/voice.ts b/external_plugins/discord/voice.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..f459fb990d722bd8dbd38dfc4934508a754fd78b
+--- /dev/null
++++ b/external_plugins/discord/voice.ts
+@@ -0,0 +1,158 @@
++import {
++  joinVoiceChannel,
++  createAudioPlayer,
++  createAudioResource,
++  entersState,
++  EndBehaviorType,
++  StreamType,
++  VoiceConnectionStatus,
++  type AudioPlayer,
++} from '@discordjs/voice'
++import OpusScript from 'opusscript'
++import { PassThrough } from 'stream'
++import type { Client, VoiceBasedChannel } from 'discord.js'
++import { engine, type Held } from '../../hub/hub.ts'
++
++// Discord's audio is 48 kHz stereo in 20 ms Opus frames; the call engine's is 24 kHz mono PCM.
++const RATE = 48_000
++const TICK = 100
++const SILENCE = Buffer.alloc((24_000 * 2 * TICK) / 1000)
++const CUSHION = Buffer.alloc((RATE * 4 * TICK) / 1000)
++const PAUSE = 300
++const QUIET = 64
++
++// 48 kHz stereo to 24 kHz mono: each sample averages two frames of both channels.
++export function narrow(pcm: Buffer): Buffer {
++  const out = Buffer.alloc(pcm.length >> 2)
++  for (let i = 0, o = 0; o < out.length; i += 8, o += 2) {
++    out.writeInt16LE((pcm.readInt16LE(i) + pcm.readInt16LE(i + 2) + pcm.readInt16LE(i + 4) + pcm.readInt16LE(i + 6)) >> 2, o)
++  }
++  return out
++}
++
++// 24 kHz mono to 48 kHz stereo: each new sample sits halfway to the next.
++export function widen(pcm: Buffer): Buffer {
++  const samples = pcm.length >> 1
++  const out = Buffer.alloc(samples * 8)
++  for (let i = 0; i < samples; i++) {
++    const sample = pcm.readInt16LE(i * 2)
++    const between = (sample + (i + 1 < samples ? pcm.readInt16LE(i * 2 + 2) : sample)) >> 1
++    out.writeInt16LE(sample, i * 8)
++    out.writeInt16LE(sample, i * 8 + 2)
++    out.writeInt16LE(between, i * 8 + 4)
++    out.writeInt16LE(between, i * 8 + 6)
++  }
++  return out
++}
++
++function silent(pcm: Buffer): boolean {
++  for (let i = 0; i < pcm.length; i += 2) if (Math.abs(pcm.readInt16LE(i)) > QUIET) return false
++  return true
++}
++
++// The voice comes as one unbroken stream, its pauses as silence, and Discord shows the bot speaking
++// for as long as it sends audio. So a pause longer than PAUSE ends a stretch of speech, and the next
++// sound starts a new one behind a short cushion that absorbs the stream's jitter.
++export function speaker(player: AudioPlayer) {
++  let stretch: PassThrough | undefined
++  let quiet = 0
++  return (audio: string) => {
++    const pcm = Buffer.from(audio, 'base64')
++    quiet = silent(pcm) ? quiet + pcm.length / 48 : 0
++    if (quiet > PAUSE) {
++      stretch?.end()
++      stretch = undefined
++      return
++    }
++    if (!stretch && quiet) return
++    if (!stretch) {
++      stretch = new PassThrough()
++      stretch.write(CUSHION)
++      player.play(createAudioResource(stretch, { inputType: StreamType.Raw }))
++    }
++    stretch.write(widen(pcm))
++  }
++}
++
++// The owner's voice, decoded as it comes. Discord sends nothing while they're quiet, but the voice
++// model takes its turn on hearing silence, so every quiet TICK is sent as silence.
++export function listener(hear: (audio: string) => void) {
++  const decoder = new OpusScript(RATE, 2, OpusScript.Application.VOIP)
++  let heard = Date.now()
++  const quiet = setInterval(() => {
++    if (Date.now() - heard < TICK) return
++    heard = Date.now()
++    hear(SILENCE.toString('base64'))
++  }, TICK)
++  return {
++    packet(opus: Buffer) {
++      heard = Date.now()
++      try {
++        hear(narrow(Buffer.from(decoder.decode(opus))).toString('base64'))
++      } catch (err) {
++        process.stderr.write(`discord hub: dropped a voice packet that wouldn't decode: ${err}\n`)
++      }
++    },
++    close() {
++      clearInterval(quiet)
++      decoder.delete()
++    },
++  }
++}
++
++// The owner joining one of the server's voice channels calls hex there, through the voice app's
++// call engine, like a phone call; leaving, or hex hanging up, ends it. One call at a time.
++export function voiceCalls(client: Client, owner: (user: string) => boolean) {
++  let current: { channel: string; end: () => void } | undefined
++
++  async function call(channel: VoiceBasedChannel, user: string) {
++    const take = engine.take
++    if (!take) return void process.stderr.write('discord hub: the voice app isn\'t running, so a voice channel takes no calls\n')
++    const connection = joinVoiceChannel({ channelId: channel.id, guildId: channel.guild.id, adapterCreator: channel.guild.voiceAdapterCreator, selfDeaf: false })
++    let held: Held | undefined
++    let ear: ReturnType<typeof listener> | undefined
++    let voice: ReturnType<typeof connection.receiver.subscribe> | undefined
++    let over = false
++    const end = () => {
++      if (over) return
++      over = true
++      if (current?.end === end) current = undefined
++      held?.hangUp()
++      voice?.destroy()
++      ear?.close()
++      if (connection.state.status !== VoiceConnectionStatus.Destroyed) connection.destroy()
++    }
++    current = { channel: channel.id, end }
++    // A disconnect that is only a move or a region change starts signalling again on its own.
++    connection.on(VoiceConnectionStatus.Disconnected, () => {
++      Promise.race([entersState(connection, VoiceConnectionStatus.Signalling, 5_000), entersState(connection, VoiceConnectionStatus.Connecting, 5_000)]).catch(end)
++    })
++    connection.on(VoiceConnectionStatus.Destroyed, end)
++    try {
++      await entersState(connection, VoiceConnectionStatus.Ready, 20_000)
++    } catch (err) {
++      process.stderr.write(`discord hub: couldn't join #${channel.name}: ${err}\n`)
++      return end()
++    }
++    if (over) return
++    const player = createAudioPlayer({ behaviors: { maxMissedFrames: 50 } })
++    connection.subscribe(player)
++    try {
++      held = take('discord', `They joined you in the Discord voice channel ${channel.name}. Answer briefly, then listen.`, { play: speaker(player), end })
++    } catch (err) {
++      process.stderr.write(`discord hub: ${err}\n`)
++      return end()
++    }
++    ear = listener(held.hear)
++    voice = connection.receiver.subscribe(user, { end: { behavior: EndBehaviorType.Manual } })
++    voice.on('data', (opus: Buffer) => ear?.packet(opus))
++    voice.on('error', err => process.stderr.write(`discord hub: voice receive failed: ${err}\n`))
++    process.stderr.write(`discord hub: on a call in #${channel.name}\n`)
++  }
++
++  client.on('voiceStateUpdate', (before, after) => {
++    if (!owner(after.id) || before.channelId === after.channelId) return
++    if (current && current.channel === before.channelId) current.end()
++    if (after.channel && !current) void call(after.channel, after.id).catch(err => process.stderr.write(`discord hub: voice call failed: ${err}\n`))
++  })
++}

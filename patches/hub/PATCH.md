@@ -4,7 +4,7 @@ id: hub
 summary: Add a client-agnostic hub that gives every chat thread its own Claude Code session and moves threads between clients.
 baseline: ea10b213686c90bb1984b2016937310e05336cf3
 patch_file: hub.patch
-patch_sha256: 41d20b2ec116c27db3964809217743ff1ee4c40de2790e573bf9787f72290a8c
+patch_sha256: 71624c16afbd2fcd9846f4904a09c44fe0e1c10db20860ac1076f6f997f3d74c
 ---
 
 ## Intent
@@ -188,10 +188,30 @@ request to the hub serving that path (`route`). A thread is on a call from its `
 process, so on SIGHUP the service exits once no thread is on a call (`free`), and
 whatever runs it starts it again on the current code, inside Claude Code's
 first retry, so sessions carry on where they were. Each chat client registers in `clients` with a `place` that opens a
-thread, led by a line saying what it's for when one is given, which lets `move` hand a thread to another client: its session
-stops once its turn ends (`release`) and resumes there with its memory
-(`adopt`). The main thread never leaves, so a copy of it continues there
-instead (`fork`, `--fork-session`).
+thread, led by a line saying what it's for when one is given. `begin` is how
+any session starts work anywhere: it opens a thread on any client and starts
+its session on a prompt (its first message as it starts) or on a message
+delivered there the way the app's own are (the voice app's `send`, which
+follows it by a tag in its meta), so every client's `new_thread` reaches
+every other app through it, T3 Code's included. `move` hands a thread to
+another client: its session stops once its turn ends (`release`) and resumes
+there with its memory (`adopt`). The main thread never leaves, nor does a
+thread its app owns (a T3 Code thread, `copy`), so a copy of it continues
+there instead (`fork`, `--fork-session`). A thread that names another client
+that isn't running is told which are.
+
+The hub also holds what its clients share: `MODELS` and `EFFORTS`, the
+choices a client offers for a thread's settings (T3 Code's pickers, Discord's
+`/model` and `/effort`); `preview`, a permission prompt's input as one line
+per field; and `engine`, where the voice app's call engine puts `take` once it
+runs, so a client that holds a line to the owner (a Discord voice channel)
+hands it calls without depending on the voice plugin. `hub/ledger.ts` keeps
+every question a client asked with buttons, a menu or a poll, what became of
+it (answered, and where; settled; taken back), and each thread's pinned post,
+in the client's `ledger.json`, where the voice app's asks and hex's check read
+them. A message is a number in Telegram and a string in Discord, whose
+snowflakes outgrow a JavaScript number; an ask from a menu records that any
+number could be picked, so taking an answer back puts the menu back.
 
 ## Invariants
 

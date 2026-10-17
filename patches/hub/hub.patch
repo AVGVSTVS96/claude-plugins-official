@@ -154,16 +154,16 @@ index 0000000000000000000000000000000000000000..cb68ecc69cad62019f3ab051d5d5a924
 +}
 diff --git a/hub/hub.test.ts b/hub/hub.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..289b5bd79cce78d2bb1aa22c346fc7fab580f175
+index 0000000000000000000000000000000000000000..0bc16278617799f14bca9b4eba841c36fa0e3259
 --- /dev/null
 +++ b/hub/hub.test.ts
-@@ -0,0 +1,1497 @@
+@@ -0,0 +1,1529 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { connect, createServer, type Socket } from 'net'
 +import { appendFileSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, chmodSync, existsSync } from 'fs'
 +import { tmpdir } from 'os'
 +import { join } from 'path'
-+import { free, stamp, startHub, tappable, transcribe, type ChannelServer, type Message, type Permission } from './hub.ts'
++import { begin, clients, free, move, stamp, startHub, tappable, transcribe, type ChannelServer, type Message, type Permission } from './hub.ts'
 +import { hangUpAll, http as line, port } from './testing.ts'
 +
 +const CHANNEL = 'plugin:telegram@hex'
@@ -1655,18 +1655,51 @@ index 0000000000000000000000000000000000000000..289b5bd79cce78d2bb1aa22c346fc7fa
 +  hub.deliver('chat:7', 'Desk anchors', message)
 +  await launched()
 +})
++
++test('begin opens a thread on another client and starts its session on a prompt, or on a message it delivers under the thread\'s name', async () => {
++  start({ agents: [] })
++  const placed: (string | undefined)[][] = []
++  clients.set('elsewhere', { hub, place: async (name, where, about) => (placed.push([name, where, about]), { thread: `chat:${placed.length + 8}`, link: `https://chat/${placed.length + 8}` }) })
++  try {
++    expect(await begin('elsewhere', 'Anchors', 'look at the anchors', { about: 'From Discord', where: 'desk' })).toEqual({ thread: 'chat:9', link: 'https://chat/9' })
++    expect((await launched()).at(-1)).toBe('look at the anchors')
++    await begin('elsewhere', 'Relay', { content: 'fix the relay', meta: { user: 'hex voice' } })
++    expect(placed).toEqual([['Anchors', 'desk', 'From Discord'], ['Relay', undefined, undefined]])
++    expect((await until(() => registry()['chat:10'])).name).toBe('Relay')
++    const { received } = await session('chat:10')
++    await until(() => received.length)
++    expect(received[0]).toMatchObject({ content: 'fix the relay', meta: { user: 'hex voice' } })
++    await expect(begin('nowhere', 'Anchors', 'x')).rejects.toThrow("nowhere isn't connected; threads open in elsewhere")
++  } finally {
++    clients.delete('elsewhere')
++  }
++})
++
++test('a move that copies forks the session there and leaves the thread here', async () => {
++  start({ registry: { 'chat:7': { name: 'Desk anchors', session: SESSION } } })
++  const forked: unknown[][] = []
++  clients.set('elsewhere', { hub: { fork: (...args: unknown[]) => forked.push(args) } as any, place: async () => ({ thread: 'far:1', link: 'https://far/1' }) })
++  try {
++    expect(await move(hub, 'chat:7', 'elsewhere', 'Anchors', undefined, true)).toBe('https://far/1')
++    expect(forked).toEqual([['far:1', 'Anchors', SESSION, 'This conversation just moved to elsewhere, into the thread "Anchors". Your elsewhere tools now post there. Carry on where you left off.', undefined]])
++    expect(registry()['chat:7']).toEqual({ name: 'Desk anchors', session: SESSION })
++  } finally {
++    clients.delete('elsewhere')
++  }
++})
 diff --git a/hub/hub.ts b/hub/hub.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..716d645acdd231c4bc18a45a5273549377c34779
+index 0000000000000000000000000000000000000000..5ace545ca8dc6f7a03e36e64a5806fcb85a2b3b9
 --- /dev/null
 +++ b/hub/hub.ts
-@@ -0,0 +1,793 @@
+@@ -0,0 +1,848 @@
 +import { createServer } from 'net'
 +import { createHash, randomBytes } from 'crypto'
 +import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync, type FSWatcher } from 'fs'
 +import { basename, join } from 'path'
 +import * as claude from './claude.ts'
 +import { endpoint, type ChannelServer, type Line } from './mcp.ts'
++import type { MessageId } from './ledger.ts'
 +
 +export type { ChannelServer, Tool } from './mcp.ts'
 +
@@ -1677,12 +1710,39 @@ index 0000000000000000000000000000000000000000..716d645acdd231c4bc18a45a52735493
 +export type Failed = (thread: string, reason: string) => void
 +export type Permission = { request_id: string; tool_name: string; description: string; input_preview: string }
 +export type Settings = { model?: string; effort?: string }
++
++// The choices a client offers for a thread's settings.
++export const MODELS = [
++  { value: 'claude-opus-5-5', name: 'Opus 5.5', alias: 'opus' },
++  { value: 'claude-sonnet-5-5', name: 'Sonnet 5.5', alias: 'sonnet' },
++  { value: 'claude-haiku-5-5', name: 'Haiku 5.5', alias: 'haiku' },
++  { value: 'claude-fable-5-1', name: 'Fable 5.1', alias: 'fable' },
++]
++export const EFFORTS = [
++  { value: 'low', name: 'Low' },
++  { value: 'medium', name: 'Medium' },
++  { value: 'high', name: 'High' },
++  { value: 'xhigh', name: 'Extra High' },
++  { value: 'max', name: 'Max' },
++]
++
++// A permission prompt's input as one "key: value" line per field, leaving out what its description already says.
++export function preview({ input_preview, description }: Permission): string {
++  try {
++    return Object.entries(JSON.parse(input_preview))
++      .filter(([, value]) => value !== description)
++      .map(([key, value]) => `${key}: ${typeof value === 'string' ? value : JSON.stringify(value)}`)
++      .join('\n')
++  } catch {
++    return input_preview
++  }
++}
 +// What another process (the voice app, hex's check) can do with a question the client asked
 +// with buttons: answer it for the owner, settle it as no longer asked, or take an answer back.
 +export type Asks = {
-+  answer: (thread: string, message: number, label: string, via: string) => void
-+  settle: (thread: string, message: number, note: string) => void
-+  reopen: (thread: string, message: number, via: string) => void
++  answer: (thread: string, message: MessageId, label: string, via: string) => void
++  settle: (thread: string, message: MessageId, note: string) => void
++  reopen: (thread: string, message: MessageId, via: string) => void
 +}
 +export type Hub = ReturnType<typeof startHub>
 +
@@ -1720,6 +1780,15 @@ index 0000000000000000000000000000000000000000..716d645acdd231c4bc18a45a52735493
 +  unsaved?: string
 +  held: (() => void)[]
 +}
++
++// A call on a line a client holds, like a Discord voice channel: the line plays the voice's audio
++// and ends when the call does, and the call engine hears the caller and can be hung up on. Audio is
++// base64 PCM at 24 kHz, mono.
++export type VoiceLine = { play: (audio: string) => void; end: () => void }
++export type Held = { hear: (audio: string) => void; hangUp: () => void }
++
++// The voice app's call engine, once it runs in this process, for a client that holds a line.
++export const engine: { take?: (from: 'discord', greeting: string, line: VoiceLine) => Held } = {}
 +
 +// Every client running in this process, so a thread can move between them.
 +// place() opens a thread on the client, led by its about line if given, and returns its id and a link to it.
@@ -2440,19 +2509,187 @@ index 0000000000000000000000000000000000000000..716d645acdd231c4bc18a45a52735493
 +  }
 +}
 +
-+// Moves a thread to another client: its session stops here and resumes there,
-+// memory intact. The main thread never leaves, so a copy of it continues instead.
-+export async function move(from: Hub, thread: string, to: string, name: string, where?: string) {
-+  const target = clients.get(to)
-+  if (!target) throw new Error(`${to} isn't connected`)
++function client(app: string) {
++  const there = clients.get(app)
++  if (!there) throw new Error(`${app} isn't connected${clients.size ? `; threads open in ${[...clients.keys()].join(', ')}` : ''}`)
++  return there
++}
++
++// Opens a thread on any client and starts its session: on a prompt, its first message as the
++// session starts, or on a message that reaches it the way the app's own messages do.
++export async function begin(app: string, name: string, first: string | Message, { about, where, cwd }: { about?: string; where?: string; cwd?: string } = {}) {
++  const there = client(app)
++  const opened = await there.place(name, where, about)
++  if (typeof first === 'string') there.hub.open(opened.thread, name, first, cwd)
++  else {
++    there.hub.register(opened.thread, name, cwd)
++    there.hub.deliver(opened.thread, name, first)
++  }
++  return opened
++}
++
++// Moves a thread to another client: its session stops here and resumes there, memory intact.
++// The main thread never leaves, and a thread its app owns (copy) stays, so a copy continues instead.
++export async function move(from: Hub, thread: string, to: string, name: string, where?: string, copy = thread === from.main) {
++  const target = client(to)
 +  const session = from.session(thread)
 +  if (!session) throw new Error('this thread has no session yet')
 +  const { thread: dest, link } = await target.place(name, where)
 +  const prompt = `This conversation just moved to ${to}, into the thread "${name}". Your ${to} tools now post there. Carry on where you left off.`
 +  const cwd = from.cwd(thread)
-+  if (thread === from.main) target.hub.fork(dest, name, session, prompt, cwd)
++  if (copy) target.hub.fork(dest, name, session, prompt, cwd)
 +  else void from.release(thread).then(session => target.hub.adopt(dest, name, session, prompt, cwd))
 +  return link
++}
+diff --git a/hub/ledger.ts b/hub/ledger.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..84581e25c90dee32fae9f3b51c123398cb8c6a56
+--- /dev/null
++++ b/hub/ledger.ts
+@@ -0,0 +1,144 @@
++import { readFileSync, renameSync, writeFileSync } from 'fs'
++
++// via: where the answer came from: the chat app's own buttons, hex's voice app, or a call.
++export type Answer = { label: string; at: string; via: string }
++// Telegram numbers its messages; Discord's snowflakes outgrow a JavaScript number, so they stay strings.
++export type MessageId = number | string
++export type Ask = {
++  thread: string
++  message: MessageId
++  text: string
++  options: string[]
++  at: string
++  poll?: string
++  // Asked with a menu where any number of options can be picked, so a reopen puts the menu back.
++  multiple?: boolean
++  answer?: Answer
++  settled?: { note: string; at: string }
++}
++export type Pin = { message: MessageId; text: string; at: string }
++type Book = { asks: Ask[]; pins: Record<string, Pin> }
++
++const KEEP = 14 * 24 * 60 * 60_000
++
++// Every question a client asked with buttons or a poll, and what became of it, plus each thread's
++// pinned status post as last written. The client that sends and edits the messages keeps it, and
++// anything else (the voice app's asks, hex's check) reads the file.
++export class Ledger {
++  private book: Book
++
++  constructor(private file: string) {
++    this.book = read(file)
++  }
++
++  get asks(): readonly Ask[] {
++    return this.book.asks
++  }
++
++  pin(thread: string): Pin | undefined {
++    return this.book.pins[thread]
++  }
++
++  find(thread: string, message: MessageId) {
++    return this.book.asks.find(ask => ask.thread === thread && ask.message === message)
++  }
++
++  byPoll(poll: string) {
++    return this.book.asks.find(ask => ask.poll === poll)
++  }
++
++  ask(thread: string, message: MessageId, text: string, options: string[], poll?: string, multiple = false) {
++    this.book.asks.push({ thread, message, text, options, at: now(), ...(poll && { poll }), ...(multiple && { multiple }) })
++    this.save()
++  }
++
++  answered(thread: string, message: MessageId, label: string, via: string) {
++    this.update(thread, message, ask => {
++      ask.answer = { label, at: now(), via }
++      delete ask.settled
++    })
++  }
++
++  settled(thread: string, message: MessageId, note: string) {
++    this.update(thread, message, ask => (ask.settled = { note, at: now() }))
++  }
++
++  reopened(thread: string, message: MessageId) {
++    this.update(thread, message, ask => {
++      delete ask.answer
++      delete ask.settled
++    })
++  }
++
++  // A message's new text: a pinned post's latest status, or, for a question, the end of its
++  // buttons, since an edit that doesn't send them again takes them off.
++  edited(thread: string, message: MessageId, text: string) {
++    const pin = this.book.pins[thread]
++    if (pin?.message === message) {
++      this.book.pins[thread] = { message, text, at: now() }
++      return this.save()
++    }
++    const ask = this.find(thread, message)
++    if (ask && !ask.answer && !ask.settled && !ask.poll) this.settled(thread, message, 'Edited')
++  }
++
++  pinned(thread: string, message: MessageId, text = '') {
++    this.book.pins[thread] = { message, text, at: now() }
++    this.save()
++  }
++
++  unpinned(thread: string, message: MessageId) {
++    if (this.book.pins[thread]?.message !== message) return
++    delete this.book.pins[thread]
++    this.save()
++  }
++
++  deleted(thread: string, message: MessageId) {
++    this.book.asks = this.book.asks.filter(ask => !(ask.thread === thread && ask.message === message))
++    if (this.book.pins[thread]?.message === message) delete this.book.pins[thread]
++    this.save()
++  }
++
++  forget(thread: string) {
++    this.book.asks = this.book.asks.filter(ask => ask.thread !== thread)
++    delete this.book.pins[thread]
++    this.save()
++  }
++
++  private update(thread: string, message: MessageId, change: (ask: Ask) => void) {
++    const ask = this.find(thread, message)
++    if (!ask) return
++    change(ask)
++    this.save()
++  }
++
++  // Open questions stay however old they get; settled ones go after two weeks.
++  private save() {
++    const since = new Date(Date.now() - KEEP).toISOString()
++    this.book.asks = this.book.asks.filter(ask => !(ask.answer || ask.settled) || ask.at > since)
++    writeFileSync(`${this.file}.tmp`, JSON.stringify(this.book, null, 1) + '\n')
++    renameSync(`${this.file}.tmp`, this.file)
++  }
++}
++
++function read(file: string): Book {
++  let text: string
++  try {
++    text = readFileSync(file, 'utf8')
++  } catch {
++    return { asks: [], pins: {} }
++  }
++  try {
++    const book = JSON.parse(text)
++    return { asks: Array.isArray(book.asks) ? book.asks : [], pins: book.pins ?? {} }
++  } catch (error) {
++    const aside = `${file}.corrupt-${Date.now()}`
++    renameSync(file, aside)
++    process.stderr.write(`hub: ${file} is unreadable (${error}), moved it to ${aside} and started a new ledger\n`)
++    return { asks: [], pins: {} }
++  }
++}
++
++function now() {
++  return new Date().toISOString()
 +}
 diff --git a/hub/mcp.ts b/hub/mcp.ts
 new file mode 100644

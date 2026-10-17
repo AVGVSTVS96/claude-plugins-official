@@ -4,7 +4,7 @@ id: voice
 summary: Add a voice channel where OpenAI's gpt-live-1 holds a live call and hands every real request to the Claude Code session.
 baseline: ea10b213686c90bb1984b2016937310e05336cf3
 patch_file: voice.patch
-patch_sha256: f326067bfce8bdc79687e28a359493820d291f9631bc5075004cc03feab25189
+patch_sha256: cd194e88461d42bbe118f6f23506104e31af2481657eaa01803f38fa14d20c24
 ---
 
 ## Intent
@@ -65,6 +65,14 @@ voice session ── HTTP ──► hub ──► call engine (server.ts) ◄─
 - `POST /twilio/incoming` is the Twilio number's voice webhook: a call Twilio
   signed (`X-Twilio-Signature`) from `CALLER_NUMBER` gets a one-time token
   and streams the same way; any other call is rejected.
+- A call on a line another client in the service holds (a Discord voice
+  channel) comes through `take(from, greeting, line)`, which `bot.ts` puts in
+  the hub's `engine`: the line hands the engine the caller's audio (`hear`)
+  and plays the voice's, both base64 PCM at 24 kHz, mono, in a `gpt-live-1`
+  WebSocket session, and the engine follows the call exactly like a phone
+  call, the same session, record (`from: "discord"`) and board. The line ends
+  when the call does, and `hangUp` closes it as the caller's. Phone calls and
+  lines share one pass-through for the session's start, refusal and close.
 - When the call closes, pending handoffs and the last words reach Claude
   with a "call ended" message.
 - Every call is saved as one record in `calls/` (turns, task changes, where
@@ -81,7 +89,11 @@ voice session ── HTTP ──► hub ──► call engine (server.ts) ◄─
   with a one-off `voice_task` meta tag, puts it on the board, follows the
   thread's session from the line that carries the tag (and its background
   agents' transcripts), and marks the task done when a turn ends with none of
-  those agents out, failed when it ends on an API error. A renewed session
+  those agents out, failed when it ends on an API error. `send` with `app`
+  opens a new thread by that name in Discord, Telegram or Buzz (the hub's
+  `begin`, its `about` line "From a call: …") with the message as its first,
+  followed the same way. A call started message's `from` says where the
+  caller is. A renewed session
   appears in `threads.json` and is followed from its start. When the service
   starts, the engine resumes the last day's unfinished sends from their records, reading each thread from the
   start of its session to find the tagged message.
@@ -141,7 +153,9 @@ failed through fake transcripts, and the engine against a fake hub and fake
 OpenAI and Twilio (a phone call's words reaching the session only after the
 last call's renew, in order, and its end asking for a renew). `bun test hub`
 covers a call keeping one session and the next getting a new one.
-`scripts/verify` builds `bot.ts` and checks `.mcp.json` is HTTP. Live: in an
+`line.test.ts` holds a call on another client's line against a fake OpenAI:
+PCM both ways, its own record, the line ended on hang-up, and `send` opening
+a new thread. `scripts/verify` builds `bot.ts` and checks `.mcp.json` is HTTP. Live: in an
 isolated `CLAUDE_CONFIG_DIR`, through hex's launcher, a voice session gets a
 call's handoffs over HTTP, keeps one session across the call's turns, carries
 on through a hub restart with the call resumed, and the next call gets a new
