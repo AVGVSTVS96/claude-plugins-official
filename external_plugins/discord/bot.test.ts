@@ -1,12 +1,13 @@
 import { afterAll, beforeAll, expect, mock, test } from 'bun:test'
 import { connect as netConnect } from 'net'
 import { connect } from '../../hub/testing.ts'
+import { clients } from '../../hub/hub.ts'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import * as discord from 'discord.js'
 
-const { ChannelType, Collection, MessageFlags, MessageFlagsBitField, MessageType, SnowflakeUtil } = discord
+const { ButtonStyle, ChannelType, Collection, ComponentType, MessageFlags, MessageFlagsBitField, MessageType, SnowflakeUtil } = discord
 const TRANSCRIBER = 'http://transcriber/v1/audio/transcriptions'
 const BOT = '1000'
 const OWNER = '2000'
@@ -21,6 +22,9 @@ const owner = { id: OWNER, username: 'bassim', bot: false, partial: false }
 const bot = { id: BOT, username: 'hex', bot: true }
 const done: any[] = []
 let found: object = {}
+let sent = 0
+let opened = 0
+let logins = 0
 
 // A guild channel or thread whose messages the fake REST answers newest-first, as Discord does.
 function channel(id: string, fields: Channel): Channel {
@@ -36,9 +40,10 @@ function channel(id: string, fields: Channel): Channel {
     isDMBased: () => ch.type === ChannelType.DM,
     permissionsFor: () => ({ has: () => ch.visible }),
     sendTyping: async () => {},
-    send: async (options: Channel) => {
+    send: async (input: string | Channel) => {
+      const options = typeof input === 'string' ? { content: input } : input
       done.push({ send: options, in: id })
-      return say(ch, 59, options.content ?? '', { author: bot, components: options.components?.map((row: any) => row.toJSON()) })
+      return say(ch, 59, options.content ?? '', { id: String(BigInt(snowflake(59)) + BigInt(++sent)), author: bot, components: options.components?.map((row: any) => row.toJSON()) })
     },
     fetchStarterMessage: async () => (ch.parent.isThreadOnly() ? ch : ch.parent).messages.fetch(id),
     posted: messages,
@@ -52,6 +57,15 @@ function channel(id: string, fields: Channel): Channel {
           .slice(0, limit)
           .map(m => [m.id, m]))
       },
+      edit: async (message: string, options: Channel) => (done.push({ edit: message, options }), messages.find(m => m.id === message)),
+    },
+    threads: {
+      create: async ({ name, message, appliedTags }: Channel) => {
+        done.push({ create: name, in: id, ...(message && { message: message.content }), ...(appliedTags && { appliedTags }) })
+        return channel(String(9000 + ++opened), { name, type: ChannelType.PublicThread, parent: ch, parentId: id })
+      },
+      fetchActive: async () => ({ threads: new Collection([...channels].filter(([, c]) => c.parent === ch && !c.archived)) }),
+      fetchArchived: async () => ({ threads: new Collection([...channels].filter(([, c]) => c.parent === ch && c.archived)) }),
     },
     ...fields,
   }
@@ -130,7 +144,10 @@ class Client {
   once(event: string, handler: (...args: any[]) => void) {
     return this.on(event, handler)
   }
-  login = async () => 'token'
+  login = async () => {
+    if (++logins === 1) throw new Error('getaddrinfo ETIMEOUT discord.com')
+    return 'token'
+  }
 }
 
 mock.module('discord.js', () => ({ ...discord, Client }))
@@ -139,6 +156,8 @@ const state = mkdtempSync(join(tmpdir(), 'discord-'))
 afterAll(() => rmSync(state, { recursive: true, force: true }))
 let received: any[]
 let call: (tool: string, args: object) => Promise<any>
+let send: (payload: object) => void
+let ask: (request: object) => Promise<Response>
 
 async function until<T>(check: () => T | undefined, timeout = 3000): Promise<T> {
   for (const end = Date.now() + timeout; Date.now() < end; await Bun.sleep(20)) {
@@ -154,11 +173,12 @@ beforeAll(async () => {
   const fetch = globalThis.fetch
   globalThis.fetch = (async (url: string, init?: RequestInit) => {
     if (url === 'https://cdn.discord/voice-message.ogg') return new Response('ogg')
+    if (url === 'https://cdn.discord/shot.png') return new Response('png bytes')
     if (url !== TRANSCRIBER) return fetch(url, init)
     return Response.json({ text: (init!.body as FormData).get('model') === 'whisper' ? ' anchors ship friday ' : 'wrong model' })
   }) as any
   await import('./bot.ts')
-  ;({ received, call } = await session(here.id))
+  ;({ received, call, send, ask } = await session(here.id))
 })
 
 // A session bound to thread, connected once the hub has registered it, with its hooks on hub.sock.
@@ -168,8 +188,11 @@ async function session(thread: string) {
   await new Promise(resolve => hooks.on('connect', resolve))
   const send = (payload: object) => hooks.write(JSON.stringify(payload) + '\n')
   await line.call('list_channels', {})
-  return { received: line.received, call: line.call, send }
+  return { received: line.received, call: line.call, send, ask: line.ask }
 }
+
+const book = () => JSON.parse(readFileSync(join(state, 'ledger.json'), 'utf8'))
+const labels = (components: any[]) => components[0].toJSON().components.map((c: any) => c.label)
 
 test('a message in a thread names the channel the thread is in', async () => {
   const message = { ...say(here, 6, 'what did we decide in open-source?'), ...live(here) }
@@ -227,13 +250,13 @@ test('fetch_messages drills into a thread by the id of the message it hangs off,
 test('sessions read only text channels and threads in the server the bot can see, never a DM', async () => {
   const refused = (id: string) => `the bot can't read ${id}; list_channels shows the channels it can`
   expect((await call('fetch_messages', { channel: 'hidden' })).error).toBe(refused(hidden.id))
-  expect((await call('fetch_messages', { channel: 'nowhere' })).error).toBe('no text channel named #nowhere')
+  expect((await call('fetch_messages', { channel: 'nowhere' })).error).toBe('no text or forum channel named #nowhere')
   expect((await call('fetch_messages', { thread: '4003' })).error).toBe(refused('4003'))
   expect((await call('fetch_messages', { thread: elsewhere.id })).error).toBe(refused(elsewhere.id))
 })
 
-test('list_channels names the text and announcement channels the bot can read', async () => {
-  expect((await call('list_channels', {})).text).toBe(`#open-source  (id: ${openSource.id})\n#general  (id: ${general.id})\n#news  (id: ${news.id})`)
+test('list_channels names the text, announcement and forum channels the bot can read', async () => {
+  expect((await call('list_channels', {})).text).toBe(`#open-source  (id: ${openSource.id})\n#general  (id: ${general.id})\n#news  (id: ${news.id})\n#ideas  (id: ${ideas.id}, forum)`)
 })
 
 const inbound = (lines: any[], check: (line: any) => boolean) => until(() => lines.find(line => line.type === 'inbound' && check(line)))
@@ -438,7 +461,146 @@ test('a DM is its own session named DM, a message reaches it while it works, and
   expect((await mine.call('close_thread', {})).error).toBe('a DM is not a thread')
 })
 
-test('once connected the bot leaves the id of its server in guild.json, so the voice app can link a thread', () => {
-  handlers.get('clientReady')!({ user: { tag: 'hex#0000' } })
+test('once connected the bot leaves the id of its server in guild.json, so the voice app can link a thread, and registers its slash commands', async () => {
+  let registered: any[] = []
+  handlers.get('clientReady')!({ user: { tag: 'hex#0000' }, application: { commands: { set: async (commands: any[]) => (registered = commands) } } })
   expect(JSON.parse(readFileSync(join(state, 'guild.json'), 'utf8'))).toEqual({ id: GUILD })
+  await until(() => registered.length)
+  expect(registered.map(command => command.name)).toEqual(['model', 'effort', 'compact', 'stop'])
+})
+
+test('a first login that fails, as with no network at boot, is tried again', async () => {
+  await until(() => logins >= 2)
+})
+
+test('a permission prompt asks in the thread with Allow and Deny, a tap answers it, and one still open when the turn ends stops asking', async () => {
+  const prompt = (request_id: string) => ({ request_id, tool_name: 'Bash', description: 'Run the tests', input_preview: JSON.stringify({ command: 'bun test', description: 'Run the tests' }) })
+  await ask(prompt('abcde'))
+  const asked = await until(() => here.posted.findLast((m: any) => m.content.startsWith('🔐')))
+  expect(asked.content).toBe('🔐 **Bash**: Run the tests\n```\ncommand: bun test\n```')
+  expect(asked.components[0].components.map((b: any) => [b.label, b.custom_id, b.style])).toEqual([
+    ['Allow', 'perm:allow:abcde', ButtonStyle.Success],
+    ['Deny', 'perm:deny:abcde', ButtonStyle.Danger],
+  ])
+
+  let update: any
+  handlers.get('interactionCreate')!({ isButton: () => true, user: owner, customId: 'perm:allow:abcde', channelId: here.id, createdAt: at(41), message: asked, update: async (options: any) => (update = options) })
+  expect(await until(() => received.find(line => line.type === 'permission'))).toMatchObject({ request_id: 'abcde', behavior: 'allow' })
+  expect(update.components[0].toJSON().components.map((b: any) => [b.label, b.disabled, b.style])).toEqual([
+    ['Allow', true, ButtonStyle.Success],
+    ['Deny', true, ButtonStyle.Secondary],
+  ])
+
+  await ask(prompt('fghij'))
+  const open = await until(() => here.posted.findLast((m: any) => m.content.startsWith('🔐') && m !== asked))
+  send({ type: 'state', thread: here.id, busy: false })
+  const moot = await until(() => done.find(d => d.edit === open.id))
+  expect(labels(moot.options.components)).toEqual(['No longer waiting'])
+})
+
+test('a question with buttons goes in the ledger: a tap answers it there, and one answered in hex\'s app closes its buttons, reaches the thread, and can be taken back', async () => {
+  await call('reply', { text: 'Which anchors?\nThe left ones are cheaper.', buttons: ['Left', 'Right'] })
+  const asked = here.posted.at(-1)
+  expect(book().asks.find((a: any) => a.message === asked.id)).toMatchObject({ thread: here.id, text: 'Which anchors?\nThe left ones are cheaper.', options: ['Left', 'Right'] })
+
+  send({ type: 'answer', thread: here.id, message: asked.id, label: 'Right', via: 'app' })
+  const answered = await inbound(received, line => line.meta.answered_in === 'in the app')
+  expect(answered).toMatchObject({ content: 'Right', meta: { user: 'hex app', button: 'true', button_message_id: asked.id } })
+  expect(labels(done.findLast(d => d.edit === asked.id).options.components)).toEqual(['✓ Answered in the app: Right'])
+  expect(book().asks.find((a: any) => a.message === asked.id).answer).toMatchObject({ label: 'Right', via: 'app' })
+
+  send({ type: 'reopen', thread: here.id, message: asked.id, via: 'app' })
+  expect((await inbound(received, line => line.meta.took_back === 'Right')).content).toBe('(took back: Right)')
+  expect(labels(done.findLast(d => d.edit === asked.id).options.components)).toEqual(['Left', 'Right'])
+
+  handlers.get('interactionCreate')!({ isButton: () => true, user: owner, customId: '0', channelId: here.id, createdAt: at(44), message: asked, update: async () => {} })
+  await until(() => book().asks.find((a: any) => a.message === asked.id).answer?.via === 'discord')
+
+  await call('reply', { text: 'Ship today?', buttons: ['Yes', 'No'] })
+  const later = here.posted.at(-1)
+  send({ type: 'settle', thread: here.id, message: later.id, note: 'Settled: shipped' })
+  await until(() => book().asks.find((a: any) => a.message === later.id).settled)
+  expect(labels(done.findLast(d => d.edit === later.id).options.components)).toEqual(['Settled: shipped'])
+})
+
+test('buttons with multiple come as a menu, and a pick of several comes back as their labels and locks the menu on them', async () => {
+  await call('reply', { text: 'Which files?', buttons: ['a.ts', 'b.ts', 'c.ts'], multiple: true })
+  const asked = here.posted.at(-1)
+  const select = asked.components[0].components[0]
+  expect(select).toMatchObject({ type: ComponentType.StringSelect, custom_id: 'menu', min_values: 1, max_values: 3 })
+  expect(book().asks.find((a: any) => a.message === asked.id)).toMatchObject({ options: ['a.ts', 'b.ts', 'c.ts'], multiple: true })
+
+  let update: any
+  handlers.get('interactionCreate')!({ isButton: () => false, isStringSelectMenu: () => true, user: owner, values: ['0', '2'], component: { options: select.options }, channelId: here.id, createdAt: at(45), message: asked, update: async (options: any) => (update = options) })
+  const pick = await inbound(received, line => line.meta.button_message_id === asked.id)
+  expect(pick.content).toBe('a.ts; c.ts')
+  const locked = update.components[0].toJSON().components[0]
+  expect(locked.disabled).toBe(true)
+  expect(locked.options.filter((o: any) => o.default).map((o: any) => o.label)).toEqual(['a.ts', 'c.ts'])
+})
+
+test('an image arrives already downloaded, as image_path, next to its listing', async () => {
+  const shot = { id: '62', name: 'shot.png', url: 'https://cdn.discord/shot.png', contentType: 'image/png', size: 1024 }
+  const message = { ...say(here, 46, 'what is this?'), ...live(here), attachments: new Collection([[shot.id, shot]]) }
+  handlers.get('messageCreate')!(message)
+  const arrived = await inbound(received, line => line.meta.message_id === message.id)
+  expect(arrived.meta.image_path).toMatch(/inbox\/\d+-62\.png$/)
+  expect(readFileSync(arrived.meta.image_path, 'utf8')).toBe('png bytes')
+  expect(arrived.meta.attachments).toBe('shot.png (image/png, 1KB)')
+})
+
+test('new_thread opens with the request that asked for it and the replies since, forwarded', async () => {
+  const desk = channel('5100', { name: 'desk', type: ChannelType.PublicThread, parent: general })
+  const s = await session(desk.id)
+  say(desk, 31, 'earlier chatter')
+  say(desk, 32, 'old answer', { author: bot })
+  const asked = say(desk, 33, 'spin off the anchors work')
+  const reply = say(desk, 34, 'on it', { author: bot })
+  s.send({ type: 'state', thread: desk.id, busy: true })
+  await Bun.sleep(50)
+  const result = await s.call('new_thread', { title: 'Anchors', prompt: 'work on the anchors', about: 'Spun off from desk' })
+  s.send({ type: 'state', thread: desk.id, busy: false })
+  const thread = [...channels.values()].find(ch => ch.name === 'Anchors')!
+  expect(result.text).toBe(`started thread "Anchors": https://discord.com/channels/${GUILD}/${thread.id}`)
+  expect(done.find(d => d.create === 'Anchors')).toEqual({ create: 'Anchors', in: general.id })
+  expect(thread.posted[0].content).toBe('Spun off from desk')
+  expect(done.filter(d => d.forward && d.to === thread.id).map(d => d.forward)).toEqual([asked.id, reply.id])
+})
+
+test('new_thread in a forum opens a post with its tags, and fetch_messages lists a forum\'s posts', async () => {
+  ideas.availableTags = [{ id: 't1', name: 'Bug' }, { id: 't2', name: 'Idea' }]
+  await call('new_thread', { title: 'Glare', prompt: 'look into the glare', about: 'Glare on the desk', channel: 'ideas', tags: ['idea'] })
+  expect(done.find(d => d.create === 'Glare')).toEqual({ create: 'Glare', in: ideas.id, message: 'Glare on the desk', appliedTags: ['t2'] })
+  expect((await call('new_thread', { title: 'Nope', prompt: 'x', about: 'x', channel: 'ideas', tags: ['urgent'] })).error).toBe('#ideas has the tags Bug, Idea')
+  const post = [...channels.values()].find(ch => ch.name === 'Glare')!
+  expect((await call('fetch_messages', { channel: 'ideas' })).text).toContain(`Glare  (post ${post.id}, 0 replies)`)
+})
+
+test('new_thread with another app opens the thread there through the hub', async () => {
+  const opened: any[] = []
+  clients.set('buzz', { hub: { open: (...args: any[]) => opened.push(args) } as any, place: async (name, where, about) => (opened.push(['place', name, where, about]), { thread: 'b1', link: 'buzz://b1' }) })
+  expect((await call('new_thread', { title: 'Relay', prompt: 'fix the relay', about: 'From Discord', app: 'buzz' })).text).toBe('started thread "Relay" in buzz: buzz://b1')
+  expect(opened).toEqual([['place', 'Relay', undefined, 'From Discord'], ['b1', 'Relay', 'fix the relay', undefined]])
+  clients.delete('buzz')
+  expect((await call('new_thread', { title: 'Relay', prompt: 'x', about: 'x', app: 'buzz' })).error).toBe("buzz isn't connected; threads open in discord")
+})
+
+test('slash commands set a thread\'s model and effort, and answer only the owner in a thread with a session', async () => {
+  const desk = channels.get('5100')!
+  const replies: any[] = []
+  const command = (commandName: string, value?: string, user = owner, channelId = desk.id) =>
+    handlers.get('interactionCreate')!({ isButton: () => false, isStringSelectMenu: () => false, isChatInputCommand: () => true, commandName, user, channelId, options: { getString: () => value }, reply: async (options: any) => replies.push(options) })
+  command('model', 'claude-opus-5-5')
+  command('effort', 'max')
+  command('stop', undefined, owner, general.id)
+  command('stop', undefined, { id: '8888', username: 'someone', partial: false })
+  await until(() => replies.length === 4)
+  expect(replies.map(reply => reply.content)).toEqual([
+    "Model: Opus 5.5, from this thread's next message.",
+    "Effort: Max, from this thread's next message.",
+    "This channel has no session: use it in one of hex's threads or the DM.",
+    'hex only answers its owner.',
+  ])
+  expect(replies.every(reply => reply.flags === MessageFlags.Ephemeral)).toBe(true)
+  expect(JSON.parse(readFileSync(join(state, 'threads.json'), 'utf8'))[desk.id]).toMatchObject({ model: 'claude-opus-5-5', effort: 'max' })
 })

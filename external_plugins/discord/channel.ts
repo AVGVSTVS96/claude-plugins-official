@@ -5,14 +5,15 @@ const titleProperty = { type: 'string', description: 'One word, like a chat name
 // What each session's channel says and offers; the hub serves it over HTTP.
 export const server: ChannelServer = {
   title: 'Discord',
+  permission: true,
   instructions: [
     'The sender reads Discord, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat. Nobody watches this terminal either, so the report a background job ends with goes to them as a reply: what they need to know and act on. Once it\'s sent, end the turn without repeating it here.',
     '',
-    'This session is one Discord thread, the place for deeper work. Discord renders Markdown, so answers can be longer and structured: headings, lists, and code blocks with a language. Its messages arrive as <channel source="discord" chat_id="..." message_id="..." user="..." ts="...">, and everything you send with these tools lands back in that same thread. If the tag has new_thread="true", this thread was just opened from that message and named after its first word: give it a fitting name with rename_thread first. If the tag has attachment_count, the attachments attribute lists name/type/size — call download_attachment(message_id) to fetch them. If the tag has reply_to_message_id, the sender replied to that earlier message: reply_to_text is its text and reply_to_attachments lists its files (download_attachment with that id). edited="true" means the sender edited the message with that message_id and this is its new text; forwarded="true" means it is a message they forwarded. stickers lists sent stickers with their image URLs; poll is a poll question, with poll_options and poll_multiple when several answers are allowed. post_title is the title of a new forum post. A reaction arrives as "(reaction: 👍)" with reaction, reaction_to_message_id, reaction_to_user and reaction_to_text, plus reaction_removed="true" when taken off. deleted="true" means the message with that message_id was deleted, with deleted_text when known. button="true" means the sender tapped the button with this label on button_message_id. A vote on your poll arrives as "(vote: Tacos)" with vote, poll and poll_message_id, plus vote_removed="true" when taken back. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply.',
+    'This session is one Discord thread, the place for deeper work. Discord renders Markdown, so answers can be longer and structured: headings (#, ##, ###), lists, quotes, bold and italic, and code blocks with a language (```ts) for syntax highlighting. It has no tables: use a list, or line columns up in a code block. -# at the start of a line makes it small grey subtext, [text](https://...) masks a link, and a link wrapped in <> shows no preview. Its messages arrive as <channel source="discord" chat_id="..." message_id="..." user="..." ts="...">, and everything you send with these tools lands back in that same thread. If the tag has new_thread="true", this thread was just opened from that message and named after its first word: give it a fitting name with rename_thread first. If the tag has image_path, Read it: those are the images the sender attached, already downloaded. If the tag has attachment_count, the attachments attribute lists name/type/size — call download_attachment(message_id) to fetch the other files. If the tag has reply_to_message_id, the sender replied to that earlier message: reply_to_text is its text and reply_to_attachments lists its files (download_attachment with that id). edited="true" means the sender edited the message with that message_id and this is its new text; forwarded="true" means it is a message they forwarded. stickers lists sent stickers with their image URLs; poll is a poll question, with poll_options and poll_multiple when several answers are allowed. post_title is the title of a new forum post. A reaction arrives as "(reaction: 👍)" with reaction, reaction_to_message_id, reaction_to_user and reaction_to_text, plus reaction_removed="true" when taken off. deleted="true" means the message with that message_id was deleted, with deleted_text when known. button="true" means the sender tapped the button with this label on button_message_id, or picked these labels (joined by "; ") from its menu. answered_in says a question was answered somewhere else, in hex\'s app or on a call, and took_back that an answer given there no longer stands. A vote on your poll arrives as "(vote: Tacos)" with vote, poll and poll_message_id, plus vote_removed="true" when taken back. Use reply_to (set to a message_id) only when replying to an earlier message; the latest message doesn\'t need a quote-reply.',
     '',
-    'reply accepts file paths (files: ["/abs/path.png"]) for attachments, silent: true to skip the notification, and buttons: ["Yes", "No"] for tappable choices. Use react to add emoji reactions, and edit_message for interim progress updates or to swap a sent file. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',
+    'reply accepts file paths (files: ["/abs/path.png"]) for attachments, silent: true to skip the notification, and buttons: ["Yes", "No"] for tappable choices; with multiple: true they come as a menu where the user picks any number of them. Use react to add emoji reactions, and edit_message for interim progress updates or to swap a sent file. Edits don\'t trigger push notifications — when a long task completes, send a new reply so the user\'s device pings.',
     '',
-    'new_thread opens another thread with its own fresh session and hands it your prompt. Use it for work the user will want to follow or talk to on its own. handoff moves this whole conversation to another app, such as telegram, when the user asks: you stop here and continue there with your memory.',
+    'new_thread opens another thread with its own fresh session and hands it your prompt; the thread starts with the user\'s request and your replies since, forwarded. Use it for work the user will want to follow or talk to on its own. In a forum channel it opens a post, with tags if you name them. With app: "telegram" or "buzz" it opens the thread there instead. handoff moves this whole conversation to Telegram or Buzz when the user asks: you stop here and continue there with your memory.',
     '',
     "fetch_messages pulls real Discord history, from this thread by default. The tag's channel attribute names the channel this thread is in: fetch_messages(channel) reads that channel's top-level messages, a message with a thread shows its reply count, and fetch_messages(thread: that message's id) reads the thread. When the user refers to earlier work or talk in the channel, read it rather than saying you can't see it. To find an old message anywhere in the server, use search_messages.",
   ].join('\n'),
@@ -41,6 +42,7 @@ export const server: ChannelServer = {
             items: { type: 'string' },
             description: 'Button labels shown under the message (max 25, 80 chars each). A tap comes back as a message with button="true", and the buttons then lock showing the choice.',
           },
+          multiple: { type: 'boolean', description: 'Show the buttons as a menu where any number can be picked at once (labels up to 100 chars). The picks come back as one message.' },
         },
         required: ['text'],
       },
@@ -138,7 +140,7 @@ export const server: ChannelServer = {
     },
     {
       name: 'fetch_messages',
-      description: 'Fetch recent messages from this thread, or from a channel or another thread. Returns oldest-first with message IDs. In a channel, a message that has a thread shows its reply count and last reply; pass its id as thread to read the thread.',
+      description: 'Fetch recent messages from this thread, or from a channel or another thread. Returns oldest-first with message IDs. In a channel, a message that has a thread shows its reply count and last reply; pass its id as thread to read the thread. A forum channel lists its posts; pass a post\'s id as thread to read it.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -165,7 +167,7 @@ export const server: ChannelServer = {
     },
     {
       name: 'list_channels',
-      description: 'List the Discord channels you can read, with their IDs.',
+      description: 'List the Discord text, announcement and forum channels you can read, with their IDs.',
       inputSchema: { type: 'object', properties: {} },
     },
     {
@@ -198,7 +200,9 @@ export const server: ChannelServer = {
           title: titleProperty,
           prompt: { type: 'string', description: "The user's request and the context the new session can't find itself: it starts from this prompt alone." },
           about: { type: 'string', description: 'One line the user sees first in the new thread, saying what it is for and where it came from.' },
-          channel: { type: 'string', description: 'Channel to open it in, by name. Defaults to this thread\'s channel.' },
+          app: { type: 'string', enum: ['discord', 'telegram', 'buzz'], description: 'Where to open it. Default: discord.' },
+          channel: { type: 'string', description: 'Channel to open it in, by name: a text or forum channel. Defaults to this thread\'s channel; in Buzz, the server\'s first channel.' },
+          tags: { type: 'array', items: { type: 'string' }, description: 'Forum channel only: the post\'s tags, by name.' },
         },
         required: ['title', 'prompt', 'about'],
       },
@@ -211,6 +215,7 @@ export const server: ChannelServer = {
         properties: {
           to: { type: 'string', enum: ['telegram', 'buzz'] },
           title: titleProperty,
+          channel: { type: 'string', description: 'Buzz only: the channel to open it in, by name. Default: the server\'s first channel.' },
         },
         required: ['to'],
       },
