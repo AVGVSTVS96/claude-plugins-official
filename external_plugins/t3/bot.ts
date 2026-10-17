@@ -45,10 +45,13 @@ const hub = startHub({
   server,
   // T3 Code owns its threads, so a handoff leaves this one here and a copy carries on there.
   call: async (thread, tool, args) => {
-    const name = title(args.title as string)
     const where = args.channel as string | undefined
-    if (tool === 'new_thread') return `started thread "${name}" in ${args.app}: ${(await begin(args.app as string, name, args.prompt as string, { about: args.about as string | undefined, where, cwd: hub.cwd(thread) })).link}`
-    if (tool === 'handoff') return `a copy of this conversation continues in ${args.to}: ${await move(hub, thread, args.to as string, name, where, true)}. You stay here.`
+    if (tool === 'new_thread') {
+      const name = title(args.title as string)
+      const { link } = await begin(args.app as string, name, args.prompt as string, { about: args.about as string | undefined, where, cwd: hub.cwd(thread) })
+      return `started thread "${name}" in ${args.app}: ${link}`
+    }
+    if (tool === 'handoff') return `a copy of this conversation continues in ${args.to}: ${await move(hub, thread, args.to as string, title(args.title as string), where, true)}. You stay here.`
     throw new Error(`unknown tool: ${tool}`)
   },
   // A new thread's session starts with its first prompt and is only known once its channel connects.

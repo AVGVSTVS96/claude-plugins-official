@@ -886,6 +886,7 @@ function serve(token: string) {
         return void (await answer(`${command.commandName === 'model' ? 'Model' : 'Effort'}: ${name}, from this thread's next message.`))
       }
       case 'compact':
+        if (dms.has(thread)) return void (await answer('The DM starts a fresh session whenever its last one is spent, so there\'s nothing to compact.'))
         if (!hub.session(thread)) return void (await answer('This thread has nothing to compact yet.'))
         void hub.command(thread, '/compact')
         return void (await answer('Compacting this thread.'))
