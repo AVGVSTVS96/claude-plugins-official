@@ -88,7 +88,8 @@ On top of upstream:
   as a message; the message keeps the chosen button, disabled. Claude Code takes
   whichever answer comes first and says nothing when the prompt is answered in
   the session itself, but a turn can't end while one is open, so a prompt still
-  open when its session goes idle shows it is no longer waiting.
+  open when its session goes idle with no background agents out (one of
+  theirs may still be asking) shows it is no longer waiting.
 - `rename_thread` renames a topic or changes its icon in Telegram. Every
   new topic gets a random icon from Telegram's topic icon set.
 - A new topic starts with the request that asked for it and the session's
