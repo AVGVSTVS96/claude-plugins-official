@@ -3,7 +3,7 @@ import { join } from 'path'
 import type { Mark, Moment, Speaker } from './call.ts'
 import { Changes } from './changes.ts'
 
-export type Source = 'app' | 'web' | 'phone-in' | 'phone-out'
+export type Source = 'app' | 'web' | 'phone-in' | 'phone-out' | 'discord'
 
 export type Ending = 'you' | 'hex' | 'dropped' | 'expired' | 'no-connect' | 'no-answer' | 'busy'
 

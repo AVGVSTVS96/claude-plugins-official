@@ -86,6 +86,15 @@ type Run = {
   held: (() => void)[]
 }
 
+// A call on a line a client holds, like a Discord voice channel: the line plays the voice's audio
+// and ends when the call does, and the call engine hears the caller and can be hung up on. Audio is
+// base64 PCM at 24 kHz, mono.
+export type VoiceLine = { play: (audio: string) => void; end: () => void }
+export type Held = { hear: (audio: string) => void; hangUp: () => void }
+
+// The voice app's call engine, once it runs in this process, for a client that holds a line.
+export const engine: { take?: (from: 'discord', greeting: string, line: VoiceLine) => Held } = {}
+
 // Every client running in this process, so a thread can move between them.
 // place() opens a thread on the client, led by its about line if given, and returns its id and a link to it.
 export const clients = new Map<string, { hub: Hub; place: (name: string, where?: string, about?: string) => Promise<{ thread: string; link: string }> }>()

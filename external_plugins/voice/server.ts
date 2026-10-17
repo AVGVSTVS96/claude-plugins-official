@@ -9,6 +9,7 @@ import { PORT, STATE_DIR, env } from './env.ts'
 import { Asks, type Ask } from './asks.ts'
 import { relay } from './relay.ts'
 import { Tasks, opener, type HexTask } from './tasks.ts'
+import type { Held, VoiceLine } from '../../hub/hub.ts'
 import page from './page.html' with { type: 'text' }
 
 const KEY = env.OPENAI_API_KEY
@@ -348,7 +349,7 @@ function failed(record: Pick<CallRecord, 'from' | 'end' | 'reason'> & Partial<Ca
   const now = new Date().toISOString()
   const id = record.id ?? `failed-${Date.now().toString(36)}`
   calls.save({ id, started: now, turns: [], tasks: [], ...record, ended: now })
-  const where = record.from === 'phone-out' ? `Your phone call to ${to ?? 'the caller'}` : `A call from ${record.from === 'phone-in' ? 'the caller\'s phone' : `the ${record.from}`}`
+  const where = record.from === 'phone-out' ? `Your phone call to ${to ?? 'the caller'}` : `A call from ${record.from === 'phone-in' ? 'the caller\'s phone' : record.from === 'discord' ? 'a Discord voice channel' : `the ${record.from}`}`
   deliver(
     [`${where} didn't happen: ${ENDINGS[record.end!]} (${record.reason}).`, ...(record.why ? [`You were calling because: ${record.why}`] : [])].join('\n'),
     { call: id, ended: record.end!, reason: record.reason ?? '' },
@@ -627,29 +628,88 @@ async function phoneStatus(request: Request, token: string) {
   return new Response(null, { status: 204 })
 }
 
-function answer(twilio: Bun.ServerWebSocket<Phone>) {
+// A call whose audio the engine passes through one WebSocket session: a phone call, as μ-law at
+// 8 kHz, or a line another client holds, as PCM at 24 kHz. A session that never starts is refused once.
+type Passed = {
+  name: string
+  from: Source
+  greeting: string
+  why?: string
+  format: { type: string; rate: number }
+  play: (audio: string) => void
+  started: (session: string) => void
+  refused: (reason: string) => void
+  closed: () => void
+}
+
+function passThrough({ name, from, greeting, why, format, play, started, refused, closed }: Passed) {
   const openai = new WebSocket(API, { headers: { Authorization: `Bearer ${KEY}` } } as any)
-  twilio.data.openai = openai
+  let up = false
+  let refusing = false
+  const refuse = (reason: string) => {
+    if (up || refusing) return
+    refusing = true
+    refused(reason)
+  }
   openai.onopen = () =>
     openai.send(JSON.stringify({
       type: 'session.start',
-      session: session({ audio: { format: { type: 'audio/pcmu', rate: 8000 }, ...(VOICE ? { output: { voice: VOICE } } : {}) } }, twilio.data.greeting),
+      session: session({ audio: { format, ...(VOICE ? { output: { voice: VOICE } } : {}) } }, greeting),
     }))
   openai.addEventListener('message', ({ data }) => {
     const event = JSON.parse(String(data))
-    if (event.type === 'error' && !twilio.data.started) refuse(twilio, `OpenAI refused the phone session: ${event.error?.message ?? JSON.stringify(event.error)}`)
+    if (event.type === 'error') refuse(`OpenAI refused the ${name} session: ${event.error?.message ?? JSON.stringify(event.error)}`)
     if (event.type !== 'session.started') return
-    twilio.data.started = true
-    const call = placed.get(twilio.data.token)
-    if (call) call.session = event.session.id
-    const record = base(event.session.id, twilio.data.from, { voice: VOICE, why: twilio.data.why, expires: expiry(event.session.expires_at) })
-    follow(openai, record, { speak: audio => twilio.send(JSON.stringify({ event: 'media', streamSid: twilio.data.stream, media: { payload: audio } })) })
+    up = true
+    started(event.session.id)
+    follow(openai, base(event.session.id, from, { voice: VOICE, why, expires: expiry(event.session.expires_at) }), { speak: play })
   })
   openai.addEventListener('close', ({ code, reason }) => {
-    trace(`OpenAI closed the phone session (${code} ${reason})`)
-    if (!twilio.data.started) refuse(twilio, `OpenAI closed the phone session before it started (${code} ${reason || 'no reason'})`)
-    twilio.close()
+    trace(`OpenAI closed the ${name} session (${code} ${reason})`)
+    refuse(`OpenAI closed the ${name} session before it started (${code} ${reason || 'no reason'})`)
+    closed()
   })
+  return openai
+}
+
+function answer(twilio: Bun.ServerWebSocket<Phone>) {
+  twilio.data.openai = passThrough({
+    name: 'phone',
+    from: twilio.data.from,
+    greeting: twilio.data.greeting,
+    why: twilio.data.why,
+    format: { type: 'audio/pcmu', rate: 8000 },
+    play: audio => twilio.send(JSON.stringify({ event: 'media', streamSid: twilio.data.stream, media: { payload: audio } })),
+    started: session => {
+      twilio.data.started = true
+      const call = placed.get(twilio.data.token)
+      if (call) call.session = session
+    },
+    refused: reason => refuse(twilio, reason),
+    closed: () => twilio.close(),
+  })
+}
+
+// A call on a line another client holds, like a Discord voice channel: it hands the engine the
+// caller's audio and plays the voice's, both base64 PCM at 24 kHz, mono, and the engine holds the
+// call as it does a phone call. The line ends when the call does.
+export function take(from: Source, greeting: string, line: VoiceLine): Held {
+  if (!KEY) throw new Error(`calls need OPENAI_API_KEY in ${join(STATE_DIR, '.env')}`)
+  let up = false
+  const openai = passThrough({
+    name: from,
+    from,
+    greeting,
+    format: { type: 'audio/pcm', rate: 24000 },
+    play: line.play,
+    started: () => (up = true),
+    refused: reason => failed({ from, end: 'no-connect', reason }),
+    closed: line.end,
+  })
+  return {
+    hear: audio => void (up && openai.send(JSON.stringify({ type: 'session.input_audio.append', audio }))),
+    hangUp: () => void (openai.readyState === WebSocket.OPEN && openai.send(JSON.stringify({ type: 'session.close', event_id: `close-you-${from}` }))),
+  }
 }
 
 function refuse(twilio: Bun.ServerWebSocket<Phone>, reason: string) {

@@ -49,6 +49,7 @@ import { basename, join, sep } from 'path'
 import { startHub, clients, begin, move, preview, tappable, title, transcribe, MODELS, EFFORTS, type Message, type Permission } from '../../hub/hub.ts'
 import { Ledger, type Ask, type MessageId } from '../../hub/ledger.ts'
 import { server } from './channel.ts'
+import { voiceCalls } from './voice.ts'
 
 const STATE_DIR = process.env.DISCORD_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'hex', 'discord')
 const ACCESS_FILE = join(STATE_DIR, 'access.json')
@@ -280,7 +281,7 @@ async function images(attachments: Collection<string, Attachment>): Promise<stri
 
 function serve(token: string) {
   const client = new Client({
-    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.GuildMessageReactions, GatewayIntentBits.GuildMessagePolls, GatewayIntentBits.MessageContent, GatewayIntentBits.DirectMessages, GatewayIntentBits.DirectMessageReactions, GatewayIntentBits.DirectMessagePolls],
+    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.GuildMessageReactions, GatewayIntentBits.GuildMessagePolls, GatewayIntentBits.GuildVoiceStates, GatewayIntentBits.MessageContent, GatewayIntentBits.DirectMessages, GatewayIntentBits.DirectMessageReactions, GatewayIntentBits.DirectMessagePolls],
     partials: [Partials.Channel, Partials.Message, Partials.Reaction, Partials.User, Partials.Poll, Partials.PollAnswer],
   })
   const ledger = new Ledger(join(STATE_DIR, 'ledger.json'))
@@ -684,6 +685,7 @@ function serve(token: string) {
   clients.set('discord', { hub, place: (name, where, about) => place(name, where, about) })
 
   const allowed = (user: string) => loadAccess().allowFrom.includes(user)
+  voiceCalls(client, allowed)
 
   // A tag in a channel starts a thread on that message, Claude-tag style;
   // inside a thread every message reaches its session without one.

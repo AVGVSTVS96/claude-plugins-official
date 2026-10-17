@@ -561,6 +561,7 @@ test('new_thread opens with the request that asked for it and the replies since,
   const result = await s.call('new_thread', { title: 'Anchors', prompt: 'work on the anchors', about: 'Spun off from desk' })
   s.send({ type: 'state', thread: desk.id, busy: false })
   const thread = [...channels.values()].find(ch => ch.name === 'Anchors')!
+  await session(thread.id)
   expect(result.text).toBe(`started thread "Anchors": https://discord.com/channels/${GUILD}/${thread.id}`)
   expect(done.find(d => d.create === 'Anchors')).toEqual({ create: 'Anchors', in: general.id })
   expect(thread.posted[0].content).toBe('Spun off from desk')
@@ -573,6 +574,7 @@ test('new_thread in a forum opens a post with its tags, and fetch_messages lists
   expect(done.find(d => d.create === 'Glare')).toEqual({ create: 'Glare', in: ideas.id, message: 'Glare on the desk', appliedTags: ['t2'] })
   expect((await call('new_thread', { title: 'Nope', prompt: 'x', about: 'x', channel: 'ideas', tags: ['urgent'] })).error).toBe('#ideas has the tags Bug, Idea')
   const post = [...channels.values()].find(ch => ch.name === 'Glare')!
+  await session(post.id)
   expect((await call('fetch_messages', { channel: 'ideas' })).text).toContain(`Glare  (post ${post.id}, 0 replies)`)
 })
 

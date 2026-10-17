@@ -1,8 +1,8 @@
 import { mkdirSync } from 'fs'
 import { join } from 'path'
-import { startHub } from '../../hub/hub.ts'
+import { engine, startHub } from '../../hub/hub.ts'
 import { server } from './channel.ts'
-import { serve, tool } from './server.ts'
+import { serve, take, tool } from './server.ts'
 
 const HEX_DIR = process.env.HEX_DIR ?? process.cwd()
 const STATE = join(HEX_DIR, 'state')
@@ -37,3 +37,5 @@ serve(
   },
   STATE,
 )
+
+engine.take = take
