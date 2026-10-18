@@ -283,22 +283,27 @@ export class Asks extends Changes {
     }
   }
 
-  // Every place an ask was asked, newest first where it's known when; a thread named both with a
-  // message and without is the message.
+  // Every place an ask was asked, the ones that open first, each newest first where it's known
+  // when: each call, and each thread once, at the message that matters most there: its open question, else its pinned post, else
+  // any message, else the thread itself.
   private places(from: Source[]): Place[] {
-    const messaged = new Set(from.filter(source => source.message !== undefined).map(source => `${source.app}:${source.thread}`))
-    const seen = new Set<string>()
-    return from
-      .filter(source => {
-        const key = source.call ? `call:${source.call}` : `${source.app}:${source.thread}:${source.message ?? ''}`
-        const bare = !source.call && source.message === undefined && messaged.has(`${source.app}:${source.thread}`)
-        if (bare || seen.has(key) || (!source.call && !source.thread)) return false
-        seen.add(key)
-        return true
-      })
+    const best = new Map<string, Source>()
+    for (const source of from) {
+      if (!source.call && !source.thread) continue
+      const key = source.call ? `call:${source.call}` : `${source.app}:${source.thread}`
+      const held = best.get(key)
+      if (!held || this.rank(source) < this.rank(held)) best.set(key, source)
+    }
+    return [...best.values()]
       .map(source => (source.call ? this.call(source.call) : this.thread(source.app, source.thread!, source.message)))
-      .sort((a, b) => (b.at ?? '').localeCompare(a.at ?? ''))
+      .sort((a, b) => Number(!!b.link) - Number(!!a.link) || (b.at ?? '').localeCompare(a.at ?? ''))
       .map(({ at, ...place }) => place)
+  }
+
+  private rank({ app, thread, message, call }: Source) {
+    if (call || message === undefined) return 3
+    if (this.open({ app, thread: thread!, message })) return 0
+    return String(this.pins.get(`${app}:${thread}`)?.message) === String(message) ? 1 : 2
   }
 
   // A thread's place, and when it asked there: the question's or the pinned post's time.

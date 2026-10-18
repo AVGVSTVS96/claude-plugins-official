@@ -221,7 +221,7 @@ test('a check’s verdict is held to the ledger: real open refs and buttons only
   expect(verdict.stuck[0]!.id).toBe('check-disk')
 })
 
-test('an ask names every place it was asked, newest first, each with the best link its app has, and its pages apart from its answers', () => {
+test('an ask names every place it was asked, each thread once at its open question, pinned post or message, with the best link its app has, the ones that open first, and its pages apart from its answers', () => {
   const DM = '777'
   const THREAD = '1560277464146644992'
   writeFileSync(join(state, 'telegram', 'threads.json'), JSON.stringify({ [GROUP]: { name: 'hex' }, [DESK]: { name: 'desk' }, [DM]: { name: 'DM' } }))
@@ -232,7 +232,7 @@ test('an ask names every place it was asked, newest first, each with the best li
   const calls = join(state, 'calls')
   mkdirSync(calls)
   writeFileSync(join(calls, 'live_1.json'), JSON.stringify({ id: 'live_1', title: 'Apple charges', started: '2026-10-13T18:00:00.000Z' }))
-  ledger([asked(1, 'Order the Duo?', ['Ordered', 'Not yet'])], { [GROUP]: { message: 2693, text: 'Blocked on you: the Duo order', at: '2026-10-13T19:00:00.000Z' } })
+  ledger([asked(1, 'Order the Duo?', ['Ordered', 'Not yet']), { thread: GROUP, message: 3451, text: 'Duo ordered?', options: ['Yes', 'No'], at: '2026-10-13T12:00:00.000Z' }], { [GROUP]: { message: 2693, text: 'Blocked on you: the Duo order', at: '2026-10-13T19:00:00.000Z' }, [DESK]: { message: 4, text: 'Duo order', at: '2026-10-13T21:00:00.000Z' } })
   writeFileSync(
     join(state, 'voice', 'check.json'),
     JSON.stringify({
@@ -247,12 +247,15 @@ test('an ask names every place it was asked, newest first, each with the best li
           options: [{ label: 'Ordered', value: 'Ordered' }, { label: 'Not yet', value: 'Not yet' }],
           links: [{ label: 'Apple Store', url: 'https://apple.com/store' }],
           from: [
+            { app: 'telegram', thread: DESK, message: 4 },
             { app: 'telegram', thread: DESK, message: 1 },
             { app: 'telegram', thread: GROUP, message: 2693 },
+            { app: 'telegram', thread: GROUP, message: 3000 },
             { app: 'voice', call: 'live_1' },
             { app: 'telegram', thread: DM, message: 585 },
             { app: 'discord', thread: THREAD },
             { app: 'telegram', thread: DESK },
+            { app: 'telegram', thread: DM },
           ],
           refs: [{ app: 'telegram', thread: DESK, message: 1 }],
         },
@@ -264,10 +267,10 @@ test('an ask names every place it was asked, newest first, each with the best li
   expect(duo).toMatchObject({ options: [{ label: 'Ordered', value: 'Ordered' }, { label: 'Not yet', value: 'Not yet' }], links: [{ label: 'Apple Store', url: 'https://apple.com/store' }] })
   expect(duo!.places).toEqual([
     { app: 'telegram', place: 'General', task: `telegram:${GROUP}`, link: 'https://t.me/c/1234/2693' },
-    { app: 'voice', place: 'Apple charges', call: 'live_1' },
     { app: 'telegram', place: 'desk', task: `telegram:${DESK}`, link: 'https://t.me/c/1234/5/1' },
     { app: 'telegram', place: 'DM', task: `telegram:${DM}`, link: 'https://t.me/hexbot' },
     { app: 'discord', place: 'fix hex NOW', task: `discord:${THREAD}`, link: `https://discord.com/channels/42/${THREAD}` },
+    { app: 'voice', place: 'Apple charges', call: 'live_1' },
   ])
 })
 
