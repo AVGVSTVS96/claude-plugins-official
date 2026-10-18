@@ -38,10 +38,10 @@ index 0000000000000000000000000000000000000000..3848f887519e78cddbfca243d2c34242
 +}
 diff --git a/external_plugins/voice/README.md b/external_plugins/voice/README.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..8cfe126f9ed28baea37dca1ed4f6cb8e3107e85c
+index 0000000000000000000000000000000000000000..7cfbf72ec7dd41d92cdd6b01f951eb5cf47366a8
 --- /dev/null
 +++ b/external_plugins/voice/README.md
-@@ -0,0 +1,385 @@
+@@ -0,0 +1,406 @@
 +# voice
 +
 +Live voice calls for Claude Code. OpenAI's `gpt-live-1` talks with you in real
@@ -250,13 +250,16 @@ index 0000000000000000000000000000000000000000..8cfe126f9ed28baea37dca1ed4f6cb8e
 +they see threads (Buzz's `channels.json`); a thread whose app can't say where it
 +lives has no `link`.
 +
++Claude Code starts a job's timeline over whenever its session respawns or renews, so the engine
++keeps each thread's `track` for a week in `state/voice/tracks.json`.
++
 +A blocked thread needs you; a working one whose session stopped counts as idle;
 +anything that finished more than a week ago is left out. Rows come in that
 +order (needs you, working, done, failed, idle), newest change first in each.
 +
 +| Request | Answers |
 +| --- | --- |
-+| `GET /tasks` | `{ version, tasks }`: each thread's `id`, `name`, `where` (Telegram, General, Discord...), `state` (`needs`, `working`, `done`, `failed`, `idle`), one `line`, `since` its state began, `at` its last change, its running `agents` with their own lines, and a `link` that opens the thread in its own app (Telegram, Discord, Buzz or T3 Code) |
++| `GET /tasks` | `{ version, tasks }`: each thread's `id`, `name`, `where` (Telegram, General, Discord...), `state` (`needs`, `working`, `done`, `failed`, `idle`), one `line`, `since` its state began, `at` its last change, its running `agents` with their own lines, its `track` (the last week of its states for its lane: each change, with steps for the last hour only), and a `link` that opens the thread in its own app (Telegram, Discord, Buzz or T3 Code) |
 +| `GET /tasks?after=<version>` | the same, once anything has changed (or after 25 seconds) |
 +| `GET /tasks/summary?after=<version>` | `{ version, needs, working }`, once a count changes |
 +| `GET /tasks/<id>` | one task, with what it `needs` from you in full and what it did `lately` |
@@ -285,6 +288,23 @@ index 0000000000000000000000000000000000000000..8cfe126f9ed28baea37dca1ed4f6cb8e
 +            {type:"answer"} on hub.sock ◄── POST /asks/<id>/answer ◄───────────┘
 +```
 +
++Each of an ask's `places` is `{ app, place, task?, call?, link? }`: the app (`telegram`,
++`discord`, `buzz`, `t3`, or `voice` for a call), what the place is called there (a topic, General,
++DM, a T3 Code title, a call's title), the hex thread (`task`, as in `/tasks`) or call it is, and a
++`link` that opens it: the message itself where its app links messages (a Telegram group, a
++Discord thread), else its thread (Telegram's DM opens the chat with the bot). A place without a
++`link` is still where it was asked: a T3 Code thread T3 doesn't map, or a call.
++
++```json
++{ "id": "check:duo-order", "question": "Is there an Apple order in for the Duo?",
++  "options": [{ "label": "Ordered" }, { "label": "Not yet" }],
++  "links": [{ "label": "Apple Store", "url": "https://www.apple.com/shop/buy-iphone" }],
++  "places": [
++    { "app": "telegram", "place": "General", "task": "telegram:-1004422245734", "link": "https://t.me/c/4422245734/3451" },
++    { "app": "voice", "place": "Duo date history", "call": "live_u7_EZeofp3oN0l6HoawdnZt3UQ2o1imBvFp" }
++  ] }
++```
++
 +An answer from the app reaches the thread as your own tap would (with
 +`answered_in`), and its Telegram buttons change to "Answered in the app". A
 +poll can't take a vote from the bot, so it closes instead. Undo puts the
@@ -292,7 +312,7 @@ index 0000000000000000000000000000000000000000..8cfe126f9ed28baea37dca1ed4f6cb8e
 +
 +| Request | Answers |
 +| --- | --- |
-+| `GET /asks` | `{ version, asks, stuck, fresh, check }`: each open question's `id`, `kind` (`pick`, `yesno`, `do`, `look`), `task` and `topic` (its thread), `question`, `context`, `options` (`label`, `pick`, `url`), `tag`, `places` and a `link` to it; what's `stuck` (`title`, `why`, one `action`); what finished since you looked (`fresh`, with `read`); and the last check's time and counts |
++| `GET /asks` | `{ version, asks, stuck, fresh, check }`: each open question's `id`, `kind` (`pick`, `yesno`, `do`, `look`), `task` and `topic` (its thread), `question`, `context`, `options` (its answers: `label`, `pick`), `links` (pages it points to, which answer nothing: `label`, `url`), `tag`, and `places`, every place it was asked (each thread once, at its open question, pinned post or message), the ones that open first, each newest first; what's `stuck` (`title`, `why`, one `action`); what finished since you looked (`fresh`, with `read`); and the last check's time and counts |
 +| `GET /asks?after=<version>` | the same, once anything has changed (or after 25 seconds) |
 +| `POST /asks/<id>/answer` | `{ "label": "..." }`: answers it |
 +| `POST /asks/<id>/undo` | takes that answer back |
@@ -309,7 +329,8 @@ index 0000000000000000000000000000000000000000..8cfe126f9ed28baea37dca1ed4f6cb8e
 +Opus pass (`claude -p`, read-only tools, structured output) over the ledger's
 +open and lately closed questions, every pinned post, the last three days of
 +call wrap-ups and what T3 Code shows. It rewrites the raw questions into one
-+list (repeats merged into one ask with every place that asked it, hex's pick,
++list (repeats merged into one ask with every place that asked it: each question, pinned post,
++plain message (with its id, from the transcripts) and call, hex's pick,
 +what each unblocks or costs, most unblocking first), settles the questions the
 +records show are already decided or done (their buttons say why), and flags
 +what it can't settle. It never answers for you.
@@ -865,10 +886,10 @@ index 0000000000000000000000000000000000000000..01aef3124b6ef04f65a217009de5604a
 +}
 diff --git a/external_plugins/voice/asks.test.ts b/external_plugins/voice/asks.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..41a4f5a98bdbf2b214843f2479aa70d650bd1e98
+index 0000000000000000000000000000000000000000..d89196879345d3073c0f0fd1213197ce632032ef
 --- /dev/null
 +++ b/external_plugins/voice/asks.test.ts
-@@ -0,0 +1,206 @@
+@@ -0,0 +1,294 @@
 +import { afterEach, beforeEach, expect, test } from 'bun:test'
 +import { Database } from 'bun:sqlite'
 +import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
@@ -937,10 +958,10 @@ index 0000000000000000000000000000000000000000..41a4f5a98bdbf2b214843f2479aa70d6
 +
 +test('open questions come newest first with a link to each, answered and settled ones drop out', () => {
 +  ledger([asked(1, 'Ship it?', ['Yes', 'No']), asked(2, 'Rename it?', ['Yes', 'No'], { answer: { label: 'No', at: '', via: 'telegram' } }), asked(3, 'Which color?', ['Mint', 'Coral'])])
-+  asks = new Asks(state, { t3Database: '/nonexistent', check: why => checks.push(why) })
-+  expect(asks.view.asks.map(ask => [ask.question, ask.app, ask.topic, ask.link])).toEqual([
-+    ['Which color?', 'telegram', 'desk', 'https://t.me/c/1234/5/3'],
-+    ['Ship it?', 'telegram', 'desk', 'https://t.me/c/1234/5/1'],
++  asks = new Asks(state, { t3Database: '/nonexistent', t3Home: '/nonexistent', check: why => checks.push(why) })
++  expect(asks.view.asks.map(ask => [ask.question, ask.app, ask.topic, ask.places])).toEqual([
++    ['Which color?', 'telegram', 'desk', [{ app: 'telegram', place: 'desk', task: `telegram:${DESK}`, link: 'https://t.me/c/1234/5/3' }]],
++    ['Ship it?', 'telegram', 'desk', [{ app: 'telegram', place: 'desk', task: `telegram:${DESK}`, link: 'https://t.me/c/1234/5/1' }]],
 +  ])
 +})
 +
@@ -970,7 +991,7 @@ index 0000000000000000000000000000000000000000..41a4f5a98bdbf2b214843f2479aa70d6
 +      ],
 +    }),
 +  )
-+  asks = new Asks(state, { t3Database: '/nonexistent', check: why => checks.push(why) })
++  asks = new Asks(state, { t3Database: '/nonexistent', t3Home: '/nonexistent', check: why => checks.push(why) })
 +  expect(asks.view.asks.map(ask => ask.id)).toEqual([`telegram:${DESK}:9`, 'check:twilio', 'check:read'])
 +  expect(asks.view.asks.map(ask => ask.app)).toEqual(['telegram', 'telegram', 'telegram'])
 +  expect(asks.view.check).toEqual({ at: '2026-10-13T15:00:00.000Z', why: 'a pinned post changed', fixed: 0, flagged: 0 })
@@ -991,7 +1012,7 @@ index 0000000000000000000000000000000000000000..41a4f5a98bdbf2b214843f2479aa70d6
 +
 +test('an answer that lands in the ledger takes the question off the list, and undo asks for its buttons back', async () => {
 +  ledger([asked(1, 'Ship it?', ['Yes', 'No'])])
-+  asks = new Asks(state, { t3Database: '/nonexistent', check: why => checks.push(why) })
++  asks = new Asks(state, { t3Database: '/nonexistent', t3Home: '/nonexistent', check: why => checks.push(why) })
 +  const version = asks.version
 +  await asks.answer(`telegram:${DESK}:1`, 'Yes', 'app')
 +  expect(await until(() => lines[0])).toEqual({ type: 'answer', thread: DESK, message: 1, label: 'Yes', via: 'app' })
@@ -1013,7 +1034,7 @@ index 0000000000000000000000000000000000000000..41a4f5a98bdbf2b214843f2479aa70d6
 +      ],
 +    }),
 +  )
-+  asks = new Asks(state, { t3Database: '/nonexistent', check: why => checks.push(why) })
++  asks = new Asks(state, { t3Database: '/nonexistent', t3Home: '/nonexistent', check: why => checks.push(why) })
 +  await asks.act('disk')
 +  expect(await until(() => lines[0])).toEqual({ type: 'inbound', thread: GROUP, content: 'Restore cloud from checkpoint v7.', meta: { user: 'hex app' } })
 +  await asks.act('runs')
@@ -1063,37 +1084,136 @@ index 0000000000000000000000000000000000000000..41a4f5a98bdbf2b214843f2479aa70d6
 +  const ref = (message: number) => ({ app: 'telegram', thread: DESK, message })
 +  const verdict = vet(
 +    {
-+      asks: [{ id: 'twilio', kind: 'do', task: `telegram:${DESK}`, at: '', question: 'Upgrade Twilio', options: [{ label: 'Upgrade', value: 'Upgrade' }, { label: 'Later', value: 'Wait' }], refs: [ref(1), ref(2), ref(9)] }],
++      asks: [
++        {
++          id: 'twilio',
++          kind: 'do',
++          task: `telegram:${DESK}`,
++          at: '',
++          question: 'Upgrade Twilio',
++          options: [{ label: 'Upgrade', value: 'Upgrade' }, { label: 'Later', value: 'Wait' }],
++          from: [ref(1), ref(2), ref(9), { app: 'telegram', thread: GROUP }, { app: 'telegram', thread: '-100999' }, { app: 'voice', call: 'live_1' }, { app: 'voice', call: 'live_made_up' }],
++        },
++      ],
 +      settle: [{ ...ref(1), note: 'Settled' }, { ...ref(2), note: 'Settled' }, { ...ref(3), note: 'Settled: Tech Live, picked on a call with a very long note' }],
 +      fixed: [],
 +      flagged: [],
 +      stuck: [{ id: 'disk', title: 'disk', why: '', action: 'Look', mark: 'failed', at: '' }],
 +    },
 +    asks,
++    { threads: { [`telegram:${GROUP}`]: 'hex', [`telegram:${DESK}`]: 'desk' }, calls: [{ id: 'live_1' }] },
 +  )
-+  expect(verdict.asks[0]).toMatchObject({ id: 'check:twilio', refs: [ref(1)], options: [{ label: 'Upgrade', value: 'Upgrade' }, { label: 'Later' }] })
++  expect(verdict.asks[0]).toMatchObject({
++    id: 'check:twilio',
++    refs: [ref(1)],
++    from: [ref(1), ref(2), ref(9), { app: 'telegram', thread: GROUP }, { app: 'voice', call: 'live_1' }],
++    options: [{ label: 'Upgrade', value: 'Upgrade' }, { label: 'Later' }],
++  })
 +  expect(verdict.settle).toEqual([{ ...ref(3), note: 'Settled: Tech Live, picked on a call with a very long note'.slice(0, 60) }])
 +  expect(verdict.stuck[0]!.id).toBe('check-disk')
 +})
++
++test('an ask names every place it was asked, each thread once at its open question, pinned post or message, with the best link its app has, the ones that open first, and its pages apart from its answers', () => {
++  const DM = '777'
++  const THREAD = '1560277464146644992'
++  writeFileSync(join(state, 'telegram', 'threads.json'), JSON.stringify({ [GROUP]: { name: 'hex' }, [DESK]: { name: 'desk' }, [DM]: { name: 'DM' } }))
++  writeFileSync(join(state, 'telegram', 'bot.json'), JSON.stringify({ username: 'hexbot' }))
++  mkdirSync(join(state, 'discord'))
++  writeFileSync(join(state, 'discord', 'guild.json'), JSON.stringify({ id: '42' }))
++  writeFileSync(join(state, 'discord', 'threads.json'), JSON.stringify({ [THREAD]: { name: 'fix hex NOW' } }))
++  const calls = join(state, 'calls')
++  mkdirSync(calls)
++  writeFileSync(join(calls, 'live_1.json'), JSON.stringify({ id: 'live_1', title: 'Apple charges', started: '2026-10-13T18:00:00.000Z' }))
++  ledger([asked(1, 'Order the Duo?', ['Ordered', 'Not yet']), { thread: GROUP, message: 3451, text: 'Duo ordered?', options: ['Yes', 'No'], at: '2026-10-13T12:00:00.000Z' }], { [GROUP]: { message: 2693, text: 'Blocked on you: the Duo order', at: '2026-10-13T19:00:00.000Z' }, [DESK]: { message: 4, text: 'Duo order', at: '2026-10-13T21:00:00.000Z' } })
++  writeFileSync(
++    join(state, 'voice', 'check.json'),
++    JSON.stringify({
++      at: '2026-10-13T20:00:00.000Z', why: 'a call ended', read: {}, fixed: [], flagged: [], stuck: [],
++      asks: [
++        {
++          id: 'check:duo',
++          kind: 'yesno',
++          task: `telegram:${DESK}`,
++          at: '2026-10-13T11:00:00.000Z',
++          question: 'Is the Duo ordered?',
++          options: [{ label: 'Ordered', value: 'Ordered' }, { label: 'Not yet', value: 'Not yet' }],
++          links: [{ label: 'Apple Store', url: 'https://apple.com/store' }],
++          from: [
++            { app: 'telegram', thread: DESK, message: 4 },
++            { app: 'telegram', thread: DESK, message: 1 },
++            { app: 'telegram', thread: GROUP, message: 2693 },
++            { app: 'telegram', thread: GROUP, message: 3000 },
++            { app: 'voice', call: 'live_1' },
++            { app: 'telegram', thread: DM, message: 585 },
++            { app: 'discord', thread: THREAD },
++            { app: 'telegram', thread: DESK },
++            { app: 'telegram', thread: DM },
++          ],
++          refs: [{ app: 'telegram', thread: DESK, message: 1 }],
++        },
++      ],
++    }),
++  )
++  asks = new Asks(state, { t3Database: '/nonexistent', t3Home: '/nonexistent', calls, check: why => checks.push(why) })
++  const [duo] = asks.view.asks
++  expect(duo).toMatchObject({ options: [{ label: 'Ordered', value: 'Ordered' }, { label: 'Not yet', value: 'Not yet' }], links: [{ label: 'Apple Store', url: 'https://apple.com/store' }] })
++  expect(duo!.places).toEqual([
++    { app: 'telegram', place: 'General', task: `telegram:${GROUP}`, link: 'https://t.me/c/1234/2693' },
++    { app: 'telegram', place: 'desk', task: `telegram:${DESK}`, link: 'https://t.me/c/1234/5/1' },
++    { app: 'telegram', place: 'DM', task: `telegram:${DM}`, link: 'https://t.me/hexbot' },
++    { app: 'discord', place: 'fix hex NOW', task: `discord:${THREAD}`, link: `https://discord.com/channels/42/${THREAD}` },
++    { app: 'voice', place: 'Apple charges', call: 'live_1' },
++  ])
++})
++
++test('a check written before places and links were typed still gives each ask its places, and its url options as links', () => {
++  ledger([asked(1, 'Read the review?', ['Done', 'Later'])])
++  writeFileSync(
++    join(state, 'voice', 'check.json'),
++    JSON.stringify({
++      at: '2026-10-13T20:00:00.000Z', why: 'a call ended', read: {}, fixed: [], flagged: [], stuck: [],
++      asks: [
++        { id: 'check:review', kind: 'do', task: `telegram:${DESK}`, at: '', question: 'Read the review', options: [{ label: 'Done', value: 'Done' }, { label: 'Open PR #2', url: 'https://github.com/x/pull/2' }], places: ['desk', 'hex'], refs: [{ app: 'telegram', thread: DESK, message: 1 }] },
++        { id: 'check:pin', kind: 'do', task: `telegram:${GROUP}`, at: '', question: 'File the claim', options: [{ label: 'Done' }], places: ['hex'] },
++      ],
++    }),
++  )
++  asks = new Asks(state, { t3Database: '/nonexistent', t3Home: '/nonexistent', check: why => checks.push(why) })
++  expect(asks.view.asks.map(ask => [ask.id, ask.options, ask.links, ask.places])).toEqual([
++    ['check:review', [{ label: 'Done', value: 'Done' }], [{ label: 'Open PR #2', url: 'https://github.com/x/pull/2' }], [{ app: 'telegram', place: 'desk', task: `telegram:${DESK}`, link: 'https://t.me/c/1234/5/1' }]],
++    ['check:pin', [{ label: 'Done' }], undefined, [{ app: 'telegram', place: 'General', task: `telegram:${GROUP}`, link: 'https://t.me/c/1234/1' }]],
++  ])
++})
 diff --git a/external_plugins/voice/asks.ts b/external_plugins/voice/asks.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..85ad9db9dcf9d795daad83929ebf0ccddf60472a
+index 0000000000000000000000000000000000000000..dcfd7000501103589e48866574dd6b7ea9f9b982
 --- /dev/null
 +++ b/external_plugins/voice/asks.ts
-@@ -0,0 +1,351 @@
+@@ -0,0 +1,405 @@
 +import { readdirSync, readFileSync, renameSync, watch, writeFileSync } from 'fs'
++import { homedir } from 'os'
 +import { join } from 'path'
-+import type { Ask as Asked, MessageId } from '../../hub/ledger.ts'
++import type { Ask as Asked, MessageId, Pin } from '../../hub/ledger.ts'
 +import { Changes } from './changes.ts'
 +import { Check } from './check.ts'
++import { Links } from './links.ts'
 +import { relay } from './relay.ts'
 +import { T3, type Fresh, type Stuck } from './t3.ts'
 +
 +export type Kind = 'pick' | 'yesno' | 'do' | 'look'
-+// value: the button's own label, when the option stands for one; url: an option that opens a page.
-+export type Option = { label: string; value?: string; pick?: boolean; url?: string }
++// value: the button's own label, when the option stands for one.
++export type Option = { label: string; value?: string; pick?: boolean }
++// A page an ask points to; opening it answers nothing.
++export type Link = { label: string; url: string }
 +export type Answer = { label: string; at: string; via: string }
 +export type Ref = { app: string; thread: string; message: MessageId }
++// Where an ask was asked, as hex's check found it: a thread, with the message when it knows it
++// (a question, a pinned post, a plain message), or a call.
++export type Source = { app: string; thread?: string; message?: MessageId; call?: string }
++// Each place an ask was asked, for its row: the app, what the place is called there, the hex thread
++// (task) or call it is, and a link that opens it, the message itself where the app has one. A place
++// without a link is still known to be where it was asked.
++export type Place = { app: string; place: string; task?: string; call?: string; link?: string }
 +export type Ask = {
 +  id: string
 +  kind: Kind
@@ -1104,13 +1224,17 @@ index 0000000000000000000000000000000000000000..85ad9db9dcf9d795daad83929ebf0ccd
 +  question: string
 +  context?: string
 +  options: Option[]
++  links?: Link[]
 +  tag?: string
-+  places?: string[]
-+  link?: string
++  places: Place[]
 +}
 +// hex's check rewrites the raw questions into these: one per decision, however many places asked
-+// it (refs), in the order that unblocks the most, with its pick and what it costs.
-+export type Curated = Omit<Ask, 'app' | 'topic' | 'link'> & { refs?: Ref[] }
++// it (from; refs are the open questions with buttons among them, which an answer goes back to), in
++// the order that unblocks the most, with its pick and what it costs.
++export type Curated = Omit<Ask, 'app' | 'topic' | 'places'> & { from?: Source[]; refs?: Ref[] }
++// A check.json written before places and links were typed: its places were names and a link was an
++// option with a url. The next pass rewrites it.
++type Written = Omit<Curated, 'options'> & { places?: string[]; options: (Option & { url?: string })[] }
 +export type Note = { title: string; text: string; did?: string }
 +export type CheckResult = {
 +  at: string
@@ -1132,6 +1256,7 @@ index 0000000000000000000000000000000000000000..85ad9db9dcf9d795daad83929ebf0ccd
 +type Marks = { answers: Record<string, Answer>; sent: Record<string, string>; dismissed: Record<string, string>; read: Record<string, string> }
 +
 +const KEEP = 14 * 24 * 60 * 60_000
++const CALLS = join(homedir(), '.claude', 'channels', 'voice', 'calls')
 +const WHERE: Record<string, string> = { app: 'in the app', call: 'on a call' }
 +const PICK = /\s*[(\[]?\s*(?:←\s*)?(?:(?:my|hex[’']s) pick)\s*[)\]]?/i
 +
@@ -1144,8 +1269,9 @@ index 0000000000000000000000000000000000000000..85ad9db9dcf9d795daad83929ebf0ccd
 +  counts = new Changes()
 +  private ledgers = new Map<string, Asked[]>()
 +  private names = new Map<string, string>()
-+  private pins = new Map<string, string>()
-+  private guild?: string
++  private pins = new Map<string, Pin>()
++  private links: Links
++  private calls: string
 +  private result?: CheckResult
 +  private marks: Marks
 +  private pending?: ReturnType<typeof setTimeout>
@@ -1156,10 +1282,12 @@ index 0000000000000000000000000000000000000000..85ad9db9dcf9d795daad83929ebf0ccd
 +
 +  constructor(
 +    private state: string,
-+    { t3Database, check = why => new Check(state).start(why) }: { t3Database?: string; check?: (why: string) => void } = {},
++    { t3Database, t3Home, calls = CALLS, check = why => new Check(state).start(why) }: { t3Database?: string; t3Home?: string; calls?: string; check?: (why: string) => void } = {},
 +  ) {
 +    super()
 +    this.check = check
++    this.calls = calls
++    this.links = new Links(state, () => this.schedule(), t3Home)
 +    this.marks = readMarks(join(state, 'voice', 'marks.json'))
 +    this.t3 = new T3(() => this.schedule(), t3Database)
 +    for (const app of apps(state)) this.stops.push(watchDir(join(state, app), file => (file === 'ledger.json' || file === 'threads.json') && this.schedule()))
@@ -1184,6 +1312,7 @@ index 0000000000000000000000000000000000000000..85ad9db9dcf9d795daad83929ebf0ccd
 +  close() {
 +    clearTimeout(this.pending)
 +    this.t3.close()
++    this.links.close()
 +    for (const stop of this.stops) stop()
 +  }
 +
@@ -1193,7 +1322,7 @@ index 0000000000000000000000000000000000000000..85ad9db9dcf9d795daad83929ebf0ccd
 +
 +  // The thread's own questions and its pinned status post, for its page.
 +  of(task: string) {
-+    return { asks: this.view.asks.filter(ask => ask.task === task), ...(this.pins.has(task) && { pin: this.pins.get(task) }) }
++    return { asks: this.view.asks.filter(ask => ask.task === task), ...(this.pins.has(task) && { pin: this.pins.get(task)!.text }) }
 +  }
 +
 +  async answer(id: string, label: string, via: string) {
@@ -1289,14 +1418,14 @@ index 0000000000000000000000000000000000000000..85ad9db9dcf9d795daad83929ebf0ccd
 +    for (const app of apps(this.state)) {
 +      const book = readJson(join(this.state, app, 'ledger.json'))
 +      this.ledgers.set(app, book?.asks ?? [])
-+      for (const [thread, pin] of Object.entries<any>(book?.pins ?? {})) if (pin.text) this.pins.set(`${app}:${thread}`, pin.text)
++      for (const [thread, pin] of Object.entries<any>(book?.pins ?? {})) if (pin.text) this.pins.set(`${app}:${thread}`, pin)
 +      for (const [thread, known] of Object.entries<any>(readJson(join(this.state, app, 'threads.json')) ?? {})) this.names.set(`${app}:${thread}`, known.name ?? thread)
 +    }
-+    this.guild = readJson(join(this.state, 'discord', 'guild.json'))?.id
++    this.links.load()
 +    this.result = readJson(join(this.state, 'voice', 'check.json'))
 +    this.notice()
 +    const used = new Set<string>()
-+    const curated = (this.result?.asks ?? []).flatMap(ask => {
++    const curated = (this.result?.asks ?? []).flatMap((ask: Written) => {
 +      for (const ref of ask.refs ?? []) used.add(refId(ref))
 +      const live = ask.refs?.length ? ask.refs.some(ref => this.open(ref)) : !this.marks.answers[ask.id]
 +      return live ? [this.dress(ask)] : []
@@ -1325,7 +1454,7 @@ index 0000000000000000000000000000000000000000..85ad9db9dcf9d795daad83929ebf0ccd
 +  // A pinned post that changed or a T3 run that ended starts a check; the first read only takes note.
 +  private notice() {
 +    const now = {
-+      pins: JSON.stringify([...this.pins]),
++      pins: JSON.stringify([...this.pins].map(([task, pin]) => [task, pin.text])),
 +      t3: JSON.stringify([this.t3.stuck, this.t3.fresh].map(items => items.map(item => item.id))),
 +    }
 +    const why = !this.seen ? undefined : now.pins !== this.seen.pins ? 'a pinned post changed' : now.t3 !== this.seen.t3 ? 'a T3 run ended' : undefined
@@ -1333,15 +1462,55 @@ index 0000000000000000000000000000000000000000..85ad9db9dcf9d795daad83929ebf0ccd
 +    if (why) this.check(why)
 +  }
 +
-+  private dress(ask: Curated): Ask {
-+    const { refs, ...rest } = ask
-+    const ref = refs?.[0]
++  private dress({ refs, from, options, links = [], places: _names, ...ask }: Written): Ask {
++    const [app, ...thread] = ask.task.split(':')
++    const pages = [...links, ...options.flatMap(({ label, url }) => (url ? [{ label, url }] : []))]
 +    return {
-+      ...rest,
-+      app: ref?.app ?? ask.task.split(':')[0]!,
-+      topic: this.names.get(ask.task) ?? ask.task.split(':').at(-1)!,
-+      ...(ref && link(ref, this.guild) && { link: link(ref, this.guild) }),
++      ...ask,
++      app: app!,
++      topic: this.names.get(ask.task) ?? thread.at(-1)!,
++      options: options.filter(option => !option.url),
++      ...(pages.length && { links: pages }),
++      places: this.places(from ?? [...(refs ?? []), { app: app!, thread: thread.join(':') }]),
 +    }
++  }
++
++  // Every place an ask was asked, the ones that open first, each newest first where it's known
++  // when: each call, and each thread once, at the message that matters most there: its open question, else its pinned post, else
++  // any message, else the thread itself.
++  private places(from: Source[]): Place[] {
++    const best = new Map<string, Source>()
++    for (const source of from) {
++      if (!source.call && !source.thread) continue
++      const key = source.call ? `call:${source.call}` : `${source.app}:${source.thread}`
++      const held = best.get(key)
++      if (!held || this.rank(source) < this.rank(held)) best.set(key, source)
++    }
++    return [...best.values()]
++      .map(source => (source.call ? this.call(source.call) : this.thread(source.app, source.thread!, source.message)))
++      .sort((a, b) => Number(!!b.link) - Number(!!a.link) || (b.at ?? '').localeCompare(a.at ?? ''))
++      .map(({ at, ...place }) => place)
++  }
++
++  private rank({ app, thread, message, call }: Source) {
++    if (call || message === undefined) return 3
++    if (this.open({ app, thread: thread!, message })) return 0
++    return String(this.pins.get(`${app}:${thread}`)?.message) === String(message) ? 1 : 2
++  }
++
++  // A thread's place, and when it asked there: the question's or the pinned post's time.
++  private thread(app: string, thread: string, message?: MessageId): Place & { at?: string } {
++    const task = `${app}:${thread}`
++    const place = app === 'telegram' && !thread.includes(':') ? (thread.startsWith('-') ? 'General' : 'DM') : (this.links.title(app, thread) ?? this.names.get(task) ?? thread)
++    const link = this.links.of(app, thread, message)
++    const pin = this.pins.get(task)
++    const at = message === undefined ? undefined : pin && String(pin.message) === String(message) ? pin.at : this.asked({ app, thread, message })?.at
++    return { app, place, task, ...(link && { link }), at }
++  }
++
++  private call(id: string): Place & { at?: string } {
++    const call = readJson(join(this.calls, `${id}.json`))
++    return { app: 'voice', place: call?.title ?? 'a call', call: id, at: call?.started }
 +  }
 +
 +  private saveMarks() {
@@ -1376,18 +1545,12 @@ index 0000000000000000000000000000000000000000..85ad9db9dcf9d795daad83929ebf0ccd
 +    ...(context && { context: clip(context, 280) }),
 +    options,
 +    refs: [{ app, thread: asked.thread, message: asked.message }],
++    from: [{ app, thread: asked.thread, message: asked.message }],
 +  }
 +}
 +
 +export function refId({ app, thread, message }: Ref) {
 +  return `${app}:${thread}:${message}`
-+}
-+
-+function link({ app, thread, message }: Ref, guild?: string) {
-+  if (app === 'discord') return guild && `https://discord.com/channels/${guild}/${thread}/${message}`
-+  if (app !== 'telegram' || !thread.startsWith('-100')) return
-+  const [chat, topic] = thread.slice(4).split(':')
-+  return topic ? `https://t.me/c/${chat}/${topic}/${message}` : `https://t.me/c/${chat}/${message}`
 +}
 +
 +function plain(text: string) {
@@ -2337,21 +2500,22 @@ index 0000000000000000000000000000000000000000..b669c0c364d3eba280d49e6f605a73c9
 +}
 diff --git a/external_plugins/voice/check.ts b/external_plugins/voice/check.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..852567aca10545217c2e5cee77920937fefbab9a
+index 0000000000000000000000000000000000000000..34c67175e0a0516465e9b7a2c35bb7d816543554
 --- /dev/null
 +++ b/external_plugins/voice/check.ts
-@@ -0,0 +1,290 @@
+@@ -0,0 +1,296 @@
 +import { spawn } from 'child_process'
 +import { createHash } from 'crypto'
 +import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'fs'
 +import { homedir, tmpdir } from 'os'
 +import { dirname, join } from 'path'
 +import type { Ask as Asked } from '../../hub/ledger.ts'
-+import type { CheckResult, Curated, Ref } from './asks.ts'
++import type { CheckResult, Curated, Ref, Source } from './asks.ts'
 +import { relay } from './relay.ts'
 +import { T3, type Stuck } from './t3.ts'
 +
 +type Verdict = Pick<CheckResult, 'asks' | 'fixed' | 'flagged' | 'stuck'> & { settle: (Ref & { note: string })[] }
++type Known = { threads: Record<string, string>; calls: { id: string }[] }
 +
 +const MODEL = process.env.HEX_CHECK_MODEL ?? 'claude-opus-5-5'
 +const CALLS = join(homedir(), '.claude', 'channels', 'voice', 'calls')
@@ -2418,13 +2582,13 @@ index 0000000000000000000000000000000000000000..852567aca10545217c2e5cee77920937
 +  const records = gather(state)
 +  const inputs = digest(records)
 +  if (records.previous?.inputs === inputs) return
-+  const verdict = vet(await claude(prompt(records), dirname(state)), records.ledgers)
++  const verdict = vet(await claude(prompt(records), dirname(state)), records.ledgers, { threads: records.threads, calls: records.calls })
 +  for (const ref of verdict.settle) await relay(state, ref.app, { type: 'settle', thread: ref.thread, message: ref.message, note: ref.note }).catch(error => process.stderr.write(`voice: check: ${error}\n`))
 +  const result: CheckResult = {
 +    at: started,
 +    why,
 +    read: {
-+      'pinned posts': Object.values(records.pins).length,
++      'pinned posts': records.pins.length,
 +      questions: records.open.length,
 +      'T3 items': records.t3.stuck.length + records.t3.fresh.length,
 +      calls: records.calls.length,
@@ -2445,12 +2609,12 @@ index 0000000000000000000000000000000000000000..852567aca10545217c2e5cee77920937
 +  const recent = new Date(now - RECENT).toISOString()
 +  const names: Record<string, string> = {}
 +  const ledgers: Record<string, Asked[]> = {}
-+  const pins: Record<string, string> = {}
++  const pins: { pin: Ref; topic: string; text: string }[] = []
 +  for (const app of readdirSync(state).filter(app => app !== 'voice')) {
 +    for (const [thread, known] of Object.entries<any>(json(join(state, app, 'threads.json')) ?? {})) names[`${app}:${thread}`] = known.name ?? thread
 +    const book = json(join(state, app, 'ledger.json'))
 +    ledgers[app] = book?.asks ?? []
-+    for (const [thread, pin] of Object.entries<any>(book?.pins ?? {})) if (pin.text) pins[`${app}:${thread}`] = clip(pin.text, LONG)
++    for (const [thread, pin] of Object.entries<any>(book?.pins ?? {})) if (pin.text) pins.push({ pin: { app, thread, message: pin.message }, topic: names[`${app}:${thread}`] ?? thread, text: clip(pin.text, LONG) })
 +  }
 +  const shown = (app: string, ask: Asked) => ({
 +    ref: { app, thread: ask.thread, message: ask.message },
@@ -2471,8 +2635,8 @@ index 0000000000000000000000000000000000000000..852567aca10545217c2e5cee77920937
 +    .filter(file => file.endsWith('.json') && statSync(join(CALLS, file)).mtimeMs > now - RECENT)
 +    .map(file => json(join(CALLS, file)))
 +    .filter(call => call?.ended && (call.summary || call.waiting?.length))
-+    .map(call => ({ title: call.title, ended: call.ended, summary: call.summary, waiting: call.waiting ?? [] }))
-+  return { now: new Date(now).toISOString(), threads: names, open, closed, pins: Object.fromEntries(Object.entries(pins).map(([task, text]) => [`${task} (${names[task] ?? task})`, text])), calls, t3: t3Now, previous: json(join(state, 'voice', 'check.json')), ledgers }
++    .map(call => ({ id: call.id, title: call.title, ended: call.ended, summary: call.summary, waiting: call.waiting ?? [] }))
++  return { now: new Date(now).toISOString(), threads: names, open, closed, pins, calls, t3: t3Now, previous: json(join(state, 'voice', 'check.json')), ledgers }
 +}
 +
 +// What a pass reads, as one fingerprint: the same records give the same verdict.
@@ -2485,10 +2649,10 @@ index 0000000000000000000000000000000000000000..852567aca10545217c2e5cee77920937
 +
 +What he asked for, in his words: "the ability to better manage my tasks with hex ... we could give an even better idea for things that need to get done. And this could all be done by looking through the transcript, gathering, auditing, analyzing, figuring out, and also checking on any work that was done by other agents ... that might be waiting for other things ... older work from yesterday or two days ago, that might not have been done ... such that I can help ship more and get unblocked".
 +
-+The records are below as JSON: every open question asked with buttons or a poll (open, each with its ref), the ones answered or settled lately (closed), each thread's pinned post (pins), calls' wrap-ups (calls), what T3 Code shows as stuck or newly finished (t3; the app lists those already), and your previous pass (previous). To confirm something before you settle it, read his records: conversations in ~/hex/log/ (one markdown file per day and session; rg them), threads in ~/hex/state/*/threads.json, session transcripts under ~/.claude/projects/, project notes under ~/hex/projects/.
++The records are below as JSON: every open question asked with buttons or a poll (open, each with its ref), the ones answered or settled lately (closed), each thread's pinned post (pins, each with its own ref), calls' wrap-ups (calls, each with its id), what T3 Code shows as stuck or newly finished (t3; the app lists those already), and your previous pass (previous). To confirm something before you settle it, read his records: conversations in ~/hex/log/ (one markdown file per day and session; rg them), threads in ~/hex/state/*/threads.json, session transcripts under ~/.claude/projects/, project notes under ~/hex/projects/. In a transcript, his messages arrive as <channel source="..." chat_id="..." message_id="..."> and hex's own replies come back as "sent (id: N)", so a question asked in plain words has a message id there.
 +
 +Return:
-+- asks: one entry per decision or action that is still his, however many places asked it. refs lists every open question it stands for (copy their ref objects), places names the threads that asked it. id is "check:" plus a short slug, the same slug as in your previous pass for the same thing. task is the thread it belongs to ("<app>:<thread id>", from threads). question is one short plain line (60 characters at most). context is one or two plain sentences on what it unblocks or costs. options are short labels; mark the thread's own pick with pick (one at most, only where the thread made one); when an option stands for a button, value is that button's exact text from the first ref. kind is pick (one of several), yesno (two ways), do (only his hands can do it, like a sign-in, a purchase, a recording: options like Done and Later, plus one with url when a page opens it) or look (something to watch or read, one option with url when there's a link). tag is "money" when an option spends money, or "unblocks N" when N other things wait on it. Order: what unblocks the most first, even when it costs money, then the quickest; other money and anything sent in his name last. Asks from pinned posts and call wrap-ups have no refs; their task is the thread they came from.
++- asks: one entry per decision or action that is still his, however many places asked it. from lists every place that asked it, so he can open each one: an open question (copy its ref), a pinned post (copy the pin's ref), a plain message you found ({app, thread, message} with its id, or {app, thread} when you can't find the id), or a call ({app: "voice", call: its id}); thread is a key of threads without its "<app>:" prefix. Leave none out: an ask from a pinned post and a call has both. id is "check:" plus a short slug, the same slug as in your previous pass for the same thing. task is the thread it belongs to ("<app>:<thread id>", from threads). question is one short plain line (60 characters at most). context is one or two plain sentences on what it unblocks or costs. options are his possible answers, as short labels, each one telling the thread something; mark the thread's own pick with pick (one at most, only where the thread made one); when an option stands for a button, value is that button's exact text from the first open question in from. links are the pages it points to, never answers: label names the page in one to three words without a verb ("Apple Store", "PR #2", "Paper file"), url opens it. kind is pick (one of several), yesno (two ways), do (only his hands can do it, like a sign-in, a purchase, a recording: options like Done and Later, its page in links) or look (something to watch or read: options like Seen and Later, its page in links). tag is "money" when an option spends money, or "unblocks N" when N other things wait on it. Order: what unblocks the most first, even when it costs money, then the quickest; other money and anything sent in his name last. An ask's task is the thread it belongs to, even when only a pinned post or a call asked it.
 +- settle: open questions the records show are already decided or done: decided in a conversation or a call, replaced by a later question, or the thing already happened. note is what the question's buttons in Telegram or Discord will say instead, like "Settled: Pro is on" (40 characters at most). Settle only what the records show; anything you're unsure of stays an ask.
 +- fixed: what you settled or merged, the way he'd read it: title (the thing), text (the evidence, with message numbers), did (what you did, in a few words).
 +- flagged: what he should look at that you can't settle yourself, like the same thing asked with different options, or a question days old whose work has stalled: title and text.
@@ -2501,6 +2665,7 @@ index 0000000000000000000000000000000000000000..852567aca10545217c2e5cee77920937
 +
 +const NOTE = { type: 'object', properties: { title: { type: 'string' }, text: { type: 'string' }, did: { type: 'string' } }, required: ['title', 'text'] }
 +const REF = { type: 'object', properties: { app: { type: 'string' }, thread: { type: 'string' }, message: { type: ['number', 'string'] } }, required: ['app', 'thread', 'message'] }
++const SOURCE = { type: 'object', properties: { ...REF.properties, call: { type: 'string' } }, required: ['app'] }
 +const SCHEMA = {
 +  type: 'object',
 +  properties: {
@@ -2517,13 +2682,13 @@ index 0000000000000000000000000000000000000000..852567aca10545217c2e5cee77920937
 +          context: { type: 'string' },
 +          options: {
 +            type: 'array',
-+            items: { type: 'object', properties: { label: { type: 'string' }, value: { type: 'string' }, pick: { type: 'boolean' }, url: { type: 'string' } }, required: ['label'] },
++            items: { type: 'object', properties: { label: { type: 'string' }, value: { type: 'string' }, pick: { type: 'boolean' } }, required: ['label'] },
 +          },
++          links: { type: 'array', items: { type: 'object', properties: { label: { type: 'string' }, url: { type: 'string' } }, required: ['label', 'url'] } },
 +          tag: { type: 'string' },
-+          places: { type: 'array', items: { type: 'string' } },
-+          refs: { type: 'array', items: REF },
++          from: { type: 'array', items: SOURCE },
 +        },
-+        required: ['id', 'kind', 'task', 'at', 'question', 'options'],
++        required: ['id', 'kind', 'task', 'at', 'question', 'options', 'from'],
 +      },
 +    },
 +    settle: { type: 'array', items: { ...REF, properties: { ...REF.properties, note: { type: 'string' } }, required: [...REF.required, 'note'] } },
@@ -2566,22 +2731,26 @@ index 0000000000000000000000000000000000000000..852567aca10545217c2e5cee77920937
 +  })
 +}
 +
-+// What the pass returned, held to the records: refs and settles name real open questions, a value
-+// is a real button, and a question it settles isn't also one it lists.
-+export function vet(verdict: Verdict, ledgers: Record<string, Asked[]>): Verdict {
++// What the pass returned, held to the records: its places are real threads and calls, the open
++// questions among them are the ask's refs, a value is a real button, and a question it settles isn't
++// also one it lists.
++export function vet(verdict: Verdict, ledgers: Record<string, Asked[]>, { threads, calls }: Known): Verdict {
 +  const find = (ref: Ref) => ledgers[ref.app]?.find(ask => ask.thread === ref.thread && String(ask.message) === String(ref.message))
 +  const open = (ref: Ref) => {
 +    const ask = find(ref)
 +    return !!ask && !ask.answer && !ask.settled
 +  }
-+  const asks: Curated[] = verdict.asks.map(ask => {
-+    const refs = (ask.refs ?? []).filter(open)
++  const real = (source: Source) => (source.call ? calls.some(call => call.id === source.call) : !!source.thread && `${source.app}:${source.thread}` in threads)
++  const asks: Curated[] = verdict.asks.map(({ from = [], ...ask }) => {
++    const places: Source[] = from.filter(real).map(({ app, thread, message, call }) => (call ? { app: 'voice', call } : { app, thread, ...(message !== undefined && { message }) }))
++    const refs: Ref[] = places.flatMap(({ app, thread, message }) => (thread && message !== undefined && open({ app, thread, message }) ? [{ app, thread, message }] : []))
 +    const buttons = refs[0] ? find(refs[0])!.options : []
 +    return {
 +      ...ask,
 +      id: ask.id.startsWith('check:') ? ask.id : `check:${ask.id}`,
 +      options: ask.options.map(({ value, ...option }) => ({ ...option, ...(value && buttons.includes(value) && { value }) })),
-+      ...(ask.refs && { refs }),
++      from: places,
++      refs,
 +    }
 +  })
 +  const listed = new Set(asks.flatMap(ask => ask.refs ?? []).map(ref => `${ref.app} ${ref.thread} ${ref.message}`))
@@ -2814,14 +2983,15 @@ index 0000000000000000000000000000000000000000..f7b54c8e527985e41b57badfef0490c7
 +}, 20_000)
 diff --git a/external_plugins/voice/links.ts b/external_plugins/voice/links.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..252bd38ba2b65227261b36ce5de7e9bf44f593b9
+index 0000000000000000000000000000000000000000..4f78bd5311322dd8798eb92101beafff584d9204
 --- /dev/null
 +++ b/external_plugins/voice/links.ts
-@@ -0,0 +1,123 @@
+@@ -0,0 +1,125 @@
 +import { Database } from 'bun:sqlite'
 +import { existsSync, readFileSync, watch } from 'fs'
 +import { homedir } from 'os'
 +import { join } from 'path'
++import type { MessageId } from '../../hub/ledger.ts'
 +
 +const T3_HOME = join(homedir(), '.t3', 'userdata')
 +const DATABASE = 'statev2.sqlite'
@@ -2868,16 +3038,17 @@ index 0000000000000000000000000000000000000000..252bd38ba2b65227261b36ce5de7e9bf
 +    this.channels = readJson(join(this.state, 'buzz', 'channels.json')) ?? {}
 +  }
 +
-+  of(app: string, id: string): string | undefined {
++  // A message's own link where its app has one (a Telegram group's, a Discord thread's), else its thread's.
++  of(app: string, id: string, message?: MessageId): string | undefined {
 +    switch (app) {
 +      case 'telegram': {
 +        if (!id.includes(':') && !id.startsWith('-')) return this.bot && `https://t.me/${this.bot}`
 +        if (!id.startsWith('-100')) return
-+        const [chat, topic = '1'] = id.slice(4).split(':')
-+        return `https://t.me/c/${chat}/${topic}`
++        const [chat, topic] = id.slice(4).split(':')
++        return message === undefined ? `https://t.me/c/${chat}/${topic ?? 1}` : `https://t.me/c/${chat}/${topic ? `${topic}/` : ''}${message}`
 +      }
 +      case 'discord':
-+        return this.guild && `https://discord.com/channels/${this.guild}/${id}`
++        return this.guild && `https://discord.com/channels/${this.guild}/${id}${message === undefined ? '' : `/${message}`}`
 +      case 'buzz': {
 +        if (id.includes('-')) return `buzz://channel/${id}`
 +        const channel = word(this.channels[id])
@@ -4524,17 +4695,17 @@ index 0000000000000000000000000000000000000000..8e0935b518cacfbebef18fdaec0f46a8
 +}
 diff --git a/external_plugins/voice/tasks.test.ts b/external_plugins/voice/tasks.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..86d5745d5057f6ac874e272a061c2aeedf298333
+index 0000000000000000000000000000000000000000..f8c727f71f9453e396ebf67a317916d6812fd323
 --- /dev/null
 +++ b/external_plugins/voice/tasks.test.ts
-@@ -0,0 +1,332 @@
+@@ -0,0 +1,382 @@
 +import { Database } from 'bun:sqlite'
 +import { afterAll, expect, test } from 'bun:test'
-+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
++import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 +import { tmpdir } from 'os'
 +import { join } from 'path'
 +import { Links } from './links.ts'
-+import { Tasks, opener } from './tasks.ts'
++import { Tasks, opener, track } from './tasks.ts'
 +
 +const home = mkdtempSync(join(tmpdir(), 'voice-tasks-'))
 +const claude = join(home, 'claude')
@@ -4588,10 +4759,10 @@ index 0000000000000000000000000000000000000000..86d5745d5057f6ac874e272a061c2aee
 +threads('telegram', telegram)
 +threads('buzz', { b1: { name: 'Old news', session: 'ffffffff-old' } })
 +job('aaaaaaaa-general', { state: 'done', detail: 'heartbeat ran', updatedAt: ago(5) })
-+const [published, finished, asked, still] = [ago(90), ago(60), ago(40), ago(20)]
++const [overnight, askedOvernight, published, finished, asked, still] = [ago(13 * 60), ago(12.5 * 60), ago(90), ago(60), ago(40), ago(20)]
 +job('bbbbbbbb-autofork', { state: 'blocked', detail: 'needs music', needs: 'Pick a music style, and run `claude setup-token`', updatedAt: ago(20) }, [
-+  { at: ago(13 * 60), state: 'done', detail: 'Overnight', text: '' },
-+  { at: ago(12.5 * 60), state: 'blocked', detail: 'Asked overnight', text: '' },
++  { at: overnight, state: 'done', detail: 'Overnight', text: '' },
++  { at: askedOvernight, state: 'blocked', detail: 'Asked overnight', text: '' },
 +  { at: published, state: 'working', detail: 'Publishing', text: '' },
 +  { at: finished, state: 'done', detail: '**Published** autofork 0.1.2', text: 'npm is live' },
 +  { at: asked, state: 'blocked', detail: 'needs music', text: 'Your call' },
@@ -4650,10 +4821,9 @@ index 0000000000000000000000000000000000000000..86d5745d5057f6ac874e272a061c2aee
 +    ['needs', 'needs music'],
 +    ['done', 'Published autofork 0.1.2'],
 +  ])
-+  const window = autofork.track[0]!.at
-+  expect(Date.now() - Date.parse(window)).toBeGreaterThanOrEqual(12 * 60 * 60_000)
 +  expect(autofork.track).toEqual([
-+    { at: window, state: 'needs' },
++    { at: overnight, state: 'done' },
++    { at: askedOvernight, state: 'needs' },
 +    { at: published, state: 'working' },
 +    { at: finished, state: 'done' },
 +    { at: asked, state: 'needs' },
@@ -4855,6 +5025,57 @@ index 0000000000000000000000000000000000000000..86d5745d5057f6ac874e272a061c2aee
 +  await until(() => tasks.get('telegram:-1004422245734')?.line === 'after the renew')
 +})
 +
++test("a lane holds a week: the change before it, steps only in the last hour, and quiet gaps too small to see joined", () => {
++  const now = Date.parse('2026-10-17T12:00:00.000Z')
++  const at = (minutes: number) => new Date(now - minutes * 60_000).toISOString()
++  const day = 24 * 60
++  const turns = [
++    { at: at(9 * day), state: 'done' as const },
++    { at: at(8 * day), state: 'needs' as const },
++    { at: at(3 * day), state: 'working' as const },
++    { at: at(3 * day - 1), state: 'working' as const },
++    { at: at(3 * day - 2), state: 'done' as const },
++    { at: at(3 * day - 30), state: 'working' as const },
++    { at: at(3 * day - 31), state: 'needs' as const },
++    { at: at(3 * day - 40), state: 'working' as const },
++    { at: at(3 * day - 50), state: 'done' as const },
++    { at: at(30), state: 'working' as const },
++    { at: at(20), state: 'working' as const },
++    { at: at(10), state: 'done' as const },
++  ]
++  expect(track(turns, now)).toEqual([
++    { at: at(8 * day), state: 'needs' },
++    { at: at(3 * day), state: 'working' },
++    { at: at(3 * day - 31), state: 'needs' },
++    { at: at(3 * day - 40), state: 'working' },
++    { at: at(3 * day - 50), state: 'done' },
++    { at: at(30), state: 'working' },
++    { at: at(20), state: 'working' },
++    { at: at(10), state: 'done' },
++  ])
++  expect(track(turns, now)).toEqual(track(track(turns, now), now))
++})
++
++test("a thread's lane outlives its session starting over, kept in the voice folder", async () => {
++  const earlier = ago(3 * 60)
++  job('aaaaaaaa-general', { state: 'done', detail: 'before the respawn', updatedAt: ago(0) }, [
++    { at: earlier, state: 'working', detail: 'before', text: '' },
++    { at: ago(2 * 60), state: 'done', detail: 'before the respawn', text: '' },
++  ])
++  await until(() => tasks.get('telegram:-1004422245734')?.line === 'before the respawn')
++  rmSync(join(claude, 'jobs', 'aaaaaaaa'), { recursive: true })
++  job('aaaaaaaa-general', { state: 'done', detail: 'after the respawn', updatedAt: ago(0) }, [{ at: ago(1), state: 'done', detail: 'after the respawn', text: '' }])
++  await until(() => tasks.get('telegram:-1004422245734')?.line === 'after the respawn')
++  expect(tasks.get('telegram:-1004422245734')!.track[0]).toEqual({ at: earlier, state: 'working' })
++  await until(() => {
++    try {
++      return JSON.parse(readFileSync(join(state, 'voice', 'tracks.json'), 'utf8'))['telegram:-1004422245734']?.[0]?.at === earlier
++    } catch {
++      return false
++    }
++  })
++})
++
 +test('talking a task through tells the voice which thread it is and where it stands', () => {
 +  expect(opener(tasks.get('telegram:-1004422245734:908')!)).toBe(
 +    "The task is the hex thread autofork (Telegram, thread id -1004422245734:908). It's waiting on the caller: Pick a music style, and run claude setup-token",
@@ -4862,11 +5083,11 @@ index 0000000000000000000000000000000000000000..86d5745d5057f6ac874e272a061c2aee
 +})
 diff --git a/external_plugins/voice/tasks.ts b/external_plugins/voice/tasks.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..0fec3f18dd7ed2daea53493e3f30a1dac4f71967
+index 0000000000000000000000000000000000000000..c7dc8cbf92c9d341fcef9a793c644521b68e0ad8
 --- /dev/null
 +++ b/external_plugins/voice/tasks.ts
-@@ -0,0 +1,499 @@
-+import { closeSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, watch, type FSWatcher } from 'fs'
+@@ -0,0 +1,546 @@
++import { closeSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, watch, writeFileSync, type FSWatcher } from 'fs'
 +import { homedir } from 'os'
 +import { join } from 'path'
 +import { followTranscript, sizeOf, stepOf, type Did } from './activity.ts'
@@ -4919,8 +5140,10 @@ index 0000000000000000000000000000000000000000..0fec3f18dd7ed2daea53493e3f30a1da
 +const LATELY = 5
 +const STEPS = 12
 +const KEEP = 7 * 24 * 60 * 60_000
-+const TRACK = 12 * 60 * 60_000
-+const TURNS = 48
++const TRACK = 7 * 24 * 60 * 60_000
++const FINE = 60 * 60_000
++const GRAIN = 50
++const SAVE = 2000
 +const ORDER: State[] = ['needs', 'working', 'done', 'failed', 'idle']
 +const RECORDS = new Set(['threads.json', 'guild.json', 'bot.json', 'channels.json'])
 +const STATES: Record<string, State> = { working: 'working', blocked: 'needs', done: 'done', failed: 'failed' }
@@ -4951,6 +5174,8 @@ index 0000000000000000000000000000000000000000..0fec3f18dd7ed2daea53493e3f30a1da
 +  private pending?: ReturnType<typeof setTimeout>
 +  private stale = { threads: true, sessions: true }
 +  private stops: (() => void)[] = []
++  private tracks: Record<string, Turn[]>
++  private saving?: ReturnType<typeof setTimeout>
 +
 +  constructor(
 +    private state: string,
@@ -4959,6 +5184,7 @@ index 0000000000000000000000000000000000000000..0fec3f18dd7ed2daea53493e3f30a1da
 +    t3?: string,
 +  ) {
 +    super()
++    this.tracks = readJson(join(state, 'voice', 'tracks.json')) ?? {}
 +    this.links = new Links(state, () => this.mark('threads'), t3)
 +    this.stops.push(watchDir(state, file => file && APPS[file] && this.mark('threads')))
 +    this.stops.push(watchDir(join(claude, 'sessions'), () => this.mark('sessions')))
@@ -4976,6 +5202,7 @@ index 0000000000000000000000000000000000000000..0fec3f18dd7ed2daea53493e3f30a1da
 +
 +  close() {
 +    clearTimeout(this.pending)
++    if (this.saving) this.saveTracks()
 +    this.links.close()
 +    for (const stop of [...this.stops, ...this.appWatchers.values()]) stop()
 +    for (const watcher of this.watchers.values()) watcher.close()
@@ -5157,8 +5384,36 @@ index 0000000000000000000000000000000000000000..0fec3f18dd7ed2daea53493e3f30a1da
 +      steps,
 +      plan,
 +      lately: state === 'idle' ? [] : lately,
-+      track: track(timeline, Date.now() - TRACK),
++      track: this.track(`${thread.app}:${thread.id}`, timeline),
 +      ...(thread.link && { link: thread.link }),
++    }
++  }
++
++  // Claude Code starts a job's timeline over whenever its session respawns or renews, so each
++  // thread's lane is kept here too, for a week, and survives both.
++  private track(id: string, timeline: Entry[]) {
++    const kept = this.tracks[id] ?? []
++    const now = Date.now()
++    const next = track([...kept, ...timeline.map(entry => ({ at: entry.at, state: STATES[entry.state] ?? 'idle' }))], now)
++    if (JSON.stringify(next) !== JSON.stringify(kept)) {
++      if (next.length) this.tracks[id] = next
++      else delete this.tracks[id]
++      this.saving ??= setTimeout(() => this.saveTracks(), SAVE)
++    }
++    const from = new Date(now - TRACK).toISOString()
++    return next.map(turn => (turn.at < from ? { ...turn, at: from } : turn))
++  }
++
++  private saveTracks() {
++    clearTimeout(this.saving)
++    this.saving = undefined
++    const file = join(this.state, 'voice', 'tracks.json')
++    try {
++      mkdirSync(join(this.state, 'voice'), { recursive: true })
++      writeFileSync(`${file}.tmp`, JSON.stringify(this.tracks))
++      renameSync(`${file}.tmp`, file)
++    } catch (error) {
++      process.stderr.write(`voice: tasks: couldn't keep the lanes: ${error}\n`)
 +    }
 +  }
 +
@@ -5257,13 +5512,26 @@ index 0000000000000000000000000000000000000000..0fec3f18dd7ed2daea53493e3f30a1da
 +  return since
 +}
 +
-+// The job since `from`, for its lane: the state it was in then, and each entry after it, a change of
-+// state or a step within one.
-+function track(timeline: Entry[], from: number): Turn[] {
-+  const turn = (at: string, state: string) => ({ at, state: STATES[state] ?? 'idle' })
-+  const before = timeline.findLast(entry => Date.parse(entry.at) < from)
-+  const after = timeline.filter(entry => Date.parse(entry.at) >= from).slice(-TURNS)
-+  return [...(before ? [turn(new Date(from).toISOString(), before.state)] : []), ...after.map(entry => turn(entry.at, entry.state))]
++// A thread's last week for its lane, drawn on a log scale: what it was doing a week ago (the
++// change before it), then each change. Steps within a state are kept for the last hour only, and two working runs whose gap
++// (only finished or idle in it) is under a fiftieth of its age are one, since neither shows apart.
++export function track(turns: Turn[], now: number): Turn[] {
++  const from = now - TRACK
++  const sorted = [...new Map(turns.map(turn => [turn.at, turn])).values()].sort((a, b) => a.at.localeCompare(b.at))
++  const before = sorted.findLast(turn => Date.parse(turn.at) < from)
++  const recent = sorted.filter(turn => Date.parse(turn.at) >= from)
++  const all = before ? [before, ...recent] : recent
++  const merged: Turn[] = []
++  for (const turn of all) {
++    if (turn.state === 'working') {
++      const gap = merged.findLastIndex(one => one.state === 'working')
++      const between = merged.slice(gap + 1)
++      const quiet = gap >= 0 && between.length > 0 && between.every(one => one.state === 'done' || one.state === 'idle')
++      if (quiet && Date.parse(turn.at) - Date.parse(between[0]!.at) < (now - Date.parse(turn.at)) / GRAIN) merged.splice(gap + 1)
++    }
++    merged.push(turn)
++  }
++  return merged.filter((turn, i) => i === 0 || turn.state !== merged[i - 1]!.state || now - Date.parse(turn.at) < FINE)
 +}
 +
 +// A workflow agent's transcript lands in its run's own folder, so it's followed once it's written there.

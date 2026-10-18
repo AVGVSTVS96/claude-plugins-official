@@ -4,7 +4,7 @@ id: voice
 summary: Add a voice channel where OpenAI's gpt-live-1 holds a live call and hands every real request to the Claude Code session.
 baseline: ea10b213686c90bb1984b2016937310e05336cf3
 patch_file: voice.patch
-patch_sha256: a0f593cf2e2f2c5a6c5b15c21a998050ae1696f74883e95a507389aa1ee31aae
+patch_sha256: 080f177bb39df07acc2aa53e8081214a9de766be7aaa5a5f2812e62ea514083f
 ---
 
 ## Intent
@@ -106,7 +106,16 @@ voice session ── HTTP ──► hub ──► call engine (server.ts) ◄─
   a T3 Code thread, found in T3's own database (`statev2.sqlite`, read only and
   read again when it changes) from the hex thread's key and opened by the app's URL scheme
   (`T3_APP_SCHEME`, `t3code` unless set). An app that can't say where a thread
-  lives gives it no link.
+  lives gives it no link. Each task's `track` is a week of its states for its
+  lane, with steps for the last hour only, kept in `state/voice/tracks.json`
+  since Claude Code starts a job's timeline over when its session respawns or
+  renews.
+- `GET /asks` gives each open question its answers as `options` (`label`,
+  `pick`) and the pages it points to as `links` (`label`, `url`), and its
+  `places`: every place it was asked, each thread once (a question, pinned
+  post, plain message or call), typed `{ app, place, task?, call?, link? }`
+  with the best link its app has (the message itself where the app links
+  messages, else its thread), the ones that open first.
 - `GET /activity?after=<version>` long-polls the live call's tasks, most
   recently changed first, each with its latest `line`, for the app's live
   line.
