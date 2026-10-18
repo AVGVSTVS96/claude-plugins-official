@@ -1,10 +1,10 @@
 import { Database } from 'bun:sqlite'
 import { afterAll, expect, test } from 'bun:test'
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { Links } from './links.ts'
-import { Tasks, opener } from './tasks.ts'
+import { Tasks, opener, track } from './tasks.ts'
 
 const home = mkdtempSync(join(tmpdir(), 'voice-tasks-'))
 const claude = join(home, 'claude')
@@ -58,10 +58,10 @@ const telegram = {
 threads('telegram', telegram)
 threads('buzz', { b1: { name: 'Old news', session: 'ffffffff-old' } })
 job('aaaaaaaa-general', { state: 'done', detail: 'heartbeat ran', updatedAt: ago(5) })
-const [published, finished, asked, still] = [ago(90), ago(60), ago(40), ago(20)]
+const [overnight, askedOvernight, published, finished, asked, still] = [ago(13 * 60), ago(12.5 * 60), ago(90), ago(60), ago(40), ago(20)]
 job('bbbbbbbb-autofork', { state: 'blocked', detail: 'needs music', needs: 'Pick a music style, and run `claude setup-token`', updatedAt: ago(20) }, [
-  { at: ago(13 * 60), state: 'done', detail: 'Overnight', text: '' },
-  { at: ago(12.5 * 60), state: 'blocked', detail: 'Asked overnight', text: '' },
+  { at: overnight, state: 'done', detail: 'Overnight', text: '' },
+  { at: askedOvernight, state: 'blocked', detail: 'Asked overnight', text: '' },
   { at: published, state: 'working', detail: 'Publishing', text: '' },
   { at: finished, state: 'done', detail: '**Published** autofork 0.1.2', text: 'npm is live' },
   { at: asked, state: 'blocked', detail: 'needs music', text: 'Your call' },
@@ -120,10 +120,9 @@ test("each thread is a task from its session's own records, what needs you first
     ['needs', 'needs music'],
     ['done', 'Published autofork 0.1.2'],
   ])
-  const window = autofork.track[0]!.at
-  expect(Date.now() - Date.parse(window)).toBeGreaterThanOrEqual(12 * 60 * 60_000)
   expect(autofork.track).toEqual([
-    { at: window, state: 'needs' },
+    { at: overnight, state: 'done' },
+    { at: askedOvernight, state: 'needs' },
     { at: published, state: 'working' },
     { at: finished, state: 'done' },
     { at: asked, state: 'needs' },
@@ -323,6 +322,57 @@ test("a renewed session's new job folder still wakes the list", async () => {
   await Bun.sleep(100)
   job('aaaaaaaa-general', { state: 'done', detail: 'after the renew', updatedAt: ago(0) })
   await until(() => tasks.get('telegram:-1004422245734')?.line === 'after the renew')
+})
+
+test("a lane holds a week: the change before it, steps only in the last hour, and quiet gaps too small to see joined", () => {
+  const now = Date.parse('2026-10-17T12:00:00.000Z')
+  const at = (minutes: number) => new Date(now - minutes * 60_000).toISOString()
+  const day = 24 * 60
+  const turns = [
+    { at: at(9 * day), state: 'done' as const },
+    { at: at(8 * day), state: 'needs' as const },
+    { at: at(3 * day), state: 'working' as const },
+    { at: at(3 * day - 1), state: 'working' as const },
+    { at: at(3 * day - 2), state: 'done' as const },
+    { at: at(3 * day - 30), state: 'working' as const },
+    { at: at(3 * day - 31), state: 'needs' as const },
+    { at: at(3 * day - 40), state: 'working' as const },
+    { at: at(3 * day - 50), state: 'done' as const },
+    { at: at(30), state: 'working' as const },
+    { at: at(20), state: 'working' as const },
+    { at: at(10), state: 'done' as const },
+  ]
+  expect(track(turns, now)).toEqual([
+    { at: at(8 * day), state: 'needs' },
+    { at: at(3 * day), state: 'working' },
+    { at: at(3 * day - 31), state: 'needs' },
+    { at: at(3 * day - 40), state: 'working' },
+    { at: at(3 * day - 50), state: 'done' },
+    { at: at(30), state: 'working' },
+    { at: at(20), state: 'working' },
+    { at: at(10), state: 'done' },
+  ])
+  expect(track(turns, now)).toEqual(track(track(turns, now), now))
+})
+
+test("a thread's lane outlives its session starting over, kept in the voice folder", async () => {
+  const earlier = ago(3 * 60)
+  job('aaaaaaaa-general', { state: 'done', detail: 'before the respawn', updatedAt: ago(0) }, [
+    { at: earlier, state: 'working', detail: 'before', text: '' },
+    { at: ago(2 * 60), state: 'done', detail: 'before the respawn', text: '' },
+  ])
+  await until(() => tasks.get('telegram:-1004422245734')?.line === 'before the respawn')
+  rmSync(join(claude, 'jobs', 'aaaaaaaa'), { recursive: true })
+  job('aaaaaaaa-general', { state: 'done', detail: 'after the respawn', updatedAt: ago(0) }, [{ at: ago(1), state: 'done', detail: 'after the respawn', text: '' }])
+  await until(() => tasks.get('telegram:-1004422245734')?.line === 'after the respawn')
+  expect(tasks.get('telegram:-1004422245734')!.track[0]).toEqual({ at: earlier, state: 'working' })
+  await until(() => {
+    try {
+      return JSON.parse(readFileSync(join(state, 'voice', 'tracks.json'), 'utf8'))['telegram:-1004422245734']?.[0]?.at === earlier
+    } catch {
+      return false
+    }
+  })
 })
 
 test('talking a task through tells the voice which thread it is and where it stands', () => {

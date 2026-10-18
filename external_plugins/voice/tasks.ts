@@ -1,4 +1,4 @@
-import { closeSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, watch, type FSWatcher } from 'fs'
+import { closeSync, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, watch, writeFileSync, type FSWatcher } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 import { followTranscript, sizeOf, stepOf, type Did } from './activity.ts'
@@ -51,8 +51,10 @@ const TAIL = 256 * 1024
 const LATELY = 5
 const STEPS = 12
 const KEEP = 7 * 24 * 60 * 60_000
-const TRACK = 12 * 60 * 60_000
-const TURNS = 48
+const TRACK = 7 * 24 * 60 * 60_000
+const FINE = 60 * 60_000
+const GRAIN = 50
+const SAVE = 2000
 const ORDER: State[] = ['needs', 'working', 'done', 'failed', 'idle']
 const RECORDS = new Set(['threads.json', 'guild.json', 'bot.json', 'channels.json'])
 const STATES: Record<string, State> = { working: 'working', blocked: 'needs', done: 'done', failed: 'failed' }
@@ -83,6 +85,8 @@ export class Tasks extends Changes {
   private pending?: ReturnType<typeof setTimeout>
   private stale = { threads: true, sessions: true }
   private stops: (() => void)[] = []
+  private tracks: Record<string, Turn[]>
+  private saving?: ReturnType<typeof setTimeout>
 
   constructor(
     private state: string,
@@ -91,6 +95,7 @@ export class Tasks extends Changes {
     t3?: string,
   ) {
     super()
+    this.tracks = readJson(join(state, 'voice', 'tracks.json')) ?? {}
     this.links = new Links(state, () => this.mark('threads'), t3)
     this.stops.push(watchDir(state, file => file && APPS[file] && this.mark('threads')))
     this.stops.push(watchDir(join(claude, 'sessions'), () => this.mark('sessions')))
@@ -108,6 +113,7 @@ export class Tasks extends Changes {
 
   close() {
     clearTimeout(this.pending)
+    if (this.saving) this.saveTracks()
     this.links.close()
     for (const stop of [...this.stops, ...this.appWatchers.values()]) stop()
     for (const watcher of this.watchers.values()) watcher.close()
@@ -289,8 +295,36 @@ export class Tasks extends Changes {
       steps,
       plan,
       lately: state === 'idle' ? [] : lately,
-      track: track(timeline, Date.now() - TRACK),
+      track: this.track(`${thread.app}:${thread.id}`, timeline),
       ...(thread.link && { link: thread.link }),
+    }
+  }
+
+  // Claude Code starts a job's timeline over whenever its session respawns or renews, so each
+  // thread's lane is kept here too, for a week, and survives both.
+  private track(id: string, timeline: Entry[]) {
+    const kept = this.tracks[id] ?? []
+    const now = Date.now()
+    const next = track([...kept, ...timeline.map(entry => ({ at: entry.at, state: STATES[entry.state] ?? 'idle' }))], now)
+    if (JSON.stringify(next) !== JSON.stringify(kept)) {
+      if (next.length) this.tracks[id] = next
+      else delete this.tracks[id]
+      this.saving ??= setTimeout(() => this.saveTracks(), SAVE)
+    }
+    const from = new Date(now - TRACK).toISOString()
+    return next.map(turn => (turn.at < from ? { ...turn, at: from } : turn))
+  }
+
+  private saveTracks() {
+    clearTimeout(this.saving)
+    this.saving = undefined
+    const file = join(this.state, 'voice', 'tracks.json')
+    try {
+      mkdirSync(join(this.state, 'voice'), { recursive: true })
+      writeFileSync(`${file}.tmp`, JSON.stringify(this.tracks))
+      renameSync(`${file}.tmp`, file)
+    } catch (error) {
+      process.stderr.write(`voice: tasks: couldn't keep the lanes: ${error}\n`)
     }
   }
 
@@ -389,13 +423,26 @@ function streak(timeline: Entry[], state?: string) {
   return since
 }
 
-// The job since `from`, for its lane: the state it was in then, and each entry after it, a change of
-// state or a step within one.
-function track(timeline: Entry[], from: number): Turn[] {
-  const turn = (at: string, state: string) => ({ at, state: STATES[state] ?? 'idle' })
-  const before = timeline.findLast(entry => Date.parse(entry.at) < from)
-  const after = timeline.filter(entry => Date.parse(entry.at) >= from).slice(-TURNS)
-  return [...(before ? [turn(new Date(from).toISOString(), before.state)] : []), ...after.map(entry => turn(entry.at, entry.state))]
+// A thread's last week for its lane, drawn on a log scale: what it was doing a week ago (the
+// change before it), then each change. Steps within a state are kept for the last hour only, and two working runs whose gap
+// (only finished or idle in it) is under a fiftieth of its age are one, since neither shows apart.
+export function track(turns: Turn[], now: number): Turn[] {
+  const from = now - TRACK
+  const sorted = [...new Map(turns.map(turn => [turn.at, turn])).values()].sort((a, b) => a.at.localeCompare(b.at))
+  const before = sorted.findLast(turn => Date.parse(turn.at) < from)
+  const recent = sorted.filter(turn => Date.parse(turn.at) >= from)
+  const all = before ? [before, ...recent] : recent
+  const merged: Turn[] = []
+  for (const turn of all) {
+    if (turn.state === 'working') {
+      const gap = merged.findLastIndex(one => one.state === 'working')
+      const between = merged.slice(gap + 1)
+      const quiet = gap >= 0 && between.length > 0 && between.every(one => one.state === 'done' || one.state === 'idle')
+      if (quiet && Date.parse(turn.at) - Date.parse(between[0]!.at) < (now - Date.parse(turn.at)) / GRAIN) merged.splice(gap + 1)
+    }
+    merged.push(turn)
+  }
+  return merged.filter((turn, i) => i === 0 || turn.state !== merged[i - 1]!.state || now - Date.parse(turn.at) < FINE)
 }
 
 // A workflow agent's transcript lands in its run's own folder, so it's followed once it's written there.
