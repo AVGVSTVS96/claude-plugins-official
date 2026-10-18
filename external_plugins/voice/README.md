@@ -252,12 +252,12 @@ Discord thread), else its thread (Telegram's DM opens the chat with the bot). A 
 `link` is still where it was asked: a T3 Code thread T3 doesn't map, or a call.
 
 ```json
-{ "id": "check:duo-order", "question": "Is there an Apple order in for the Duo?",
-  "options": [{ "label": "Ordered" }, { "label": "Not yet" }],
-  "links": [{ "label": "Apple Store", "url": "https://www.apple.com/shop/buy-iphone" }],
+{ "id": "check:desk-lamp", "question": "Should the desk lamp order go through?",
+  "options": [{ "label": "Order it" }, { "label": "Not yet" }],
+  "links": [{ "label": "Lamp", "url": "https://example.com/lamp" }],
   "places": [
-    { "app": "telegram", "place": "General", "task": "telegram:-1004422245734", "link": "https://t.me/c/4422245734/3451" },
-    { "app": "voice", "place": "Duo date history", "call": "live_u7_EZeofp3oN0l6HoawdnZt3UQ2o1imBvFp" }
+    { "app": "telegram", "place": "General", "task": "telegram:-1001234567890", "link": "https://t.me/c/1234567890/42" },
+    { "app": "voice", "place": "Desk setup", "call": "call_7f3a9c" }
   ] }
 ```
 

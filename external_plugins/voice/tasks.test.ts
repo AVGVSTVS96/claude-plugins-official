@@ -49,11 +49,11 @@ async function until(check: () => boolean) {
 mkdirSync(join(claude, 'jobs'), { recursive: true })
 mkdirSync(join(claude, 'sessions'), { recursive: true })
 const telegram = {
-  '-1004422245734': { name: 'hex', session: 'aaaaaaaa-general' },
-  '-1004422245734:908': { name: 'autofork', session: 'bbbbbbbb-autofork' },
-  '-1004422245734:2583': { name: 'voiceapp', session: 'cccccccc-voiceapp' },
-  '-1004422245734:65': { name: 'Theo clips', session: 'dddddddd-theo' },
-  '-1004422245734:72': { name: 'Leisure time', session: 'eeeeeeee-leisure' },
+  '-1001234567890': { name: 'hex', session: 'aaaaaaaa-general' },
+  '-1001234567890:908': { name: 'autofork', session: 'bbbbbbbb-autofork' },
+  '-1001234567890:2583': { name: 'voiceapp', session: 'cccccccc-voiceapp' },
+  '-1001234567890:65': { name: 'Theo clips', session: 'dddddddd-theo' },
+  '-1001234567890:72': { name: 'Leisure time', session: 'eeeeeeee-leisure' },
 }
 threads('telegram', telegram)
 threads('buzz', { b1: { name: 'Old news', session: 'ffffffff-old' } })
@@ -106,14 +106,14 @@ test("each thread is a task from its session's own records, what needs you first
     ['Leisure time', 'idle'],
     ['Theo clips', 'idle'],
   ])
-  const autofork = tasks.get('telegram:-1004422245734:908')!
+  const autofork = tasks.get('telegram:-1001234567890:908')!
   expect(autofork).toMatchObject({
     where: 'Telegram',
     place: 'autofork',
     line: 'Pick a music style, and run claude setup-token',
     needs: 'Pick a music style, and run claude setup-token',
     since: asked,
-    link: 'https://t.me/c/4422245734/908',
+    link: 'https://t.me/c/1234567890/908',
   })
   expect(autofork.lately.map(moment => [moment.state, moment.text])).toEqual([
     ['needs', 'still needs music'],
@@ -128,15 +128,15 @@ test("each thread is a task from its session's own records, what needs you first
     { at: asked, state: 'needs' },
     { at: still, state: 'needs' },
   ])
-  expect(tasks.get('telegram:-1004422245734')).toMatchObject({ where: 'General', place: 'General', link: 'https://t.me/c/4422245734/1' })
-  expect(tasks.get('telegram:-1004422245734:65')).toMatchObject({ line: 'clips posted', lately: [] })
+  expect(tasks.get('telegram:-1001234567890')).toMatchObject({ where: 'General', place: 'General', link: 'https://t.me/c/1234567890/1' })
+  expect(tasks.get('telegram:-1001234567890:65')).toMatchObject({ line: 'clips posted', lately: [] })
   expect(tasks.get('buzz:b1')).toBeUndefined()
   expect(tasks.summary).toEqual({ needs: 1, working: 1 })
   expect(tasks.rows()[0]).not.toContainKeys(['needs', 'lately', 'steps'])
 })
 
 test("a working thread's line is its newest step, and each of its agents from this stretch of work shows its own, running ones first", async () => {
-  const voiceapp = () => tasks.get('telegram:-1004422245734:2583')!
+  const voiceapp = () => tasks.get('telegram:-1001234567890:2583')!
   expect(voiceapp().agents).toEqual([
     { id: 'agent1', label: 'Build the Tasks view', state: 'working', steps: [] },
     { id: 'agent2', label: 'Check the server', state: 'done', steps: [] },
@@ -156,7 +156,7 @@ test("a working thread's line is its newest step, and each of its agents from th
 })
 
 test("a working thread's page has its thoughts in their own words and its plan as Claude Code's todo list stands", async () => {
-  const voiceapp = () => tasks.get('telegram:-1004422245734:2583')!
+  const voiceapp = () => tasks.get('telegram:-1001234567890:2583')!
   const transcript = join(project, 'cccccccc-voiceapp.jsonl')
   said(transcript, { type: 'thinking', thinking: 'The **list** needs a lane.\n\nThen the rows.', signature: 'x' })
   step(transcript, 'TodoWrite', {
@@ -185,7 +185,7 @@ test('a change to a session wakes the list, and the counts move only when a coun
   const woke = tasks.changes(version, 2000)
   job('aaaaaaaa-general', { state: 'done', detail: 'heartbeat ran again', updatedAt: ago(0) })
   await woke
-  await until(() => tasks.get('telegram:-1004422245734')?.line === 'heartbeat ran again')
+  await until(() => tasks.get('telegram:-1001234567890')?.line === 'heartbeat ran again')
   expect(tasks.counts.version).toBe(counted)
   job('aaaaaaaa-general', { state: 'blocked', detail: 'Your call: ship it?', updatedAt: ago(0) })
   await until(() => tasks.summary.needs === 2)
@@ -263,12 +263,12 @@ test('the T3 Code app scheme is a setting, and without T3 Code there are no T3 l
 })
 
 test("a thread whose turn ended stays working while its workflow runs, each workflow agent with its own steps", async () => {
-  threads('telegram', { ...telegram, '-1004422245734:513': { name: 'antibody', session: '51351351-antibody' } })
+  threads('telegram', { ...telegram, '-1001234567890:513': { name: 'antibody', session: '51351351-antibody' } })
   job('51351351-antibody', { state: 'working', detail: 'Phase 1 resumed', updatedAt: ago(0), fan: [{ id: 'wfbills', kind: 'workflow', label: 'build:bills' }, { id: 'sh', kind: 'shell', label: 'sleep' }], inFlight: { tasks: 1, kinds: ['local_workflow'] } }, [
     { at: ago(3), state: 'working', detail: 'Phase 1 resumed', text: 'Resumed Phase 1' },
   ])
   running('51351351-antibody', 'idle')
-  const antibody = () => tasks.get('telegram:-1004422245734:513')
+  const antibody = () => tasks.get('telegram:-1001234567890:513')
   await until(() => antibody()?.state === 'working')
   expect(antibody()!.agents.map(agent => [agent.label, agent.state])).toEqual([['build:bills', 'working']])
   step(join(project, '51351351-antibody', 'subagents', 'workflows', 'wf_1', 'agent-wfbills.jsonl'), 'Read', { file_path: '/repo/bills.ts' })
@@ -298,10 +298,10 @@ test("a thread stays working while a session it started runs, that session one o
     process.kill(build)
     shell.kill()
   })
-  threads('telegram', { ...telegram, '-1004422245734:3275': { name: 'lab', session: '32753275-lab' } })
+  threads('telegram', { ...telegram, '-1001234567890:3275': { name: 'lab', session: '32753275-lab' } })
   job('32753275-lab', { state: 'done', detail: 'started the build', updatedAt: ago(1) })
   running('32753275-lab', 'idle', shell.pid)
-  const lab = () => tasks.get('telegram:-1004422245734:3275')
+  const lab = () => tasks.get('telegram:-1001234567890:3275')
   await until(() => lab()?.state === 'done')
   running('78787878-build', 'busy', build, { kind: 'interactive', name: 'lab-build-c0', cwd: '/scratch/build', startedAt: Date.now() })
   await until(() => lab()?.state === 'working')
@@ -318,10 +318,10 @@ test("a thread stays working while a session it started runs, that session one o
 test("a renewed session's new job folder still wakes the list", async () => {
   rmSync(join(claude, 'jobs', 'aaaaaaaa'), { recursive: true })
   job('aaaaaaaa-general', { state: 'done', detail: 'renewed', updatedAt: ago(0) })
-  await until(() => tasks.get('telegram:-1004422245734')?.line === 'renewed')
+  await until(() => tasks.get('telegram:-1001234567890')?.line === 'renewed')
   await Bun.sleep(100)
   job('aaaaaaaa-general', { state: 'done', detail: 'after the renew', updatedAt: ago(0) })
-  await until(() => tasks.get('telegram:-1004422245734')?.line === 'after the renew')
+  await until(() => tasks.get('telegram:-1001234567890')?.line === 'after the renew')
 })
 
 test("a lane holds a week: the change before it, steps only in the last hour, and quiet gaps too small to see joined", () => {
@@ -361,14 +361,14 @@ test("a thread's lane outlives its session starting over, kept in the voice fold
     { at: earlier, state: 'working', detail: 'before', text: '' },
     { at: ago(2 * 60), state: 'done', detail: 'before the respawn', text: '' },
   ])
-  await until(() => tasks.get('telegram:-1004422245734')?.line === 'before the respawn')
+  await until(() => tasks.get('telegram:-1001234567890')?.line === 'before the respawn')
   rmSync(join(claude, 'jobs', 'aaaaaaaa'), { recursive: true })
   job('aaaaaaaa-general', { state: 'done', detail: 'after the respawn', updatedAt: ago(0) }, [{ at: ago(1), state: 'done', detail: 'after the respawn', text: '' }])
-  await until(() => tasks.get('telegram:-1004422245734')?.line === 'after the respawn')
-  expect(tasks.get('telegram:-1004422245734')!.track[0]).toEqual({ at: earlier, state: 'working' })
+  await until(() => tasks.get('telegram:-1001234567890')?.line === 'after the respawn')
+  expect(tasks.get('telegram:-1001234567890')!.track[0]).toEqual({ at: earlier, state: 'working' })
   await until(() => {
     try {
-      return JSON.parse(readFileSync(join(state, 'voice', 'tracks.json'), 'utf8'))['telegram:-1004422245734']?.[0]?.at === earlier
+      return JSON.parse(readFileSync(join(state, 'voice', 'tracks.json'), 'utf8'))['telegram:-1001234567890']?.[0]?.at === earlier
     } catch {
       return false
     }
@@ -376,7 +376,7 @@ test("a thread's lane outlives its session starting over, kept in the voice fold
 })
 
 test('talking a task through tells the voice which thread it is and where it stands', () => {
-  expect(opener(tasks.get('telegram:-1004422245734:908')!)).toBe(
-    "The task is the hex thread autofork (Telegram, thread id -1004422245734:908). It's waiting on the caller: Pick a music style, and run claude setup-token",
+  expect(opener(tasks.get('telegram:-1001234567890:908')!)).toBe(
+    "The task is the hex thread autofork (Telegram, thread id -1001234567890:908). It's waiting on the caller: Pick a music style, and run claude setup-token",
   )
 })
