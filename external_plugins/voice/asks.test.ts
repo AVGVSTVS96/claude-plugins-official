@@ -66,7 +66,7 @@ test('a question asked with buttons reads as its first line, its context and the
 
 test('open questions come newest first with a link to each, answered and settled ones drop out', () => {
   ledger([asked(1, 'Ship it?', ['Yes', 'No']), asked(2, 'Rename it?', ['Yes', 'No'], { answer: { label: 'No', at: '', via: 'telegram' } }), asked(3, 'Which color?', ['Mint', 'Coral'])])
-  asks = new Asks(state, { t3Database: '/nonexistent', check: why => checks.push(why) })
+  asks = new Asks(state, { t3Database: '/nonexistent', t3Home: '/nonexistent', check: why => checks.push(why) })
   expect(asks.view.asks.map(ask => [ask.question, ask.app, ask.topic, ask.places])).toEqual([
     ['Which color?', 'telegram', 'desk', [{ app: 'telegram', place: 'desk', task: `telegram:${DESK}`, link: 'https://t.me/c/1234/5/3' }]],
     ['Ship it?', 'telegram', 'desk', [{ app: 'telegram', place: 'desk', task: `telegram:${DESK}`, link: 'https://t.me/c/1234/5/1' }]],
@@ -99,7 +99,7 @@ test('the check’s version of a question stands in for every place that asked i
       ],
     }),
   )
-  asks = new Asks(state, { t3Database: '/nonexistent', check: why => checks.push(why) })
+  asks = new Asks(state, { t3Database: '/nonexistent', t3Home: '/nonexistent', check: why => checks.push(why) })
   expect(asks.view.asks.map(ask => ask.id)).toEqual([`telegram:${DESK}:9`, 'check:twilio', 'check:read'])
   expect(asks.view.asks.map(ask => ask.app)).toEqual(['telegram', 'telegram', 'telegram'])
   expect(asks.view.check).toEqual({ at: '2026-10-13T15:00:00.000Z', why: 'a pinned post changed', fixed: 0, flagged: 0 })
@@ -120,7 +120,7 @@ test('the check’s version of a question stands in for every place that asked i
 
 test('an answer that lands in the ledger takes the question off the list, and undo asks for its buttons back', async () => {
   ledger([asked(1, 'Ship it?', ['Yes', 'No'])])
-  asks = new Asks(state, { t3Database: '/nonexistent', check: why => checks.push(why) })
+  asks = new Asks(state, { t3Database: '/nonexistent', t3Home: '/nonexistent', check: why => checks.push(why) })
   const version = asks.version
   await asks.answer(`telegram:${DESK}:1`, 'Yes', 'app')
   expect(await until(() => lines[0])).toEqual({ type: 'answer', thread: DESK, message: 1, label: 'Yes', via: 'app' })
@@ -142,7 +142,7 @@ test('a stuck item with a request goes to General, one without is put away', asy
       ],
     }),
   )
-  asks = new Asks(state, { t3Database: '/nonexistent', check: why => checks.push(why) })
+  asks = new Asks(state, { t3Database: '/nonexistent', t3Home: '/nonexistent', check: why => checks.push(why) })
   await asks.act('disk')
   expect(await until(() => lines[0])).toEqual({ type: 'inbound', thread: GROUP, content: 'Restore cloud from checkpoint v7.', meta: { user: 'hex app' } })
   await asks.act('runs')

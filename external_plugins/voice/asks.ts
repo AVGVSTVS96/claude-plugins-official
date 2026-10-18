@@ -296,28 +296,24 @@ export class Asks extends Changes {
         seen.add(key)
         return true
       })
-      .map(source => ({ source, at: this.when(source) }))
+      .map(source => (source.call ? this.call(source.call) : this.thread(source.app, source.thread!, source.message)))
       .sort((a, b) => (b.at ?? '').localeCompare(a.at ?? ''))
-      .map(({ source }) => (source.call ? this.call(source.call) : this.thread(source.app, source.thread!, source.message)))
+      .map(({ at, ...place }) => place)
   }
 
-  private thread(app: string, thread: string, message?: MessageId): Place {
+  // A thread's place, and when it asked there: the question's or the pinned post's time.
+  private thread(app: string, thread: string, message?: MessageId): Place & { at?: string } {
     const task = `${app}:${thread}`
     const place = app === 'telegram' && !thread.includes(':') ? (thread.startsWith('-') ? 'General' : 'DM') : (this.links.title(app, thread) ?? this.names.get(task) ?? thread)
     const link = this.links.of(app, thread, message)
-    return { app, place, task, ...(link && { link }) }
+    const pin = this.pins.get(task)
+    const at = message === undefined ? undefined : pin && String(pin.message) === String(message) ? pin.at : this.asked({ app, thread, message })?.at
+    return { app, place, task, ...(link && { link }), at }
   }
 
-  private call(id: string): Place {
-    return { app: 'voice', place: readJson(join(this.calls, `${id}.json`))?.title ?? 'a call', call: id }
-  }
-
-  private when({ app, thread, message, call }: Source) {
-    if (call) return readJson(join(this.calls, `${call}.json`))?.started as string | undefined
-    if (message === undefined) return
-    const pin = this.pins.get(`${app}:${thread}`)
-    if (pin && String(pin.message) === String(message)) return pin.at
-    return this.asked({ app, thread: thread!, message })?.at
+  private call(id: string): Place & { at?: string } {
+    const call = readJson(join(this.calls, `${id}.json`))
+    return { app: 'voice', place: call?.title ?? 'a call', call: id, at: call?.started }
   }
 
   private saveMarks() {
