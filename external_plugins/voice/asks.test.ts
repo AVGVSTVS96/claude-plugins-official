@@ -67,9 +67,9 @@ test('a question asked with buttons reads as its first line, its context and the
 test('open questions come newest first with a link to each, answered and settled ones drop out', () => {
   ledger([asked(1, 'Ship it?', ['Yes', 'No']), asked(2, 'Rename it?', ['Yes', 'No'], { answer: { label: 'No', at: '', via: 'telegram' } }), asked(3, 'Which color?', ['Mint', 'Coral'])])
   asks = new Asks(state, { t3Database: '/nonexistent', check: why => checks.push(why) })
-  expect(asks.view.asks.map(ask => [ask.question, ask.app, ask.topic, ask.link])).toEqual([
-    ['Which color?', 'telegram', 'desk', 'https://t.me/c/1234/5/3'],
-    ['Ship it?', 'telegram', 'desk', 'https://t.me/c/1234/5/1'],
+  expect(asks.view.asks.map(ask => [ask.question, ask.app, ask.topic, ask.places])).toEqual([
+    ['Which color?', 'telegram', 'desk', [{ app: 'telegram', place: 'desk', task: `telegram:${DESK}`, link: 'https://t.me/c/1234/5/3' }]],
+    ['Ship it?', 'telegram', 'desk', [{ app: 'telegram', place: 'desk', task: `telegram:${DESK}`, link: 'https://t.me/c/1234/5/1' }]],
   ])
 })
 
@@ -192,15 +192,100 @@ test('a check’s verdict is held to the ledger: real open refs and buttons only
   const ref = (message: number) => ({ app: 'telegram', thread: DESK, message })
   const verdict = vet(
     {
-      asks: [{ id: 'twilio', kind: 'do', task: `telegram:${DESK}`, at: '', question: 'Upgrade Twilio', options: [{ label: 'Upgrade', value: 'Upgrade' }, { label: 'Later', value: 'Wait' }], refs: [ref(1), ref(2), ref(9)] }],
+      asks: [
+        {
+          id: 'twilio',
+          kind: 'do',
+          task: `telegram:${DESK}`,
+          at: '',
+          question: 'Upgrade Twilio',
+          options: [{ label: 'Upgrade', value: 'Upgrade' }, { label: 'Later', value: 'Wait' }],
+          from: [ref(1), ref(2), ref(9), { app: 'telegram', thread: GROUP }, { app: 'telegram', thread: '-100999' }, { app: 'voice', call: 'live_1' }, { app: 'voice', call: 'live_made_up' }],
+        },
+      ],
       settle: [{ ...ref(1), note: 'Settled' }, { ...ref(2), note: 'Settled' }, { ...ref(3), note: 'Settled: Tech Live, picked on a call with a very long note' }],
       fixed: [],
       flagged: [],
       stuck: [{ id: 'disk', title: 'disk', why: '', action: 'Look', mark: 'failed', at: '' }],
     },
     asks,
+    { threads: { [`telegram:${GROUP}`]: 'hex', [`telegram:${DESK}`]: 'desk' }, calls: [{ id: 'live_1' }] },
   )
-  expect(verdict.asks[0]).toMatchObject({ id: 'check:twilio', refs: [ref(1)], options: [{ label: 'Upgrade', value: 'Upgrade' }, { label: 'Later' }] })
+  expect(verdict.asks[0]).toMatchObject({
+    id: 'check:twilio',
+    refs: [ref(1)],
+    from: [ref(1), ref(2), ref(9), { app: 'telegram', thread: GROUP }, { app: 'voice', call: 'live_1' }],
+    options: [{ label: 'Upgrade', value: 'Upgrade' }, { label: 'Later' }],
+  })
   expect(verdict.settle).toEqual([{ ...ref(3), note: 'Settled: Tech Live, picked on a call with a very long note'.slice(0, 60) }])
   expect(verdict.stuck[0]!.id).toBe('check-disk')
+})
+
+test('an ask names every place it was asked, newest first, each with the best link its app has, and its pages apart from its answers', () => {
+  const DM = '777'
+  const THREAD = '1560277464146644992'
+  writeFileSync(join(state, 'telegram', 'threads.json'), JSON.stringify({ [GROUP]: { name: 'hex' }, [DESK]: { name: 'desk' }, [DM]: { name: 'DM' } }))
+  writeFileSync(join(state, 'telegram', 'bot.json'), JSON.stringify({ username: 'hexbot' }))
+  mkdirSync(join(state, 'discord'))
+  writeFileSync(join(state, 'discord', 'guild.json'), JSON.stringify({ id: '42' }))
+  writeFileSync(join(state, 'discord', 'threads.json'), JSON.stringify({ [THREAD]: { name: 'fix hex NOW' } }))
+  const calls = join(state, 'calls')
+  mkdirSync(calls)
+  writeFileSync(join(calls, 'live_1.json'), JSON.stringify({ id: 'live_1', title: 'Apple charges', started: '2026-10-13T18:00:00.000Z' }))
+  ledger([asked(1, 'Order the Duo?', ['Ordered', 'Not yet'])], { [GROUP]: { message: 2693, text: 'Blocked on you: the Duo order', at: '2026-10-13T19:00:00.000Z' } })
+  writeFileSync(
+    join(state, 'voice', 'check.json'),
+    JSON.stringify({
+      at: '2026-10-13T20:00:00.000Z', why: 'a call ended', read: {}, fixed: [], flagged: [], stuck: [],
+      asks: [
+        {
+          id: 'check:duo',
+          kind: 'yesno',
+          task: `telegram:${DESK}`,
+          at: '2026-10-13T11:00:00.000Z',
+          question: 'Is the Duo ordered?',
+          options: [{ label: 'Ordered', value: 'Ordered' }, { label: 'Not yet', value: 'Not yet' }],
+          links: [{ label: 'Apple Store', url: 'https://apple.com/store' }],
+          from: [
+            { app: 'telegram', thread: DESK, message: 1 },
+            { app: 'telegram', thread: GROUP, message: 2693 },
+            { app: 'voice', call: 'live_1' },
+            { app: 'telegram', thread: DM, message: 585 },
+            { app: 'discord', thread: THREAD },
+            { app: 'telegram', thread: DESK },
+          ],
+          refs: [{ app: 'telegram', thread: DESK, message: 1 }],
+        },
+      ],
+    }),
+  )
+  asks = new Asks(state, { t3Database: '/nonexistent', t3Home: '/nonexistent', calls, check: why => checks.push(why) })
+  const [duo] = asks.view.asks
+  expect(duo).toMatchObject({ options: [{ label: 'Ordered', value: 'Ordered' }, { label: 'Not yet', value: 'Not yet' }], links: [{ label: 'Apple Store', url: 'https://apple.com/store' }] })
+  expect(duo!.places).toEqual([
+    { app: 'telegram', place: 'General', task: `telegram:${GROUP}`, link: 'https://t.me/c/1234/2693' },
+    { app: 'voice', place: 'Apple charges', call: 'live_1' },
+    { app: 'telegram', place: 'desk', task: `telegram:${DESK}`, link: 'https://t.me/c/1234/5/1' },
+    { app: 'telegram', place: 'DM', task: `telegram:${DM}`, link: 'https://t.me/hexbot' },
+    { app: 'discord', place: 'fix hex NOW', task: `discord:${THREAD}`, link: `https://discord.com/channels/42/${THREAD}` },
+  ])
+})
+
+test('a check written before places and links were typed still gives each ask its places, and its url options as links', () => {
+  ledger([asked(1, 'Read the review?', ['Done', 'Later'])])
+  writeFileSync(
+    join(state, 'voice', 'check.json'),
+    JSON.stringify({
+      at: '2026-10-13T20:00:00.000Z', why: 'a call ended', read: {}, fixed: [], flagged: [], stuck: [],
+      asks: [
+        { id: 'check:review', kind: 'do', task: `telegram:${DESK}`, at: '', question: 'Read the review', options: [{ label: 'Done', value: 'Done' }, { label: 'Open PR #2', url: 'https://github.com/x/pull/2' }], places: ['desk', 'hex'], refs: [{ app: 'telegram', thread: DESK, message: 1 }] },
+        { id: 'check:pin', kind: 'do', task: `telegram:${GROUP}`, at: '', question: 'File the claim', options: [{ label: 'Done' }], places: ['hex'] },
+      ],
+    }),
+  )
+  asks = new Asks(state, { t3Database: '/nonexistent', t3Home: '/nonexistent', check: why => checks.push(why) })
+  expect(asks.view.asks.map(ask => [ask.id, ask.options, ask.links, ask.places])).toEqual([
+    ['check:review', [{ label: 'Done', value: 'Done' }], [{ label: 'Open PR #2', url: 'https://github.com/x/pull/2' }], [{ app: 'telegram', place: 'desk', task: `telegram:${DESK}`, link: 'https://t.me/c/1234/5/1' }]],
+    ['check:pin', [{ label: 'Done' }], undefined, [{ app: 'telegram', place: 'General', task: `telegram:${GROUP}`, link: 'https://t.me/c/1234/1' }]],
+  ])
 })

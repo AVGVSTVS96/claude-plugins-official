@@ -1,16 +1,27 @@
 import { readdirSync, readFileSync, renameSync, watch, writeFileSync } from 'fs'
+import { homedir } from 'os'
 import { join } from 'path'
-import type { Ask as Asked, MessageId } from '../../hub/ledger.ts'
+import type { Ask as Asked, MessageId, Pin } from '../../hub/ledger.ts'
 import { Changes } from './changes.ts'
 import { Check } from './check.ts'
+import { Links } from './links.ts'
 import { relay } from './relay.ts'
 import { T3, type Fresh, type Stuck } from './t3.ts'
 
 export type Kind = 'pick' | 'yesno' | 'do' | 'look'
-// value: the button's own label, when the option stands for one; url: an option that opens a page.
-export type Option = { label: string; value?: string; pick?: boolean; url?: string }
+// value: the button's own label, when the option stands for one.
+export type Option = { label: string; value?: string; pick?: boolean }
+// A page an ask points to; opening it answers nothing.
+export type Link = { label: string; url: string }
 export type Answer = { label: string; at: string; via: string }
 export type Ref = { app: string; thread: string; message: MessageId }
+// Where an ask was asked, as hex's check found it: a thread, with the message when it knows it
+// (a question, a pinned post, a plain message), or a call.
+export type Source = { app: string; thread?: string; message?: MessageId; call?: string }
+// Each place an ask was asked, for its row: the app, what the place is called there, the hex thread
+// (task) or call it is, and a link that opens it, the message itself where the app has one. A place
+// without a link is still known to be where it was asked.
+export type Place = { app: string; place: string; task?: string; call?: string; link?: string }
 export type Ask = {
   id: string
   kind: Kind
@@ -21,13 +32,17 @@ export type Ask = {
   question: string
   context?: string
   options: Option[]
+  links?: Link[]
   tag?: string
-  places?: string[]
-  link?: string
+  places: Place[]
 }
 // hex's check rewrites the raw questions into these: one per decision, however many places asked
-// it (refs), in the order that unblocks the most, with its pick and what it costs.
-export type Curated = Omit<Ask, 'app' | 'topic' | 'link'> & { refs?: Ref[] }
+// it (from; refs are the open questions with buttons among them, which an answer goes back to), in
+// the order that unblocks the most, with its pick and what it costs.
+export type Curated = Omit<Ask, 'app' | 'topic' | 'places'> & { from?: Source[]; refs?: Ref[] }
+// A check.json written before places and links were typed: its places were names and a link was an
+// option with a url. The next pass rewrites it.
+type Written = Omit<Curated, 'options'> & { places?: string[]; options: (Option & { url?: string })[] }
 export type Note = { title: string; text: string; did?: string }
 export type CheckResult = {
   at: string
@@ -49,6 +64,7 @@ export type View = {
 type Marks = { answers: Record<string, Answer>; sent: Record<string, string>; dismissed: Record<string, string>; read: Record<string, string> }
 
 const KEEP = 14 * 24 * 60 * 60_000
+const CALLS = join(homedir(), '.claude', 'channels', 'voice', 'calls')
 const WHERE: Record<string, string> = { app: 'in the app', call: 'on a call' }
 const PICK = /\s*[(\[]?\s*(?:←\s*)?(?:(?:my|hex[’']s) pick)\s*[)\]]?/i
 
@@ -61,8 +77,9 @@ export class Asks extends Changes {
   counts = new Changes()
   private ledgers = new Map<string, Asked[]>()
   private names = new Map<string, string>()
-  private pins = new Map<string, string>()
-  private guild?: string
+  private pins = new Map<string, Pin>()
+  private links: Links
+  private calls: string
   private result?: CheckResult
   private marks: Marks
   private pending?: ReturnType<typeof setTimeout>
@@ -73,10 +90,12 @@ export class Asks extends Changes {
 
   constructor(
     private state: string,
-    { t3Database, check = why => new Check(state).start(why) }: { t3Database?: string; check?: (why: string) => void } = {},
+    { t3Database, t3Home, calls = CALLS, check = why => new Check(state).start(why) }: { t3Database?: string; t3Home?: string; calls?: string; check?: (why: string) => void } = {},
   ) {
     super()
     this.check = check
+    this.calls = calls
+    this.links = new Links(state, () => this.schedule(), t3Home)
     this.marks = readMarks(join(state, 'voice', 'marks.json'))
     this.t3 = new T3(() => this.schedule(), t3Database)
     for (const app of apps(state)) this.stops.push(watchDir(join(state, app), file => (file === 'ledger.json' || file === 'threads.json') && this.schedule()))
@@ -101,6 +120,7 @@ export class Asks extends Changes {
   close() {
     clearTimeout(this.pending)
     this.t3.close()
+    this.links.close()
     for (const stop of this.stops) stop()
   }
 
@@ -110,7 +130,7 @@ export class Asks extends Changes {
 
   // The thread's own questions and its pinned status post, for its page.
   of(task: string) {
-    return { asks: this.view.asks.filter(ask => ask.task === task), ...(this.pins.has(task) && { pin: this.pins.get(task) }) }
+    return { asks: this.view.asks.filter(ask => ask.task === task), ...(this.pins.has(task) && { pin: this.pins.get(task)!.text }) }
   }
 
   async answer(id: string, label: string, via: string) {
@@ -206,14 +226,14 @@ export class Asks extends Changes {
     for (const app of apps(this.state)) {
       const book = readJson(join(this.state, app, 'ledger.json'))
       this.ledgers.set(app, book?.asks ?? [])
-      for (const [thread, pin] of Object.entries<any>(book?.pins ?? {})) if (pin.text) this.pins.set(`${app}:${thread}`, pin.text)
+      for (const [thread, pin] of Object.entries<any>(book?.pins ?? {})) if (pin.text) this.pins.set(`${app}:${thread}`, pin)
       for (const [thread, known] of Object.entries<any>(readJson(join(this.state, app, 'threads.json')) ?? {})) this.names.set(`${app}:${thread}`, known.name ?? thread)
     }
-    this.guild = readJson(join(this.state, 'discord', 'guild.json'))?.id
+    this.links.load()
     this.result = readJson(join(this.state, 'voice', 'check.json'))
     this.notice()
     const used = new Set<string>()
-    const curated = (this.result?.asks ?? []).flatMap(ask => {
+    const curated = (this.result?.asks ?? []).flatMap((ask: Written) => {
       for (const ref of ask.refs ?? []) used.add(refId(ref))
       const live = ask.refs?.length ? ask.refs.some(ref => this.open(ref)) : !this.marks.answers[ask.id]
       return live ? [this.dress(ask)] : []
@@ -242,7 +262,7 @@ export class Asks extends Changes {
   // A pinned post that changed or a T3 run that ended starts a check; the first read only takes note.
   private notice() {
     const now = {
-      pins: JSON.stringify([...this.pins]),
+      pins: JSON.stringify([...this.pins].map(([task, pin]) => [task, pin.text])),
       t3: JSON.stringify([this.t3.stuck, this.t3.fresh].map(items => items.map(item => item.id))),
     }
     const why = !this.seen ? undefined : now.pins !== this.seen.pins ? 'a pinned post changed' : now.t3 !== this.seen.t3 ? 'a T3 run ended' : undefined
@@ -250,15 +270,54 @@ export class Asks extends Changes {
     if (why) this.check(why)
   }
 
-  private dress(ask: Curated): Ask {
-    const { refs, ...rest } = ask
-    const ref = refs?.[0]
+  private dress({ refs, from, options, links = [], places: _names, ...ask }: Written): Ask {
+    const [app, ...thread] = ask.task.split(':')
+    const pages = [...links, ...options.flatMap(({ label, url }) => (url ? [{ label, url }] : []))]
     return {
-      ...rest,
-      app: ref?.app ?? ask.task.split(':')[0]!,
-      topic: this.names.get(ask.task) ?? ask.task.split(':').at(-1)!,
-      ...(ref && link(ref, this.guild) && { link: link(ref, this.guild) }),
+      ...ask,
+      app: app!,
+      topic: this.names.get(ask.task) ?? thread.at(-1)!,
+      options: options.filter(option => !option.url),
+      ...(pages.length && { links: pages }),
+      places: this.places(from ?? [...(refs ?? []), { app: app!, thread: thread.join(':') }]),
     }
+  }
+
+  // Every place an ask was asked, newest first where it's known when; a thread named both with a
+  // message and without is the message.
+  private places(from: Source[]): Place[] {
+    const messaged = new Set(from.filter(source => source.message !== undefined).map(source => `${source.app}:${source.thread}`))
+    const seen = new Set<string>()
+    return from
+      .filter(source => {
+        const key = source.call ? `call:${source.call}` : `${source.app}:${source.thread}:${source.message ?? ''}`
+        const bare = !source.call && source.message === undefined && messaged.has(`${source.app}:${source.thread}`)
+        if (bare || seen.has(key) || (!source.call && !source.thread)) return false
+        seen.add(key)
+        return true
+      })
+      .map(source => ({ source, at: this.when(source) }))
+      .sort((a, b) => (b.at ?? '').localeCompare(a.at ?? ''))
+      .map(({ source }) => (source.call ? this.call(source.call) : this.thread(source.app, source.thread!, source.message)))
+  }
+
+  private thread(app: string, thread: string, message?: MessageId): Place {
+    const task = `${app}:${thread}`
+    const place = app === 'telegram' && !thread.includes(':') ? (thread.startsWith('-') ? 'General' : 'DM') : (this.links.title(app, thread) ?? this.names.get(task) ?? thread)
+    const link = this.links.of(app, thread, message)
+    return { app, place, task, ...(link && { link }) }
+  }
+
+  private call(id: string): Place {
+    return { app: 'voice', place: readJson(join(this.calls, `${id}.json`))?.title ?? 'a call', call: id }
+  }
+
+  private when({ app, thread, message, call }: Source) {
+    if (call) return readJson(join(this.calls, `${call}.json`))?.started as string | undefined
+    if (message === undefined) return
+    const pin = this.pins.get(`${app}:${thread}`)
+    if (pin && String(pin.message) === String(message)) return pin.at
+    return this.asked({ app, thread: thread!, message })?.at
   }
 
   private saveMarks() {
@@ -293,18 +352,12 @@ export function fromLedger(app: string, asked: Asked): Curated {
     ...(context && { context: clip(context, 280) }),
     options,
     refs: [{ app, thread: asked.thread, message: asked.message }],
+    from: [{ app, thread: asked.thread, message: asked.message }],
   }
 }
 
 export function refId({ app, thread, message }: Ref) {
   return `${app}:${thread}:${message}`
-}
-
-function link({ app, thread, message }: Ref, guild?: string) {
-  if (app === 'discord') return guild && `https://discord.com/channels/${guild}/${thread}/${message}`
-  if (app !== 'telegram' || !thread.startsWith('-100')) return
-  const [chat, topic] = thread.slice(4).split(':')
-  return topic ? `https://t.me/c/${chat}/${topic}/${message}` : `https://t.me/c/${chat}/${message}`
 }
 
 function plain(text: string) {

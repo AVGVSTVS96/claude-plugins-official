@@ -206,13 +206,16 @@ the app's URL scheme being `t3code` unless `T3_APP_SCHEME` says otherwise
 they see threads (Buzz's `channels.json`); a thread whose app can't say where it
 lives has no `link`.
 
+Claude Code starts a job's timeline over whenever its session respawns or renews, so the engine
+keeps each thread's `track` for a week in `state/voice/tracks.json`.
+
 A blocked thread needs you; a working one whose session stopped counts as idle;
 anything that finished more than a week ago is left out. Rows come in that
 order (needs you, working, done, failed, idle), newest change first in each.
 
 | Request | Answers |
 | --- | --- |
-| `GET /tasks` | `{ version, tasks }`: each thread's `id`, `name`, `where` (Telegram, General, Discord...), `state` (`needs`, `working`, `done`, `failed`, `idle`), one `line`, `since` its state began, `at` its last change, its running `agents` with their own lines, and a `link` that opens the thread in its own app (Telegram, Discord, Buzz or T3 Code) |
+| `GET /tasks` | `{ version, tasks }`: each thread's `id`, `name`, `where` (Telegram, General, Discord...), `state` (`needs`, `working`, `done`, `failed`, `idle`), one `line`, `since` its state began, `at` its last change, its running `agents` with their own lines, its `track` (the last week of its states for its lane: each change, with steps for the last hour only), and a `link` that opens the thread in its own app (Telegram, Discord, Buzz or T3 Code) |
 | `GET /tasks?after=<version>` | the same, once anything has changed (or after 25 seconds) |
 | `GET /tasks/summary?after=<version>` | `{ version, needs, working }`, once a count changes |
 | `GET /tasks/<id>` | one task, with what it `needs` from you in full and what it did `lately` |
@@ -241,6 +244,23 @@ looked.
             {type:"answer"} on hub.sock ◄── POST /asks/<id>/answer ◄───────────┘
 ```
 
+Each of an ask's `places` is `{ app, place, task?, call?, link? }`: the app (`telegram`,
+`discord`, `buzz`, `t3`, or `voice` for a call), what the place is called there (a topic, General,
+DM, a T3 Code title, a call's title), the hex thread (`task`, as in `/tasks`) or call it is, and a
+`link` that opens it: the message itself where its app links messages (a Telegram group, a
+Discord thread), else its thread (Telegram's DM opens the chat with the bot). A place without a
+`link` is still where it was asked: a T3 Code thread T3 doesn't map, or a call.
+
+```json
+{ "id": "check:duo-order", "question": "Is there an Apple order in for the Duo?",
+  "options": [{ "label": "Ordered" }, { "label": "Not yet" }],
+  "links": [{ "label": "Apple Store", "url": "https://www.apple.com/shop/buy-iphone" }],
+  "places": [
+    { "app": "telegram", "place": "General", "task": "telegram:-1004422245734", "link": "https://t.me/c/4422245734/3451" },
+    { "app": "voice", "place": "Duo date history", "call": "live_u7_EZeofp3oN0l6HoawdnZt3UQ2o1imBvFp" }
+  ] }
+```
+
 An answer from the app reaches the thread as your own tap would (with
 `answered_in`), and its Telegram buttons change to "Answered in the app". A
 poll can't take a vote from the bot, so it closes instead. Undo puts the
@@ -248,7 +268,7 @@ buttons back and tells the thread the answer no longer stands.
 
 | Request | Answers |
 | --- | --- |
-| `GET /asks` | `{ version, asks, stuck, fresh, check }`: each open question's `id`, `kind` (`pick`, `yesno`, `do`, `look`), `task` and `topic` (its thread), `question`, `context`, `options` (`label`, `pick`, `url`), `tag`, `places` and a `link` to it; what's `stuck` (`title`, `why`, one `action`); what finished since you looked (`fresh`, with `read`); and the last check's time and counts |
+| `GET /asks` | `{ version, asks, stuck, fresh, check }`: each open question's `id`, `kind` (`pick`, `yesno`, `do`, `look`), `task` and `topic` (its thread), `question`, `context`, `options` (its answers: `label`, `pick`), `links` (pages it points to, which answer nothing: `label`, `url`), `tag`, and `places`, every place it was asked, newest first; what's `stuck` (`title`, `why`, one `action`); what finished since you looked (`fresh`, with `read`); and the last check's time and counts |
 | `GET /asks?after=<version>` | the same, once anything has changed (or after 25 seconds) |
 | `POST /asks/<id>/answer` | `{ "label": "..." }`: answers it |
 | `POST /asks/<id>/undo` | takes that answer back |
@@ -265,7 +285,8 @@ buttons back and tells the thread the answer no longer stands.
 Opus pass (`claude -p`, read-only tools, structured output) over the ledger's
 open and lately closed questions, every pinned post, the last three days of
 call wrap-ups and what T3 Code shows. It rewrites the raw questions into one
-list (repeats merged into one ask with every place that asked it, hex's pick,
+list (repeats merged into one ask with every place that asked it: each question, pinned post,
+plain message (with its id, from the transcripts) and call, hex's pick,
 what each unblocks or costs, most unblocking first), settles the questions the
 records show are already decided or done (their buttons say why), and flags
 what it can't settle. It never answers for you.

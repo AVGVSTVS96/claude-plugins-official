@@ -2,6 +2,7 @@ import { Database } from 'bun:sqlite'
 import { existsSync, readFileSync, watch } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
+import type { MessageId } from '../../hub/ledger.ts'
 
 const T3_HOME = join(homedir(), '.t3', 'userdata')
 const DATABASE = 'statev2.sqlite'
@@ -48,16 +49,17 @@ export class Links {
     this.channels = readJson(join(this.state, 'buzz', 'channels.json')) ?? {}
   }
 
-  of(app: string, id: string): string | undefined {
+  // A message's own link where its app has one (a Telegram group's, a Discord thread's), else its thread's.
+  of(app: string, id: string, message?: MessageId): string | undefined {
     switch (app) {
       case 'telegram': {
         if (!id.includes(':') && !id.startsWith('-')) return this.bot && `https://t.me/${this.bot}`
         if (!id.startsWith('-100')) return
-        const [chat, topic = '1'] = id.slice(4).split(':')
-        return `https://t.me/c/${chat}/${topic}`
+        const [chat, topic] = id.slice(4).split(':')
+        return message === undefined ? `https://t.me/c/${chat}/${topic ?? 1}` : `https://t.me/c/${chat}/${topic ? `${topic}/` : ''}${message}`
       }
       case 'discord':
-        return this.guild && `https://discord.com/channels/${this.guild}/${id}`
+        return this.guild && `https://discord.com/channels/${this.guild}/${id}${message === undefined ? '' : `/${message}`}`
       case 'buzz': {
         if (id.includes('-')) return `buzz://channel/${id}`
         const channel = word(this.channels[id])
