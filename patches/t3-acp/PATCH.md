@@ -2,7 +2,7 @@
 format: patch-md/v0.1
 id: t3-acp
 summary: Serve the agent to T3 Code as an ACP agent, where every T3 thread is its own Claude Code session in that thread's project, through the thread hub.
-baseline: 921c90ff926e836cfa26b546aaa88a5adf6b3845
+baseline: d1adba47161a271799de7b548225d929310046bd
 patch_file: t3-acp.patch
 patch_sha256: c87b3ffb20e32d1f855e6350c08fdd1aee405f066c7a91b01ae2bb76d9d241c9
 ---
