@@ -2,9 +2,9 @@
 format: patch-md/v0.1
 id: buzz-threads
 summary: Add a Buzz channel where every Buzz thread is its own Claude Code session through the thread hub, with Buzz's activity, memory and files panels.
-baseline: 58267944f92187b7d6a1c822165c96c81c864806
+baseline: 41f619d61b999adec1a1c8deb97d1a5b6ac35bb6
 patch_file: buzz-threads.patch
-patch_sha256: 14cd9c429ca2cbe6da87314f6731f89794719281362aa5b2e5df0fe0197348eb
+patch_sha256: b08e64f3f54bdd66d19ecf4214067410b2736f2c9f0a787b08a570681baed760
 ---
 
 ## Intent
