@@ -1,0 +1,12 @@
+diff --git a/README.md b/README.md
+index 43104e240ff500c762adebb0c31dc4b7ff7b50dd..0dc3b0b98728fc4739d9d43b781a40ce69c09cbc 100644
+--- a/README.md
++++ b/README.md
+@@ -1,5 +1,7 @@
+ # Claude Code Plugins Directory
+ 
++> A personal fork of [Claude Code Plugins Directory](https://github.com/anthropics/claude-plugins-official) that updates itself with [autofork](https://autofork.com). Its changes, each described in plain words, are in [`.autofork/`](.autofork).
++
+ A curated directory of high-quality plugins for Claude Code.
+ 
+ > **⚠️ Important:** Make sure you trust a plugin before installing, updating, or using it. Anthropic does not control what MCP servers, files, or other software are included in plugins and cannot verify that they will work as intended or that they won't change. See each plugin's homepage for more information.

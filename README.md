@@ -1,28 +1,6 @@
-> [!NOTE]
-> **This is an auto-patched fork of [claude-plugins-official](https://github.com/anthropics/claude-plugins-official).**
-> It runs a personal assistant where every Telegram forum topic, Discord thread, Buzz
-> thread and T3 Code thread is its own Claude Code session. A daily pipeline re-applies the [PATCH.md packages](patches/) onto the latest
-> upstream, heals conflicts with Claude, runs `scripts/verify`, and commits the result
-> to `main`.
->
-> - [`hub/`](hub/) gives every chat thread its own session ([hub](patches/hub/PATCH.md)).
-> - [`external_plugins/telegram`](external_plugins/telegram/) is the reworked channel
->   ([telegram-topics](patches/telegram-topics/PATCH.md)), and
->   [`external_plugins/discord`](external_plugins/discord/) its Discord counterpart
->   ([discord-threads](patches/discord-threads/PATCH.md)).
-> - [`external_plugins/buzz`](external_plugins/buzz/) is a new channel for
->   [Buzz](https://github.com/block/buzz) ([buzz-threads](patches/buzz-threads/PATCH.md)).
-> - [`external_plugins/t3`](external_plugins/t3/) serves hex to
->   [T3 Code](https://github.com/pingdotgg/t3code) as an ACP agent, each T3 thread
->   a session in its own project ([t3-acp](patches/t3-acp/PATCH.md)).
-> - [`external_plugins/voice`](external_plugins/voice/) is a live voice call: OpenAI's
->   `gpt-live-1` talks, the Claude Code session does the work ([voice](patches/voice/PATCH.md)).
-> - The marketplace is named `hex`, so plugins install as `telegram@hex`
->   ([hex-marketplace](patches/hex-marketplace/PATCH.md)).
->
-> Everything below is the upstream README, unchanged.
-
 # Claude Code Plugins Directory
+
+> A personal fork of [Claude Code Plugins Directory](https://github.com/anthropics/claude-plugins-official) that updates itself with [autofork](https://autofork.com). Its changes, each described in plain words, are in [`.autofork/`](.autofork).
 
 A curated directory of high-quality plugins for Claude Code.
 

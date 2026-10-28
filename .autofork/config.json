@@ -1,0 +1,13 @@
+{
+  "upstream": "anthropics/claude-plugins-official",
+  "follow": "main",
+  "setup": "for p in telegram discord buzz t3 voice; do d=external_plugins/$p; [ -f $d/package.json ] || continue; rm -f $d/bun.lock; bun install --cwd $d --silent || exit 1; done",
+  "generated": [
+    "external_plugins/telegram/bun.lock",
+    "external_plugins/discord/bun.lock",
+    "external_plugins/buzz/bun.lock",
+    "external_plugins/t3/bun.lock",
+    "external_plugins/voice/bun.lock"
+  ],
+  "verify": "set -e; jq empty .claude-plugin/marketplace.json; if [ -d hub ]; then bun test ./hub; fi; for p in telegram discord buzz t3 voice; do d=external_plugins/$p; [ -f $d/bot.ts ] || continue; bun build --target bun --external ffmpeg-static $d/bot.ts >/dev/null; bun test ./$d; done"
+}
