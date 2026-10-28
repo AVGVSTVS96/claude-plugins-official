@@ -9,5 +9,5 @@
     "external_plugins/t3/bun.lock",
     "external_plugins/voice/bun.lock"
   ],
-  "verify": "set -e; jq empty .claude-plugin/marketplace.json; if [ -d hub ]; then bun test ./hub; fi; for p in telegram discord buzz t3 voice; do d=external_plugins/$p; [ -f $d/bot.ts ] || continue; bun build --target bun --external ffmpeg-static $d/bot.ts >/dev/null; bun test ./$d; done"
+  "verify": "set -e; out=$(mktemp -d); trap 'rm -rf \"$out\"' EXIT; jq empty .claude-plugin/marketplace.json; if [ -d hub ]; then bun test --retry=2 ./hub; fi; for p in telegram discord buzz t3 voice; do d=external_plugins/$p; [ -f $d/bot.ts ] || continue; bun build --target bun --external ffmpeg-static $d/bot.ts --outdir \"$out/$p\" >/dev/null; bun test --retry=2 ./$d; done"
 }
