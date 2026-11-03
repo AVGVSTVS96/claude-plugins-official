@@ -1,79 +1,37 @@
-Adds live voice calls with hex. OpenAI's `gpt-live-1` does the talking and
-the Claude Code session does the work: the voice model never gets tools of its
-own, since the session uses client delegation, so starting, steering and
-stopping work stays with Claude.
+Adds `external_plugins/voice`, a channel for live voice calls with hex. OpenAI's `gpt-live-1` holds the call and hands every real request to the Claude Code session. The voice model never gets tools: the session uses client delegation, so starting, steering and stopping work stays with Claude.
 
 ```
 voice session ── HTTP ──► hub ──► call engine ◄── page, app, Twilio, Discord
 ```
 
-The call engine runs once in the hub service (`0-hub`), and the voice session
-reaches it over the hub's HTTP channel like every other client's sessions, so
-a session dying or restarting never takes a call down. The OpenAI key, from
-`~/.claude/channels/voice/.env`, stays in the engine and out of the service's
-environment, so no session sees it. The engine serves a call page on loopback
-only; with `VOICE_TOKEN` set, everything but the page and Twilio's routes
-needs it as a bearer token, and the page gets the token filled in only when
-the request didn't come through a proxy.
+The call engine runs in hex's hub service (`0-hub`), and the voice session reaches it over the hub's HTTP channel, like every other client's sessions: `.mcp.json` points the session at the hub's port with its thread and token, so no process runs per session, and a session's process dying or restarting never takes the call engine with it. The engine reads `~/.claude/channels/voice/.env` without putting it in the service's environment, so the OpenAI key stays in the engine and never reaches a session.
 
-A call keeps one transcript: both speakers' fragments in timeline order,
-grouped into turns, each handed to Claude exactly once, and a fragment that
-arrives late still goes in the next handoff at its place. When the voice
-delegates, the engine waits for the words up to that moment, then hands
-Claude every turn not yet sent. Claude answers with `say` and `note` (what
-the voice says and thinks) and `task`, which keeps a task board the voice can
-see; each resolves on OpenAI's acknowledgement or fails with its error, and
-all of them are always loaded so a call never waits on a tool search. What the
-voice says first (a phone call's greeting, the topic the app started the call
-on) goes in the session's creation, so it has it before the caller speaks.
+The engine, started once with the service, serves a call page on loopback only (`127.0.0.1`, `VOICE_PORT`, 8790 by default). The page's WebRTC offer goes to `POST /session`, which creates a `gpt-live-1` session in client delegation mode (`delegation: { type: "client" }`) with that key, then attaches a sideband WebSocket to it. With `VOICE_TOKEN` set, everything but the page and Twilio's routes needs `Authorization: Bearer <token>`; the page gets the token filled in only for requests that didn't come through a proxy.
 
-One call, one session. The voice thread is a fresh thread with no capacity:
-the engine sends the hub `keep` when a call starts and `renew` when it ends,
-every message of the call reaches that same session however long it sits idle,
-and the next call starts in a new session that reads the call chat. Steps to
-the hub go one at a time: a call that comes while the last call's session
-winds down starts at once, and its words wait until the new session connects,
-so a caller who calls right back still gets a new session, unless background
-agents hold the renew, in which case the call goes to the session there is.
+A call keeps its transcript: fragments from both speakers in `start_ms` order, grouped into turns by speaker, each fragment handed to Claude exactly once. A fragment that arrives late is still delivered, at its timeline position, in the next handoff. The call also keeps the task board. On `session.delegation.created` the engine holds the handoff until a fragment that starts at or after its `offset_ms` arrives, then delivers every unsent turn as a channel message with `delegation_id` in its meta.
 
-Calls come from the page and the iPhone app over WebRTC, from Twilio (dialing
-out with the `phone` tool, or the number's webhook taking calls Twilio signed
-from `CALLER_NUMBER` and refusing any other), and from lines other clients
-hold, like a Discord voice channel, which hand the engine PCM audio both ways.
-Twilio streams use one-time tokens the engine issued (trial accounts can't
-pass TwiML inline, so it's served from a token URL). Every kind is followed
-the same way and saved as one record: turns, task changes, where it came from,
-Claude's exact words as moments, the title, summary and what's waiting that
-Claude gives it, its expiry and its usage in seconds, dollars and context. The
-app reads records live. Calls that never connect (refused by OpenAI, busy, no
-answer, failed, or picked up without the voice joining) are saved with no
-turns and Claude is told. Two minutes before a call expires, the voice and
-Claude are told. When a call ends, pending handoffs and the last words reach
-Claude with a "call ended" message.
+Claude answers with `say` (`session.commentary.append`), `note` (`session.thinking.append`) and `task`, which updates the board and sends the task that changed as `session.thinking.append` with no delegation id. Each tool resolves on OpenAI's matching `*.appended` acknowledgement, or fails with its `error`. `say`, `note`, `task` and `send` are always loaded (`anthropic/alwaysLoad`), so a call never waits on a tool search for them. What the voice says first (a phone call's greeting, a topic the app started the call on) goes in the session's creation as a `developer` message in `session.input`, where GPT-Live has it before the caller speaks.
 
-A call's record is never left without an end. When a call's sideband drops
-without the session closing, the engine reattaches by id a few times before
-calling it dropped; when the service starts, it reattaches to the latest call
-with no end, tells Claude the call resumed with the call so far, and closes
-any other unended record as dropped.
+`bot.ts` runs in the hub service: it starts the hub for one thread, `voice`, always running as its main thread, and then the engine, handing it the hub's side (`deliver`, `keep`, `renew`, `renewal`, `session`). A tool call from the session runs in the engine (`tool`). Other sessions and local programs reach `voice` as `inbound` on its `hub.sock`.
 
-Claude can hand work to the rest of hex during a call. `send` delivers a
-message to another hex thread, or opens a new thread in Discord, Telegram or
-Buzz, puts it on the board and follows that thread's session (and its
-background agents) from the tagged message until a turn ends with no agents
-out, marking it done, or failed on an API error. A running task can name the
-agent doing it, and its board line shows that agent's latest step, from its
-transcript as it's written (converted with claude-agent-acp, as the Buzz and
-T3 plugins do), never on a timer. After a restart the engine resumes the last
-day's unfinished sends from their records.
+One call, one session: no message of a call goes to another session, and no call shares its session with the call before it. `voice` is a fresh thread with no capacity, so the engine sends `keep` when a call starts and `renew` when it ends, every message between reaches that session however long it sits idle, and the next call starts in a new session that reads the call chat. Steps to the hub go one at a time, in order: a call that comes while the last call's session winds down to renew starts at once, and its words wait for the hub's `renewal` (the new session connecting) before its `keep`, so a caller who calls right back still gets a new session. A renew held up by background agents doesn't hold the call, which goes to the session there is.
 
-For the app, the engine lists every hex thread as a task with a link that
-opens it in its own app (a Telegram topic or the bot's DM, a Discord thread,
-a Buzz message, a T3 Code thread found in T3's own database, read only) and a
-week of its states, kept on disk since Claude Code starts a job's timeline
-over when its session restarts; every open question with its answers, links
-and every place it was asked, each with the best link its app has; and the
-live call's tasks, most recently changed first.
+`dial` (the `phone` tool, or `POST /phone`) has Twilio ring a number. Its TwiML comes from `/twilio/<one-time token>/twiml`, since trial accounts can't pass TwiML inline, and streams the call to `wss://VOICE_PUBLIC_URL/twilio/<token>`. The engine accepts only a token it issued, opens a `gpt-live-1` WebSocket session in `audio/pcmu` at 8 kHz, and passes Twilio's μ-law frames through both ways; the call is followed exactly like a page call. `POST /twilio/incoming` is the Twilio number's voice webhook: a call Twilio signed (`X-Twilio-Signature`) from `CALLER_NUMBER` gets a one-time token and streams the same way; any other call is rejected.
 
-This patch is done when upstream ships an equivalent voice channel for Claude
-Code.
+A call on a line another client in the service holds (a Discord voice channel) comes through `take(from, greeting, line)`, which `bot.ts` puts in the hub's `engine`. The line hands the engine the caller's audio (`hear`) and plays the voice's, both base64 PCM at 24 kHz mono, in a `gpt-live-1` WebSocket session, and the engine follows the call exactly like a phone call: the same session, record (`from: "discord"`) and board. The line ends when the call does, and `hangUp` closes it as the caller's. A session refused, or hung up on before it starts, never becomes a call: a refusal is reported once and ends the line. Phone calls and lines share one pass-through for the session's start, refusal and close.
+
+When the call closes, pending handoffs and the last words reach Claude with a "call ended" message. Every call is saved as one record in `calls/`: its turns, task changes, where it came from, and Claude's title. Records keep Claude's exact `say` and `note` text as `moments`, plus `why` (from `phone`), `summary` and `waiting` (from `title`), `expires`, and `usage` (billed seconds, dollars and context ratio, from `session.usage.updated` and `session.closed`). They're served at `GET /calls` (long-polled with `?after=<version>`), `GET /calls/<id>` and `DELETE /calls/<id>`. Two minutes before `expires`, the voice and Claude are told. `hang_up` closes the session with an `event_id` starting `close_hex` once the voice stops talking. `POST /calls/<id>/moments` records when the caller's phone took the audio and tells the voice to wait.
+
+Calls that never connect are saved with no turns, and Claude is told: `/session` refused by OpenAI, a phone session OpenAI refused, and placed phone calls Twilio reports (through a signed `StatusCallback` at `/twilio/status/<token>`) as busy, no-answer, failed, or picked up without the voice ever joining. `end` takes `no-connect`, `no-answer` and `busy`.
+
+A call's record is never left without an end once the engine has run again. When the sideband of a page or app call closes without `session.closed`, the engine reattaches to the session by id a few times before calling the call dropped. On start it reattaches to the latest call whose record has no end, sends Claude a "call resumed" message with the call so far, and closes out any other unended record as `dropped`, ending it like any other call: Claude is told to name it, and the hub gets `renew`. A new call sends the hub `keep`, which cancels a pending `renew`. The hub keeps both across its session's channel dropping and coming back, so the engine sends each once.
+
+A running task can name who does it, and the engine follows that agent's Claude Code transcript as it is written (on a file change, never a timer), converts each new assistant line to ACP `session/update` notifications with `@agentclientprotocol/claude-agent-acp` (as the Buzz and T3 plugins do), and keeps one plain line per task for its latest step. `task` takes `agent`, the agentId of the voice session's own background subagent. `send` delivers a message to another hex thread through that app's `state/<app>/hub.sock` with a one-off `voice_task` meta tag, puts it on the board, follows the thread's session from the line that carries the tag (and its background agents' transcripts), and marks the task done when a turn ends with none of those agents out, or failed when it ends on an API error. `send` with `app` opens a new thread by that name in Discord, Telegram or Buzz (the hub's `begin`, its `about` line "From a call: …") with the message as its first, followed the same way. A call-started message's `from` says where the caller is. A renewed session appears in `threads.json` and is followed from its start. When the service starts, the engine resumes the last day's unfinished sends from their records, reading each thread from the start of its session to find the tagged message.
+
+`GET /tasks` shows every hex thread as a task with a `link` that opens the thread in its own app: a Telegram topic, General, or the bot for the DM; a Discord thread in the server named in the bot's `guild.json`; a Buzz message in the channel in the bot's `channels.json`, or the DM's channel; a T3 Code thread, found in T3's own database (`statev2.sqlite`, read only and read again when it changes) from the hex thread's key and opened by the app's URL scheme (`T3_APP_SCHEME`, `t3code` unless set). An app that can't say where a thread lives gives it no link. Each task's `track` is a week of its states for its lane, with steps for the last hour only, kept in `state/voice/tracks.json`, since Claude Code starts a job's timeline over when its session respawns or renews.
+
+`GET /asks` gives each open question its answers as `options` (`label`, `pick`), the pages it points to as `links` (`label`, `url`), and its `places`: every place it was asked, each thread once (a question, pinned post, plain message or call), typed `{ app, place, task?, call?, link? }` with the best link its app has (the message itself where the app links messages, else its thread), the ones that open first. `GET /activity?after=<version>` long-polls the live call's tasks, most recently changed first, each with its latest `line`, for the app's live line.
+
+The tests cover transcript order, late fragments, the board, call records, step lines, following a sent message to done or failed through fake transcripts, and the engine against a fake hub and fake OpenAI and Twilio: a phone call's words reaching the session only after the last call's renew, in order, and its end asking for a renew. The hub's tests cover a call keeping one session and the next getting a new one. A call on another client's line is held against a fake OpenAI: PCM both ways, its own record, the line ended on hang-up, and `send` opening a new thread. The bot builds and its `.mcp.json` is HTTP. Live, in an isolated `CLAUDE_CONFIG_DIR` and through hex's launcher, a voice session gets a call's handoffs over HTTP, keeps one session across the call's turns, carries on through a hub restart with the call resumed, and the next call gets a new session.
+
+Once upstream ships an equivalent voice channel for Claude Code, this patch is done.

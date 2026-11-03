@@ -1,81 +1,33 @@
-Discord's channel gives every thread its own session, through the hub
-(`0-hub`), from one gateway connection the service owns, split from upstream's
-`server.ts` the same way `telegram-topics` splits Telegram's: the gateway half
-runs in the hub service and maps each thread to a session by its channel id,
-and the channel half keeps upstream's tools and instructions as the channel
-the hub serves each session over HTTP. Keep upstream's wording and structure
-wherever the code is shared, so rebuilds stay small. Without
-`DISCORD_BOT_TOKEN`, Discord stays off and the rest of the service runs.
+Discord's channel gives every thread in a server its own Claude Code session, Claude-tag style, through the hub (`0-hub`), and no process runs per session.
 
-Discord is where hex does deeper work, Claude-tag style. Tagging the bot in a
-text or announcement channel starts a thread on that message with a fresh
-session, which names the thread in one word; inside a thread every message
-reaches its session, no tag needed. Forum posts get sessions like any thread,
-and a new post's title comes with it instead of a rename. A DM is its own
-conversation (a fresh thread), separate from every thread. Answers can be
-longer and structured: the instructions say what Discord's Markdown renders
-(headings, code blocks with a language, `-#` subtext, masked links, `<link>`
-without a preview) and that it has no tables, and a code block cut across
-messages is closed and reopened so both halves render. User, nickname and
-role mentions are stripped from a message and from the thread name it starts.
+Upstream's single-session `server.ts` splits in two, the same way `telegram-topics` splits Telegram's. `bot.ts` takes upstream's gateway half: the allowlist, attachments and the Discord calls. It runs in the hub service, embeds the hub, and maps each thread to its own session by the thread's channel id. The other half keeps upstream's tools and instructions as the channel the hub serves every session over HTTP: `.mcp.json` points the session at the hub (`HEX_PORT`) with its `HEX_CHANNEL`, `HEX_THREAD` and the hub's `HEX_TOKEN` (as `Authorization`) in headers, in place of upstream's `bun server.ts`. There is one gateway connection, owned by the service; sessions never connect to Discord. Without `DISCORD_BOT_TOKEN`, Discord stays off and the rest of the hub service runs. Keep upstream's wording and structure wherever code is shared, so rebuilds stay small.
 
-A session reads the whole server, not just its own thread: messages name
-their channel, it can list channels, page through a channel's top-level
-messages with each thread's reply count and last reply, read any thread by
-its starter message or name, list a forum's posts, and search the server
-through Discord's guild search (which says when Discord is still indexing).
-It reads only what the bot can see in its own server, never a DM. Posting
-stays in the caller's thread or one it names, always as the bot itself.
+Discord is the place for deeper work. Tagging the bot in a text channel starts a thread on that message, with a fresh session; inside a thread every message reaches its session, no tag needed. The session renames a new thread to one word (`rename_thread`). Announcement channels work like text channels: a tag starts a thread, and they can be read, searched and posted into. Forum posts get sessions like any thread, and a new post carries its title as `post_title` instead of asking for a rename. User, nickname and role mentions are stripped from a message and from the thread name it starts. A DM to the bot is its own conversation: one session named `DM`, separate from every thread, and a fresh thread in the hub's terms, so each message that finds its session done gets a new one. Thread-only tools (`rename_thread`, `close_thread`) say a DM is not a thread.
 
-A session can open a thread (its `about` line first, then the request that
-asked for it and the replies since, forwarded as Discord forwards; in a forum,
-a post with the tags it names; in Telegram or Buzz, through the hub), hand its
-conversation to a Telegram topic or Buzz thread, close a thread (archived and
-forgotten once its session stops; a new message brings it back with a fresh
-session), post into another thread, delete, react and unreact, pin, forward,
-poll, and edit a message's files. `reply` can be silent and carry buttons that
-lock on the choice, or a menu that takes several picks at once. Every question
-asked with buttons, a menu or a poll goes in the hub's ledger, as Telegram's
-do, so hex's voice app can list it; one answered elsewhere (the app, a call)
-locks on a line saying where and reaches the thread as the owner's tap would,
-and one taken back is put back. Tools that take a message id find a thread's
-starter message in the channel it hangs off, so a session can download the
-screenshot a tag started the thread from.
+Answers can be longer and structured: the instructions say what Discord's Markdown renders (headings, code blocks with a language for highlighting, `-#` subtext, masked links, `<link>` without a preview) and that it has no tables. The chunker splits on paragraphs by default, and a code block cut across messages is closed and reopened so both halves render.
 
-What reaches a session: which message a reply answers, edits marked `edited`,
-forwards with their text and attachments, voice messages as transcripts when
-the hub has a transcriber, stickers and polls described, images downloaded on
-arrival like Telegram's photos, and in a thread with a session the sender's
-reactions, deletes (Discord doesn't say who deleted, so the bot's own deletes
-are the only ones not reported) and votes on the bot's polls. A deleted
-thread is forgotten with its questions. Typing follows the session's real busy
-state, and a session that fails to start says why in its thread.
+A session reads the whole server, not just its own thread. Its inbound messages name their `channel`. `fetch_messages({channel})` returns a text channel's top-level messages, each with its thread's reply count and last reply, and on a forum lists its posts; `fetch_messages({thread})` reads any thread by its starter message id or name; `before` pages back. `list_channels` lists the text, announcement and forum channels the bot can read. `search_messages` searches the whole server through Discord's guild message search, and says when Discord is still indexing. Only channels and threads in the bot's own server that it can see are read, never a DM. Tools act on the caller's own thread unless they name another one, so they take no `chat_id`: reading may name any channel the bot can see, and posting stays in the caller's thread or a thread it names. The bot always posts as itself.
 
-Permission prompts ask in the session's own thread, with the tool, its input
-and Allow and Deny buttons that lock on the choice; one still open when the
-turn ends with no background agents out was answered in the session itself.
-Slash commands, registered on connect for the server and the bot's DM,
-control a thread outside its conversation and answer only the owner,
-privately: `/model`, `/effort`, `/compact` and `/stop`. A tap is answered
-before anything is fetched, inside Discord's three seconds. A first login that
-fails, as with no network at boot, is retried with backoff; only a bad token
-is final. Once connected, the bot writes its server's id to `guild.json` so
-the voice app can link to threads.
+`new_thread` opens a thread whose first message is its `about` line, followed, when a message from the user started the caller's turn, by the request that asked for it and the session's replies since, forwarded as Discord forwards. In a forum channel it opens a post with that line and the tags it names; with `app: "telegram"` or `"buzz"` it opens the thread there through the hub's `begin`. `handoff(to: "telegram" | "buzz", channel?)` moves a thread's session to a new Telegram topic or Buzz thread. `close_thread` archives the thread and forgets it once its session stops; a new message unarchives it with a fresh session. A thread deleted in Discord is forgotten too, and so are its questions.
 
-The owner joining one of the server's voice channels calls hex there: the bot
-joins with `@discordjs/voice` (with DAVE end-to-end encryption, which Discord
-requires) and hands the call to the voice plugin's call engine through the
-hub, so it's the same session, record and task board as a phone call. It
-passes the owner's audio decoded to 24 kHz mono, sending their quiet as
-silence since the voice takes its turn on hearing it, and plays the voice's
-audio widened to 48 kHz stereo in stretches of speech, so the bot shows as
-speaking only while it talks. One call at a time, and only the owner is
-heard. Leaving or moving channels, or hex hanging up, ends it.
+`reply` can post into another thread by name, be `silent`, and carry `buttons`: a tap comes back as a message with the button's label, and the buttons lock on the choice. With `multiple` they come as a menu (a string select) that takes any number of picks at once, which come back as one message and lock the menu on them. `reply` and `edit_message` turn `buzz://` links into web links. `reply` refuses to attach channel state or any `.env` file. There are also `delete_message`, `react` with `remove`, `pin` and unpin, `forward` (Discord's native forwarding, into a thread or channel), `poll`, and `edit_message` with new files. Tools that take a message id find a thread's starter message in the channel it hangs off, so `download_attachment` gets the screenshot a tag started the thread from. `reply` and `react` are always loaded (`_meta` `anthropic/alwaysLoad`), so a session's first reaction needs no tool search round first.
 
-Dropped from upstream on purpose, not to be ported back: pairing and
-`/discord:access` (one user; `access.json` holds `allowFrom`) and the
-per-channel opt-in. Permission relay came back, asked in the session's own
-thread instead of every allowlisted DM.
+Every question asked with buttons, a menu or a poll goes in the hub's ledger (`ledger.json`, with Discord's message ids as strings), with each tap, pick and vote, edits, deletes and the pinned post, as Telegram's do: hex's voice app lists them and hex's check reads them. One answered elsewhere (`answer` on `hub.sock`: the app or a call) locks its buttons on a line saying where (a poll ends instead) and reaches the thread as the owner's tap would, with `answered_in`; `settle` locks them on its note; `reopen` puts them back and tells the thread the answer no longer stands (`took_back`).
 
-This patch is done when upstream's Discord channel routes threads to separate
-sessions on its own.
+A reply says which message it answers, in `reply_to_*` meta: its id, author, text and attachments. An edit reaches the session again, marked `edited`. A forward carries the forwarded message's text and attachments, marked `forwarded`. A voice message arrives as its transcript, `(voice message) <words>`, when the hub has a transcriber (`transcribe`); otherwise as before, and the recording stays listed in the attachment meta. Images in a message arrive downloaded, as `image_path` (paths joined by `; `), as Telegram's photos do; other files stay listed for `download_attachment`. Stickers arrive with their names and image URLs, and polls with their question and options. In a thread that already has a session, the sender's reactions, added or removed, and deleted messages arrive as `reaction_*` and `deleted` meta. Discord doesn't say who deleted a message, so the bot's own `delete_message` calls are the only deletes not reported. The sender's votes on the bot's own polls, cast or taken back, reach the poll's thread with the answer and question.
+
+The typing indicator follows the session's real busy state, and a session that fails to start says why, in its thread. Once connected, the bot leaves its server's id in `guild.json` in its state folder, so the voice app can link a thread to Discord.
+
+Permission prompts (`claude/channel/permission`) ask in the session's own thread: the tool, its description and its input in a code block, with Allow and Deny buttons that lock on the choice. A prompt still open when the turn ends with no background agents out was answered in the session itself, so its buttons say it's no longer waiting. Claude Code relays no prompt for a tool that needs the user's own input (AskUserQuestion, ExitPlanMode), so those never come.
+
+Slash commands, registered globally on connect for the server and the bot's DM, control a thread outside its conversation and answer only the owner, privately: `/model` and `/effort` (the hub's `MODELS` and `EFFORTS`, from the thread's next message), `/compact` (once the thread isn't working) and `/stop`. A tap is answered before anything is fetched, inside Discord's three seconds.
+
+A first login that fails (no network yet at boot) is tried again with backoff, up to a minute apart; only a bad token is final. discord.js reconnects a session it already has.
+
+The owner joining one of the server's voice channels calls hex there (the `GuildVoiceStates` intent). The bot joins with `@discordjs/voice`, with DAVE end-to-end encryption, which Discord requires, hands the call to the voice app's call engine through the hub's `engine`, and passes audio through: the owner's Opus decoded (`opusscript`) to 24 kHz mono, with their quiet sent as silence, since the voice takes its turn on hearing it; and the voice's audio widened to 48 kHz stereo and played in stretches of speech, so the bot shows as speaking only while it talks. The call is the engine's like a phone call: the same session, record and board. Leaving the channel, moving to another (a new call there), or hex hanging up ends it, and the bot leaves. The voice connection is the service's too, one call at a time, and only the owner's audio is heard.
+
+Dropped from upstream on purpose, never to be ported back: pairing and `/discord:access` (one user; `access.json` holds `allowFrom`) and the per-channel opt-in. Permission relay came back, asked in the session's own thread instead of every allowlisted DM.
+
+The bot builds, its `.mcp.json` is an HTTP server, and the hub's tests pass. Discord's tests run the tools and gateway events against a fake Discord client: channel paging, thread drill-in, search, the channel named on arrival, refusal of hidden channels, DMs and other servers, reactions, deletes, button taps, stickers, polls, forum posts, announcement channels, a DM as its own session, permission prompts, the ledger and answers from elsewhere, menus, images on arrival, new threads' forwarded origin, forum posts with tags, new threads in other apps, slash commands and a failed first login. The voice tests cover the audio conversions, stretches of speech, silence for quiet, and a call from joining to leaving against a faked `@discordjs/voice`. Live, the bot joins a voice channel under Bun with DAVE and plays.
+
+Once upstream's Discord channel routes threads to separate sessions on its own, this patch is done.

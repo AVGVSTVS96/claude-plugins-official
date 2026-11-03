@@ -9,7 +9,7 @@
     "external_plugins/t3/bun.lock",
     "external_plugins/voice/bun.lock"
   ],
-  "verify": "jq empty .claude-plugin/marketplace.json && out=$(mktemp -d) && for f in hub/serve.ts external_plugins/telegram/bot.ts external_plugins/discord/bot.ts external_plugins/buzz/bot.ts external_plugins/buzz/provider.ts external_plugins/t3/bot.ts external_plugins/voice/bot.ts; do if [ -f $f ]; then bun build --target bun --external ffmpeg-static $f --outdir $out/${f%.ts} >/dev/null || exit 1; fi; done && for d in hub external_plugins/telegram external_plugins/discord external_plugins/buzz external_plugins/t3 external_plugins/voice; do if ls $d/*.test.ts >/dev/null 2>&1; then bun test ./$d || exit 1; fi; done",
+  "verify": "jq -e '.name != \"hex\" or ([.plugins[].name] | contains([\"telegram\", \"discord\", \"buzz\", \"t3\", \"voice\"]))' .claude-plugin/marketplace.json >/dev/null && out=$(mktemp -d) && for f in hub/serve.ts external_plugins/buzz/provider.ts external_plugins/telegram/bot.ts external_plugins/discord/bot.ts external_plugins/buzz/bot.ts external_plugins/t3/bot.ts external_plugins/voice/bot.ts; do if [ -f $f ]; then bun build --target bun --external ffmpeg-static $f --outdir $out/${f%.ts} >/dev/null || exit 1; fi; done && for p in telegram discord buzz t3 voice; do d=external_plugins/$p; if [ -f $d/bot.ts ]; then jq -e --arg p $p '.mcpServers[$p].type == \"http\"' $d/.mcp.json >/dev/null || exit 1; fi; done && for d in hub external_plugins/telegram external_plugins/discord external_plugins/buzz external_plugins/t3 external_plugins/voice; do if ls $d/*.test.ts >/dev/null 2>&1; then bun test ./$d || exit 1; fi; done",
   "limits": {
     "rebuilds": 10,
     "month": 200,

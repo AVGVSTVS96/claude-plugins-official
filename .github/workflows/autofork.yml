@@ -5,7 +5,7 @@ on:
     - cron: "7-59/15 * * * *"
   workflow_dispatch:
   push:
-    branches: [autofork]
+    branches: [main]
     paths: [".autofork/**"]
 
 permissions:

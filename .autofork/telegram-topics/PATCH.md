@@ -1,66 +1,25 @@
-Telegram's channel gives every forum topic its own session, through the hub
-(`0-hub`), from one bot connection the service owns: sessions never poll
-Telegram. hex lives in a Telegram forum. General is its main thread, each
-topic is a piece of work with a session of its own, and a DM to the bot is a
-separate conversation (a fresh thread, in the hub's terms), not General.
+Telegram's channel gives every forum topic in a group its own Claude Code session, through the hub (`0-hub`), and no process runs per session. hex lives in a Telegram forum: General is its main thread, each topic is a piece of work with its own session, and a DM to the bot is a conversation of its own.
 
-Upstream's single-session `server.ts` splits in two. The bot half (polling,
-the allowlist, attachments and the Telegram calls) runs in the hub service
-and maps each topic, or a plain chat, to a thread. The channel half keeps
-upstream's tools and instructions as the channel the hub serves each session
-over HTTP, so `.mcp.json` points at the hub instead of running
-`bun server.ts`. Keep upstream's wording and structure wherever the code is
-shared, so rebuilds stay small. Tools act on the caller's own thread unless
-they name another, so they take no `chat_id`.
+Upstream's single-session `server.ts` splits in two. `bot.ts` takes upstream's bot half: polling, the allowlist, attachments and the Telegram calls. It runs in the hub service, embeds the hub, and maps each forum topic, or a plain chat, to a thread. The other half keeps upstream's tools and instructions as the channel the hub serves every session over HTTP: `.mcp.json` points the session at the hub (`HEX_PORT`) with its `HEX_CHANNEL`, `HEX_THREAD` and the hub's `HEX_TOKEN` (as `Authorization`) in headers, in place of upstream's `bun server.ts`, because Claude Code never restarts a stdio server that dies, and reconnects to an HTTP one. There is one bot connection, owned by the service; sessions never poll Telegram. Keep upstream's wording and structure wherever code is shared, so rebuilds stay small.
 
-On top of upstream, a session can open a topic with a fresh session (or a
-Discord or Buzz thread, through the hub), hand its conversation to Discord or
-Buzz and close the topic (from General, a copy continues there instead), close
-its topic, post into another topic by name, rename a topic or change its icon
-(every new topic gets a random one), pin, forward, delete, send polls whose
-votes come back as messages, and change a file's caption or replace the file.
-A new topic starts with the request that asked for it and the replies since,
-forwarded. Typing follows the session's real busy state, and a session that
-fails to start says why in its topic. `reply` takes ordinary Markdown, sent as
-Telegram's rich message so sessions never escape MarkdownV2 (a code block cut
-between chunks is closed and reopened); buttons, where a tap comes back as the
-label and the message keeps only the chosen button, disabled; silent sends;
-and files without text, with photos over Telegram's 10MB cap sent as
-documents. It refuses to attach channel state or any `.env`. `reply` and
-`react` are always loaded, so a session's first reaction needs no tool search.
+General is the hub's main thread, named after `HEX_NAME`, and hex's General (`general`), so its session alone runs hex's scheduled jobs. A DM to the bot is its own thread: one session named `DM`, separate from General, whose replies go back to the DM. A DM is a fresh thread in the hub's terms: each message that finds its session done gets a new one. Tools act on the caller's own thread unless they name another one, so they take no `chat_id`. Messages to a forum's General go without a topic id; only chat actions use topic 1, which Telegram needs to show typing inside General. The typing indicator follows the session's real busy state, and a session that fails to start says why, in its topic. Once polling, the bot leaves its username in `bot.json` in its state folder, so the voice app can link a DM to the bot.
 
-What reaches a session is fuller than upstream's. A reply says which message
-it answers, with its author, text, highlighted part and photo or file, even
-in another chat (upstream drops this, issue #2788). Edits arrive again marked
-`edited`, forwards name their sender, links keep their address (Telegram puts
-it in the entities), and locations, venues, contacts, polls, dice and games
-arrive as text instead of being dropped. A voice message arrives as its
-transcript when the hub has a transcriber. A photo album is one message:
-Telegram never says an album is complete, so the bot waits a second after its
-last item. The user's reactions reach the thread of the message they're on;
-Telegram's update names neither the topic nor the text, so the hub remembers
-both for every message it sees until the thread is forgotten.
+`new_thread(title, prompt, about)` opens a topic with a fresh session, or a Discord or Buzz thread with `app: "discord"` or `app: "buzz"`, through the hub's `begin`. Titles are one word, enforced by the hub's `title`, and `about` is the first line the user sees in it. A new topic then starts with the request that asked for it and the session's replies since, forwarded, when a message from the user started the caller's turn. Every new topic gets a random icon from Telegram's topic icon set, and `rename_thread` renames a topic or changes its icon. `handoff(to: "discord" | "buzz")` moves a topic's session to a new thread there and closes the topic; from General, a copy continues there and main stays. `close_thread` closes a topic, stops its session once it's idle and forgets the topic. The Bot API has no event for a deleted topic, so a call that fails because its topic is gone forgets it too.
 
-Permission prompts go to the asking session's own topic with Allow and Deny.
-Only an allowlisted user's tap answers, and it goes to Claude Code as the
-verdict, not to the session as a message. A prompt still open when its session
-goes idle with no background agents out was answered in the session itself,
-so it says it's no longer waiting.
+`reply` can post into another topic by name. It takes `format: "markdown"`, ordinary Markdown sent as Telegram's rich message, so sessions never escape MarkdownV2; a code block cut between chunks is closed and reopened. It takes `buttons`: a tap comes back as the label, and the message keeps only the chosen button, disabled. `silent` sends without a notification. Files need no text; short text rides as the first file's caption, and photos over Telegram's 10MB photo cap go as documents. `reply` refuses to attach channel state or any `.env` file. `reply` and `edit_message` turn `buzz://` links into web links (the hub's `tappable`), since Telegram only links web addresses. `poll` sends a poll whose votes come back as messages, and there are `delete_message`, `pin`, `forward` into a topic by name, and `react` with `remove`. `edit_message` changes a file's caption, or replaces the file. `reply` and `react` are always loaded (`_meta` `anthropic/alwaysLoad`), so a session's first reaction needs no tool search round first.
 
-Telegram details a rebuild has to keep: messages to a forum's General go
-without a topic id, but typing in General needs topic 1; inside a topic every
-message is a reply to the topic's creation message, and those carry no reply
-meta; the Bot API has no event for a deleted topic, so a call that fails
-because its topic is gone forgets it; and a session's channel opens a second
-after it lists its tools, since Claude Code starts listening tens of
-milliseconds later and never says so. Once polling, the bot writes its
-username to `bot.json` so the voice app can link to the DM. The instructions
-drop upstream's line that the Bot API has no history: hex keeps every
-conversation, so a session looks there.
+What reaches a session is fuller than upstream's. A message that replies to an earlier one says which, in `reply_to_*` meta: its id, author, text or caption, the part highlighted, and the photo (downloaded) or file it carried. Upstream drops this (issue #2788). A reply to a message in another topic or chat (`external_reply`) fills the same meta, with its text when the hub saw it. Inside a topic, Telegram makes every message a reply to the topic's creation message; those carry no `reply_to_*` meta. An edited message reaches the session again, marked `edited`, and a forwarded one names its sender in `forwarded_from`. A link's address is kept: Telegram puts it in the message's entities, so `[text](url)` goes back into the text. Locations, venues, contacts, polls, dice and games arrive as text instead of being dropped. A voice message arrives as its transcript, `(voice message) <words>` after any caption, when the hub has a transcriber (`transcribe`); without one, or if it fails, it arrives as `(voice message)`. The recording stays in the attachment meta. A photo album arrives as one message with every file and the caption; Telegram sends no event when an album is complete, so the bot waits a second after its last item.
 
-Dropped from upstream on purpose, not to be ported back: pairing and
-`/telegram:access` (one user; `access.json` holds `allowFrom`), bot commands,
-the permission relay to every allowlisted DM, and the `bot.pid` takeover.
+A reaction by the user reaches the thread of the message it's on, added or removed, with that message's author and text. Telegram's update names neither the topic nor the text, so the hub keeps both for every message it sends or receives, per thread, until the thread is forgotten; a reaction on a forum message it never saw is dropped.
 
-This patch is done when upstream's Telegram channel routes forum topics to
-separate sessions on its own.
+Permission prompts relay to the session's own topic (`claude/channel/permission`): what will run, with Allow and Deny buttons. Only an allowlisted user's tap answers, and it goes to Claude Code as the verdict rather than to the session as a message; the message keeps the chosen button, disabled. Claude Code takes whichever answer comes first and says nothing when the prompt is answered in the session itself, but a turn can't end while one is open, so a prompt still open when its session goes idle with no background agents out (one of theirs may still be asking) shows it is no longer waiting.
+
+The instructions drop upstream's line that the Bot API has no history and to ask the user to paste earlier context: hex keeps every conversation (its log, and a DM's chat view), so a session looks there instead.
+
+A session's channel opens a second after it lists the tools: Claude Code starts listening for channel notifications some tens of milliseconds after that and never signals it.
+
+Dropped from upstream on purpose, never to be ported back: pairing and `/telegram:access` (one user; `access.json` holds `allowFrom`), bot commands, upstream's permission relay to every allowlisted DM (prompts go to the asking session's own topic instead), and the `bot.pid` takeover.
+
+The bot builds, its `.mcp.json` is an HTTP server, and the hub's and Telegram's tests pass.
+
+Once upstream's Telegram channel routes forum topics to separate sessions on its own, this patch is done.
