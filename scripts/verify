@@ -15,6 +15,9 @@ for plugin in telegram discord buzz t3 voice; do
   $build "external_plugins/$plugin/bot.ts" --outdir "$out/$plugin" >/dev/null
   jq -e --arg plugin "$plugin" '.mcpServers[$plugin].type == "http"' "external_plugins/$plugin/.mcp.json" >/dev/null
 done
-bun test hub external_plugins/buzz external_plugins/discord external_plugins/telegram external_plugins/t3 external_plugins/voice
+# Each plugin runs in its own process, and one bun test run would share modules like hub's client list across them.
+for dir in hub external_plugins/buzz external_plugins/discord external_plugins/telegram external_plugins/t3 external_plugins/voice; do
+  bun test "./$dir"
+done
 $build external_plugins/buzz/provider.ts --outdir "$out/provider" >/dev/null
 $build hub/serve.ts --outdir "$out/hub" >/dev/null
