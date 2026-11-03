@@ -2426,7 +2426,7 @@ index 0000000000000000000000000000000000000000..1ed8764f8d18a3b1d41e15298564731e
 +}
 diff --git a/external_plugins/buzz/bun.lock b/external_plugins/buzz/bun.lock
 new file mode 100644
-index 0000000000000000000000000000000000000000..b7407c2deb1fa7b2fe56e841ca2dc00c0b5a7afa
+index 0000000000000000000000000000000000000000..2f9f6b9928dc237ab8472f11a02edf8a4b82253e
 --- /dev/null
 +++ b/external_plugins/buzz/bun.lock
 @@ -0,0 +1,260 @@
@@ -2577,7 +2577,7 @@ index 0000000000000000000000000000000000000000..b7407c2deb1fa7b2fe56e841ca2dc00c
 +
 +    "inherits": ["inherits@2.0.4", "", {}, "sha512-k/vGaX4/Yla3WzyMCvTQOXYeIHvqOKtnqBduzTHpzpQZzAskKMhZ2K+EnBiSM9zGSoIFeMpXKxa4dYeZIQqewQ=="],
 +
-+    "ip-address": ["ip-address@10.7.5", "", {}, "sha512-t2v0rkILYv9WXmSL7TpAaU3HXgaFYOPUcH3QHgwQ++gpJuH3bqyMy4Fvt/DJCTKwzH3Cf+bAp5W/mFL39KPLzA=="],
++    "ip-address": ["ip-address@10.7.6", "", {}, "sha512-00LYkM6byILa9eQIx6qoaXCM40xTLd56AZ4vyaPW3YTyb49VZYPo5xsiAq4tuQ54GH4R7gVdYScJ1B7B77PuTg=="],
 +
 +    "ipaddr.js": ["ipaddr.js@1.9.1", "", {}, "sha512-0KI/607xoxSToH7GjN1FfSbLoU0+btTicjsQSWQlh/hZykN8KpmMf7uYwPW3R+akZ6R/w18ZlXSHBYXiYUPO3g=="],
 +
