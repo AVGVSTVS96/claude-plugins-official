@@ -1,5 +1,5 @@
 diff --git a/.claude-plugin/marketplace.json b/.claude-plugin/marketplace.json
-index 1a8b7911598802f5e31568d2c678e8f00adc36f5..33830713f93ccb66015c62948a56bb27810ebc35 100644
+index c2664802bd948cc53fd9bcb6c408939548200b1a..9a5289ad6edf11d1871be65984e8b15b547562f5 100644
 --- a/.claude-plugin/marketplace.json
 +++ b/.claude-plugin/marketplace.json
 @@ -1,6 +1,6 @@
@@ -29,7 +29,7 @@ index 1a8b7911598802f5e31568d2c678e8f00adc36f5..33830713f93ccb66015c62948a56bb27
      {
        "name": "canva",
        "description": "Create, edit, review, resize, and brand-check Canva designs with the Canva MCP server.",
-@@ -4422,6 +4434,12 @@
+@@ -4425,6 +4437,12 @@
          "sha": "10573bac239b7062a476667eaa574d400335c70e"
        },
        "homepage": "https://github.com/amzn/selling-partner-agentic-toolkit"
