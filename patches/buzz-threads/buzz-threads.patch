@@ -2426,7 +2426,7 @@ index 0000000000000000000000000000000000000000..1ed8764f8d18a3b1d41e15298564731e
 +}
 diff --git a/external_plugins/buzz/bun.lock b/external_plugins/buzz/bun.lock
 new file mode 100644
-index 0000000000000000000000000000000000000000..73dd2434b1d58cab4d1d1e3e867109591536a686
+index 0000000000000000000000000000000000000000..9a16b6c9c395e9506b829915600cb884d76aea0b
 --- /dev/null
 +++ b/external_plugins/buzz/bun.lock
 @@ -0,0 +1,260 @@
@@ -2585,7 +2585,7 @@ index 0000000000000000000000000000000000000000..73dd2434b1d58cab4d1d1e3e86710959
 +
 +    "isexe": ["isexe@2.0.0", "", {}, "sha512-RHxMLp9lnKHGHRng9QFhRCMbYAcVpn69smSGcq3f36xjgVVWThj4qqLbTLlq7Ssj8B+fIQ1EuCEGI2lKsyQeIw=="],
 +
-+    "jose": ["jose@6.2.15", "", {}, "sha512-qdF6ewcZARtef63fJ9AKKZPgxw+t7USH6HLXYcD4CrdmSvDp79rpJSPFEKc90QBeGS63u1KQtN2MZQHC0yDIzA=="],
++    "jose": ["jose@6.2.16", "", {}, "sha512-4LSJpbuBuPdGrONCdZUy0xnxtLf8eEz+EY0SMXdHQEBU7bgUHDVblU/JAjryv3wID9/LK7/YuwFwq+AQNfMscQ=="],
 +
 +    "json-schema-to-ts": ["json-schema-to-ts@3.1.1", "", { "dependencies": { "@babel/runtime": "^7.18.3", "ts-algebra": "^2.0.0" } }, "sha512-+DWg8jCJG2TEnpy7kOm/7/AxaYoaRbjVB4LFZLySZlWn8exGs3A4OLJR966cVvU26N7X9TWxl+Jsw7dzAqKT6g=="],
 +
