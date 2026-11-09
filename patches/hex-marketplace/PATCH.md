@@ -2,7 +2,7 @@
 format: patch-md/v0.1
 id: hex-marketplace
 summary: Name the marketplace hex, so it installs beside the official one and its plugins load as telegram@hex, and list the Buzz and voice channels.
-baseline: 0412be76f50ab4f4f8abff3753efa9269fbbca5b
+baseline: ea686bae367e20a4092b2fd4327ffd299bb60f24
 patch_file: hex-marketplace.patch
 patch_sha256: 6b1481dde37e334c0cf102c531945aca6d553262af3b5d88ac05f4dd15ec2517
 ---
