@@ -1,5 +1,5 @@
 diff --git a/README.md b/README.md
-index 43104e240ff500c762adebb0c31dc4b7ff7b50dd..5148eab2e4aa03519061511ee9662f97bed834f4 100644
+index 930803c3a44f9e6d65ede9a2333336968f54085e..690647d214522446a5e3ce005a6bdcaea04c6d80 100644
 --- a/README.md
 +++ b/README.md
 @@ -1,3 +1,27 @@
@@ -27,6 +27,6 @@ index 43104e240ff500c762adebb0c31dc4b7ff7b50dd..5148eab2e4aa03519061511ee9662f97
 +>
 +> Everything below is the upstream README, unchanged.
 +
- # Claude Code Plugins Directory
+ # Claude Plugins
  
- A curated directory of high-quality plugins for Claude Code.
+ Anthropic's own plugins for Claude, and the `claude-plugins-official` marketplace for Claude Code.

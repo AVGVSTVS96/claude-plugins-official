@@ -2,7 +2,7 @@
 format: patch-md/v0.1
 id: telegram-topics
 summary: Rework the Telegram channel so every forum topic in a group is its own Claude Code session, through the thread hub.
-baseline: e37d307bd9f85dab6fea5dfb5e3dc146753b2d2d
+baseline: b5b01ac4f889fec0c4c6bb89f27ca7c8574473f6
 patch_file: telegram-topics.patch
 patch_sha256: 0ebb57d87ef86b5b9e2998bb03f1881456052215df7d2ba3dff1acb78297051a
 ---

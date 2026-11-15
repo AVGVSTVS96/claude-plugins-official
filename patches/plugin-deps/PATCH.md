@@ -2,9 +2,9 @@
 format: patch-md/v0.1
 id: plugin-deps
 summary: Lock the forked Telegram and Discord plugins to current releases of their dependencies; upstream's lockfiles still pin the versions they shipped with.
-baseline: e37d307bd9f85dab6fea5dfb5e3dc146753b2d2d
+baseline: b5b01ac4f889fec0c4c6bb89f27ca7c8574473f6
 patch_file: plugin-deps.patch
-patch_sha256: 8c797c1250bc9b159ec9f921cb4339a62b90b95921b862d9c05150c8404755a5
+patch_sha256: 385308a81087c89f5801c224f38159f01327da9eb8c0fe4abb1b055bcb0b17df
 ---
 
 ## Intent
