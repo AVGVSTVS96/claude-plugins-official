@@ -1,5 +1,5 @@
 diff --git a/.claude-plugin/marketplace.json b/.claude-plugin/marketplace.json
-index 58c2561c07bd7011bda48e5b15d361a480b3b9ec..e7957c55fbf9b73b80e93b2b2c2df5fccb0d40ef 100644
+index 0543b2133b72ebe1bab96a1fdbed8344182aec2b..d2aa4758d07b4b4af7db992428fc77ae2f2b2650 100644
 --- a/.claude-plugin/marketplace.json
 +++ b/.claude-plugin/marketplace.json
 @@ -1,6 +1,6 @@
@@ -10,7 +10,7 @@ index 58c2561c07bd7011bda48e5b15d361a480b3b9ec..e7957c55fbf9b73b80e93b2b2c2df5fc
    "description": "Directory of popular Claude Code extensions including development tools, productivity plugins, and MCP integrations",
    "owner": {
      "name": "Anthropic",
-@@ -649,6 +649,18 @@
+@@ -648,6 +648,18 @@
        },
        "homepage": "https://buildkite.com"
      },
@@ -29,7 +29,7 @@ index 58c2561c07bd7011bda48e5b15d361a480b3b9ec..e7957c55fbf9b73b80e93b2b2c2df5fc
      {
        "name": "canva",
        "description": "Create, edit, review, resize, and brand-check Canva designs with the Canva MCP server.",
-@@ -4447,6 +4459,12 @@
+@@ -4446,6 +4458,12 @@
          "sha": "10573bac239b7062a476667eaa574d400335c70e"
        },
        "homepage": "https://github.com/amzn/selling-partner-agentic-toolkit"

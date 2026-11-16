@@ -1,5 +1,5 @@
 diff --git a/external_plugins/discord/bun.lock b/external_plugins/discord/bun.lock
-index 0227b3c45511846b7b89c5dc07ca02ef70ffd12f..6b1a362d38ac14b7a34b1fa3d64d1d3e6e14f351 100644
+index 0227b3c45511846b7b89c5dc07ca02ef70ffd12f..3d6f2cf8896f2d1a69693532879618765d5fc38c 100644
 --- a/external_plugins/discord/bun.lock
 +++ b/external_plugins/discord/bun.lock
 @@ -5,237 +5,104 @@
@@ -116,7 +116,7 @@ index 0227b3c45511846b7b89c5dc07ca02ef70ffd12f..6b1a362d38ac14b7a34b1fa3d64d1d3e
 +    "@snazzah/davey-win32-x64-msvc": ["@snazzah/davey-win32-x64-msvc@0.1.12", "", { "os": "win32", "cpu": "x64" }, "sha512-AgUA3itPDVkxQq7RIkgE1thCiWePwWjyfOZefBBxGIlMWpRUOSwF4vY9kNLnrScyJcFULdR+Zm8PwiwV8/RKnw=="],
  
 -    "escape-html": ["escape-html@1.0.3", "", {}, "sha512-NiSupZ4OeuGwr68lGIeym/ksIZMJodUGOSCZ/FSnTxcrekbvqrgdUxlJOMpijaKZVjAJrWrGs/6Jy8OMuyj9ow=="],
-+    "@tybys/wasm-util": ["@tybys/wasm-util@0.10.4", "", { "dependencies": { "tslib": "^2.4.0" } }, "sha512-W3c4gRigFS0T/Ma4qIYF3GDAc5AQdHb1yL5znJT1Zv1YaD9Kitx656wBjvr19qbiosmZT8lWDM5BEMynUqX65A=="],
++    "@tybys/wasm-util": ["@tybys/wasm-util@0.10.5", "", { "dependencies": { "tslib": "^2.4.0" } }, "sha512-dOGOPxlaNV+G046mZzN+9C0dAcQZeSKcXiVaM0TYy/LM4ttTmgSBDxYfovcYI8Em3+eAbiAYpvWLOv8+ZVRJKA=="],
  
 -    "etag": ["etag@1.8.1", "", {}, "sha512-aIL5Fx7mawVa300al2BnEE4iNvo1qETxLrPI/o05L7z6go7fCw1J6EQmbK4FmJ2AS7kgVF/KEZWufBfdClMcPg=="],
 +    "@types/node": ["@types/node@26.6.6", "", { "dependencies": { "undici-types": "~8.9.0" } }, "sha512-MzQj+8Kx3XI40OmUAE6Qoh58ZMNstNNMwn2nfd3qWsfe7nDNSqJNzes4njhz6AHwrSHOffSLwXU6yb474Q4aog=="],
