@@ -1,12 +1,12 @@
 diff --git a/external_plugins/discord/.claude-plugin/plugin.json b/external_plugins/discord/.claude-plugin/plugin.json
-index 6418b1ecfdcd8b1711bc05cb978bebd66f33cff4..61a35ef020f1c2575feec31a20bcbf818e45db59 100644
+index 0bae2cbc58bb6c4c84714816c160d7cf67100316..61a35ef020f1c2575feec31a20bcbf818e45db59 100644
 --- a/external_plugins/discord/.claude-plugin/plugin.json
 +++ b/external_plugins/discord/.claude-plugin/plugin.json
 @@ -1,7 +1,7 @@
  {
    "name": "discord",
 -  "description": "Discord channel for Claude Code \u2014 messaging bridge with built-in access control. Manage pairing, allowlists, and policy via /discord:access.",
--  "version": "0.0.4",
+-  "version": "0.0.6",
 +  "description": "Discord channel where every thread is its own session. Fork of claude-plugins-official/discord.",
 +  "version": "0.1.0",
    "keywords": [
@@ -189,10 +189,10 @@ index 550f06acb7eec0c22b5e35bd91cf90ae632aeec7..00000000000000000000000000000000
 -}
 -```
 diff --git a/external_plugins/discord/README.md b/external_plugins/discord/README.md
-index ad04f6fa437bfa013f72f71de2b460f3eedeeeee..3c0463a35705a1501414b8f58e2d507760daaf68 100644
+index c11a699a7938d852d9ec5b5c356f9b4b4d2c0a9c..3c0463a35705a1501414b8f58e2d507760daaf68 100644
 --- a/external_plugins/discord/README.md
 +++ b/external_plugins/discord/README.md
-@@ -1,111 +1,9 @@
+@@ -1,114 +1,9 @@
  # Discord
  
 -Connect a Discord bot to your Claude Code with an MCP server.
@@ -231,6 +231,7 @@ index ad04f6fa437bfa013f72f71de2b460f3eedeeeee..3c0463a35705a1501414b8f58e2d5077
 -- View Channels
 -- Send Messages
 -- Send Messages in Threads
+-- Create Public Threads
 -- Read Message History
 -- Attach Files
 -- Add Reactions
@@ -292,9 +293,11 @@ index ad04f6fa437bfa013f72f71de2b460f3eedeeeee..3c0463a35705a1501414b8f58e2d5077
 -| --- | --- |
 -| `reply` | Send to a channel. Takes `chat_id` + `text`, optionally `reply_to` (message ID) for native threading and `files` (absolute paths) for attachments — max 10 files, 25MB each. Auto-chunks; files attach to the first chunk. Returns the sent message ID(s). |
 -| `react` | Add an emoji reaction to any message by ID. Unicode emoji work directly; custom emoji need `<:name:id>` form. |
+-| `list_emojis` | List the custom emoji the bot can use in a chat, in the `<:name:id>` form `react` and `reply` need. A server channel lists that server's emoji; a DM lists those of servers with an opted-in channel. The application's own emoji (Developer Portal → Emojis) are always included. Optional `query` filters by name; capped at 200 per call. |
 -| `edit_message` | Edit a message the bot previously sent. Useful for "working…" → result progress updates. Only works on the bot's own messages. |
 -| `fetch_messages` | Pull recent history from a channel (oldest-first). Capped at 100 per call. Each line includes the message ID so the model can `reply_to` it; messages with attachments are marked `+Natt`. Discord's search API isn't exposed to bots, so this is the only lookback. |
 -| `download_attachment` | Download all attachments from a specific message by ID to `~/.claude/channels/discord/inbox/`. Returns file paths + metadata. Use when `fetch_messages` shows a message has attachments. |
+-| `create_thread` | Start a public thread in an opted-in text or announcement channel. Takes `chat_id` + `name`, optionally `message_id` to start from a message. Returns the thread ID, which works as `chat_id` in the other tools. The thread follows its parent channel's access rules. Needs the Create Public Threads permission — if you invited the bot without it, add it to the bot's role. |
 -
 -Inbound messages trigger a typing indicator automatically — Discord shows
 -"botname is typing…" while the assistant works on a response.
@@ -311,10 +314,10 @@ index ad04f6fa437bfa013f72f71de2b460f3eedeeeee..3c0463a35705a1501414b8f58e2d5077
 +The bot token lives in `~/.claude/channels/hex/discord/.env` as `DISCORD_BOT_TOKEN=…`, and `access.json` there holds `allowFrom`, the Discord user ids allowed to talk to it. The bot needs the Message Content intent, and in its server: View Channels, Send Messages, Send Messages in Threads, Create Public Threads, Manage Threads, Read Message History, Attach Files, Add Reactions, Pin Messages, Send Polls, and Connect and Speak for calls. Its slash commands (`/model`, `/effort`, `/compact`, `/stop`) register on connect.
 diff --git a/external_plugins/discord/bot.test.ts b/external_plugins/discord/bot.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..0cdf34bad072840b1bd1b22a906a578c96ff2c55
+index 0000000000000000000000000000000000000000..4d7db108c194085528c6de2bbef2cb46872215fe
 --- /dev/null
 +++ b/external_plugins/discord/bot.test.ts
-@@ -0,0 +1,622 @@
+@@ -0,0 +1,652 @@
 +import { afterAll, beforeAll, expect, mock, test } from 'bun:test'
 +import { connect as netConnect } from 'net'
 +import { connect } from '../../hub/testing.ts'
@@ -441,6 +444,16 @@ index 0000000000000000000000000000000000000000..0cdf34bad072840b1bd1b22a906a578c
 +const here = channel('5000', { name: 'desk anchors', type: ChannelType.PublicThread, parent: general })
 +const live = (where: Channel) => ({ inGuild: () => true, channel: where, mentions: { has: () => false }, react: async () => {} })
 +
++const roles = (...ids: string[]) => ({ cache: new Collection(ids.map(id => [id, { id }])) })
++const emoji = (id: string, name: string, fields: Channel = {}) => ({ id, name, animated: false, available: true, roles: roles(), ...fields })
++const serverEmojis = [
++  emoji('8000', 'shipit'),
++  emoji('8001', 'party_parrot', { animated: true }),
++  emoji('8002', 'lost_boost', { available: false }),
++  emoji('8003', 'mods_only', { roles: roles('6002') }),
++  emoji('8004', 'shipped', { roles: roles('6001') }),
++]
++
 +class Client {
 +  user = { id: BOT, tag: 'hex#0000' }
 +  channels = {
@@ -449,7 +462,14 @@ index 0000000000000000000000000000000000000000..0cdf34bad072840b1bd1b22a906a578c
 +      return channels.get(id)
 +    },
 +  }
-+  guilds = { cache: new Collection([[GUILD, { id: GUILD, systemChannel: general, channels: { cache: channels, fetch: async () => new Collection([...channels].filter(([, ch]) => ch.guildId === GUILD && !ch.isThread())) } }]]) }
++  guilds = { cache: new Collection([[GUILD, {
++    id: GUILD,
++    systemChannel: general,
++    channels: { cache: channels, fetch: async () => new Collection([...channels].filter(([, ch]) => ch.guildId === GUILD && !ch.isThread())) },
++    members: { me: { roles: { cache: new Collection([['6001', {}]]) } } },
++    emojis: { fetch: async () => new Collection(serverEmojis.map(e => [e.id, e])) },
++  }]]) }
++  application = { emojis: { fetch: async () => new Collection([['8100', emoji('8100', 'hexlogo')]]) } }
 +  users = { fetch: async (id: string) => (id === OWNER ? owner : { id, username: 'someone' }) }
 +  rest = {
 +    get: async (route: string, { query }: { query: URLSearchParams }) => (done.push({ get: route, query: query.toString() }), found),
@@ -574,6 +594,19 @@ index 0000000000000000000000000000000000000000..0cdf34bad072840b1bd1b22a906a578c
 +
 +test('list_channels names the text, announcement and forum channels the bot can read', async () => {
 +  expect((await call('list_channels', {})).text).toBe(`#open-source  (id: ${openSource.id})\n#general  (id: ${general.id})\n#news  (id: ${news.id})\n#ideas  (id: ${ideas.id}, forum)`)
++})
++
++test('list_emojis lists the server\'s usable custom emoji and the application\'s own, filtered by query', async () => {
++  expect((await call('list_emojis', {})).text).toBe('<:shipit:8000>\n<a:party_parrot:8001>\n<:shipped:8004>\n<:hexlogo:8100>')
++  expect((await call('list_emojis', { query: ':SHIP' })).text).toBe('<:shipit:8000>\n<:shipped:8004>')
++  expect((await call('list_emojis', { query: 'nope' })).text).toBe('(no custom emoji match "nope")')
++})
++
++test('the system message that opens a thread started from a message never reaches a session', async () => {
++  const before = received.length
++  handlers.get('messageCreate')!({ ...say(here, 7, ''), ...live(here), type: MessageType.ThreadStarterMessage })
++  await Bun.sleep(100)
++  expect(received.length).toBe(before)
 +})
 +
 +const inbound = (lines: any[], check: (line: any) => boolean) => until(() => lines.find(line => line.type === 'inbound' && check(line)))
@@ -939,10 +972,10 @@ index 0000000000000000000000000000000000000000..0cdf34bad072840b1bd1b22a906a578c
 +})
 diff --git a/external_plugins/discord/bot.ts b/external_plugins/discord/bot.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..b04e76da178e45a0b2b2560d9f643ed14b481ed6
+index 0000000000000000000000000000000000000000..fd02c22b6d22f903ad05ec1dc97a55630204d1e0
 --- /dev/null
 +++ b/external_plugins/discord/bot.ts
-@@ -0,0 +1,978 @@
+@@ -0,0 +1,1021 @@
 +#!/usr/bin/env bun
 +import {
 +  Client,
@@ -980,6 +1013,7 @@ index 0000000000000000000000000000000000000000..b04e76da178e45a0b2b2560d9f643ed1
 +  type StringSelectMenuComponent,
 +  type RESTGetAPIGuildMessagesSearchResult,
 +  type Attachment,
++  type Emoji,
 +  type Collection,
 +  type Channel,
 +  type NewsChannel,
@@ -1047,6 +1081,7 @@ index 0000000000000000000000000000000000000000..b04e76da178e45a0b2b2560d9f643ed1
 +
 +const MAX_CHUNK_LIMIT = 2000
 +const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
++const MAX_EMOJIS_LISTED = 200
 +const READ = [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory]
 +
 +// reply's files param takes any path, but channel state and .env files (tokens)
@@ -1330,6 +1365,43 @@ index 0000000000000000000000000000000000000000..b04e76da178e45a0b2b2560d9f643ed1
 +    return found.map(ch => `#${ch!.name}  (id: ${ch!.id}${isForum(ch) ? ', forum' : ''})`).join('\n') || '(none)'
 +  }
 +
++  // The bot's server's emoji, from a thread or a DM alike, and the application's own.
++  async function listEmojis(query: string): Promise<string> {
++    const servers = client.guilds.cache.first(1)
++    const emojis: Emoji[] = []
++    const failed: string[] = []
++    for (const guild of servers) {
++      try {
++        const myRoles = guild.members.me?.roles.cache
++        for (const e of (await guild.emojis.fetch()).values()) {
++          // Skip emoji the server lost with its boosts, and ones limited to roles the bot lacks.
++          if (e.available === false) continue
++          if (e.roles.cache.size > 0 && !e.roles.cache.some(r => myRoles?.has(r.id) ?? false)) continue
++          emojis.push(e)
++        }
++      } catch (err) {
++        failed.push(`server ${guild.id} (${(err as Error).message})`)
++      }
++    }
++    try {
++      if (!client.application) throw new Error('bot not connected yet')
++      emojis.push(...(await client.application.emojis.fetch()).values())
++    } catch (err) {
++      failed.push(`the application (${(err as Error).message})`)
++    }
++    if (failed.length === servers.length + 1) throw new Error(`could not fetch emoji of ${failed.join(', ')}`)
++
++    query = query.replaceAll(':', '').toLowerCase()
++    const matches = emojis.filter(e => e.name?.toLowerCase().includes(query))
++    const lines = matches.slice(0, MAX_EMOJIS_LISTED).map(e => `<${e.animated ? 'a' : ''}:${e.name}:${e.id}>`)
++    if (matches.length === 0) lines.push(query ? `(no custom emoji match "${query}")` : '(no custom emoji found)')
++    if (matches.length > MAX_EMOJIS_LISTED) {
++      lines.push(`(showing ${MAX_EMOJIS_LISTED} of ${matches.length} — pass query to narrow)`)
++    }
++    if (failed.length > 0) lines.push(`(partial list — could not fetch emoji of ${failed.join(', ')})`)
++    return lines.join('\n')
++  }
++
 +  const link = (thread: string) => `https://discord.com/channels/${guild().id}/${thread}`
 +
 +  // A forum takes a thread only as a post, which opens with a message: the about line, or its title.
@@ -1474,6 +1546,7 @@ index 0000000000000000000000000000000000000000..b04e76da178e45a0b2b2560d9f643ed1
 +    }
 +    if (tool === 'fetch_messages') return history(caller, args)
 +    if (tool === 'list_channels') return listChannels()
++    if (tool === 'list_emojis') return listEmojis((args.query as string | undefined) ?? '')
 +    if (tool === 'search_messages') return search(args)
 +    if (tool === 'forward') {
 +      if (!args.thread && !args.channel) throw new Error('name a thread or channel to forward to')
@@ -1878,6 +1951,9 @@ index 0000000000000000000000000000000000000000..b04e76da178e45a0b2b2560d9f643ed1
 +
 +  client.on('messageCreate', msg => {
 +    if (msg.author.bot) return
++    // First message of a thread started from a message: a system pointer back
++    // to that message, with no text of its own.
++    if (msg.type === MessageType.ThreadStarterMessage) return
 +    handleInbound(msg).catch(failure('handleInbound'))
 +  })
 +
@@ -1923,10 +1999,10 @@ index 0000000000000000000000000000000000000000..b04e76da178e45a0b2b2560d9f643ed1
 +}
 diff --git a/external_plugins/discord/channel.ts b/external_plugins/discord/channel.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..a7c315eee0126ee2f8813cdf4e26afdfed333d1e
+index 0000000000000000000000000000000000000000..7fb3a8f9f1de3fcaa7243084b3fe4c95bd308205
 --- /dev/null
 +++ b/external_plugins/discord/channel.ts
-@@ -0,0 +1,224 @@
+@@ -0,0 +1,235 @@
 +import type { ChannelServer } from '../../hub/hub.ts'
 +
 +const titleProperty = { type: 'string', description: 'One word, like a chat name ("Anchors", "Frontier").' }
@@ -1979,7 +2055,7 @@ index 0000000000000000000000000000000000000000..a7c315eee0126ee2f8813cdf4e26afdf
 +    {
 +      name: 'react',
 +      _meta: { 'anthropic/alwaysLoad': true },
-+      description: 'Add an emoji reaction to a Discord message, or take the bot\'s own off with remove. Unicode emoji work directly; custom emoji need the <:name:id> form.',
++      description: 'Add an emoji reaction to a Discord message, or take the bot\'s own off with remove. Unicode emoji work directly; custom emoji need the <:name:id> form from list_emojis.',
 +      inputSchema: {
 +        type: 'object',
 +        properties: {
@@ -1988,6 +2064,17 @@ index 0000000000000000000000000000000000000000..a7c315eee0126ee2f8813cdf4e26afdf
 +          remove: { type: 'boolean', description: 'Remove the bot\'s reaction instead of adding it.' },
 +        },
 +        required: ['message_id', 'emoji'],
++      },
++    },
++    {
++      name: 'list_emojis',
++      description:
++        "List the custom emoji the bot can use, ready to paste into react or reply (<:name:id>, or <a:name:id> when animated): the server's, and the bot application's own. Unicode emoji aren't listed.",
++      inputSchema: {
++        type: 'object',
++        properties: {
++          query: { type: 'string', description: 'Only emoji whose name contains this text (case-insensitive).' },
++        },
 +      },
 +    },
 +    {
@@ -2177,10 +2264,10 @@ index eac89c3befd8ebb90758a9acdf7f400de8c9f298..fdfb6d947889bfc570c83c927a237f09
  }
 diff --git a/external_plugins/discord/server.ts b/external_plugins/discord/server.ts
 deleted file mode 100644
-index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..0000000000000000000000000000000000000000
+index 3f1057e0991495e1cd337e70844fb955101a7adb..0000000000000000000000000000000000000000
 --- a/external_plugins/discord/server.ts
 +++ /dev/null
-@@ -1,900 +0,0 @@
+@@ -1,1009 +0,0 @@
 -#!/usr/bin/env bun
 -/**
 - * Discord channel for Claude Code.
@@ -2205,11 +2292,13 @@ index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..00000000000000000000000000000000
 -  GatewayIntentBits,
 -  Partials,
 -  ChannelType,
+-  MessageType,
 -  ButtonBuilder,
 -  ButtonStyle,
 -  ActionRowBuilder,
 -  type Message,
 -  type Attachment,
+-  type Emoji,
 -  type Interaction,
 -} from 'discord.js'
 -import { randomBytes } from 'crypto'
@@ -2314,6 +2403,7 @@ index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..00000000000000000000000000000000
 -
 -const MAX_CHUNK_LIMIT = 2000
 -const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
+-const MAX_EMOJIS_LISTED = 200
 -
 -// reply's files param takes any path. .env is ~60 bytes and ships as an
 -// upload. Claude can already Read+paste file contents, so this isn't a new
@@ -2726,7 +2816,7 @@ index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..00000000000000000000000000000000
 -    },
 -    {
 -      name: 'react',
--      description: 'Add an emoji reaction to a Discord message. Unicode emoji work directly; custom emoji need the <:name:id> form.',
+-      description: 'Add an emoji reaction to a Discord message. Unicode emoji work directly; custom emoji need the <:name:id> form from list_emojis.',
 -      inputSchema: {
 -        type: 'object',
 -        properties: {
@@ -2735,6 +2825,19 @@ index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..00000000000000000000000000000000
 -          emoji: { type: 'string' },
 -        },
 -        required: ['chat_id', 'message_id', 'emoji'],
+-      },
+-    },
+-    {
+-      name: 'list_emojis',
+-      description:
+-        "List the custom emoji the bot can use in a chat, ready to paste into react or reply (<:name:id>, or <a:name:id> when animated). A server channel lists that server's emoji; a DM lists those of servers with an opted-in channel. The bot application's own emoji are always included. Unicode emoji aren't listed.",
+-      inputSchema: {
+-        type: 'object',
+-        properties: {
+-          chat_id: { type: 'string' },
+-          query: { type: 'string', description: 'Only emoji whose name contains this text (case-insensitive).' },
+-        },
+-        required: ['chat_id'],
 -      },
 -    },
 -    {
@@ -2776,6 +2879,23 @@ index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..00000000000000000000000000000000
 -          },
 -        },
 -        required: ['channel'],
+-      },
+-    },
+-    {
+-      name: 'create_thread',
+-      description:
+-        "Start a public thread in a server text or announcement channel. Use when someone asks for a thread, or to move a long side topic out of the channel. Returns the thread ID — post in it with reply, passing that ID as chat_id. @mention someone in the thread (<@user_id>) to add them to it. The parent channel's access rules, including its mention requirement, apply inside the thread.",
+-      inputSchema: {
+-        type: 'object',
+-        properties: {
+-          chat_id: { type: 'string', description: 'The parent channel.' },
+-          name: { type: 'string', description: 'Thread title, 1-100 characters.' },
+-          message_id: {
+-            type: 'string',
+-            description: 'Message in the parent channel to start the thread from, usually the one you are answering. Prefer this; omit it only for a standalone thread.',
+-          },
+-        },
+-        required: ['chat_id', 'name'],
 -      },
 -    },
 -  ],
@@ -2866,6 +2986,48 @@ index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..00000000000000000000000000000000
 -        await msg.react(args.emoji as string)
 -        return { content: [{ type: 'text', text: 'reacted' }] }
 -      }
+-      case 'list_emojis': {
+-        const ch = await fetchAllowedChannel(args.chat_id as string)
+-        // A DM has no server. Use the servers with an opted-in channel, not
+-        // every server the bot happens to be in.
+-        const channels = ch.type === ChannelType.DM
+-          ? await Promise.all(Object.keys(loadAccess().groups).map(id => client.channels.fetch(id).catch(() => null)))
+-          : [ch]
+-        const guilds = new Set(channels.flatMap(c => (c && 'guild' in c ? [c.guild] : [])))
+-
+-        const emojis: Emoji[] = []
+-        const failed: string[] = []
+-        for (const guild of guilds) {
+-          try {
+-            const myRoles = guild.members.me?.roles.cache
+-            for (const e of (await guild.emojis.fetch()).values()) {
+-              // Skip emoji the server lost with its boosts, and ones limited to roles the bot lacks.
+-              if (e.available === false) continue
+-              if (e.roles.cache.size > 0 && !e.roles.cache.some(r => myRoles?.has(r.id) ?? false)) continue
+-              emojis.push(e)
+-            }
+-          } catch (err) {
+-            failed.push(`server ${guild.id} (${(err as Error).message})`)
+-          }
+-        }
+-        try {
+-          if (!client.application) throw new Error('bot not connected yet')
+-          emojis.push(...(await client.application.emojis.fetch()).values())
+-        } catch (err) {
+-          failed.push(`the application (${(err as Error).message})`)
+-        }
+-        if (failed.length === guilds.size + 1) throw new Error(`could not fetch emoji of ${failed.join(', ')}`)
+-
+-        const query = ((args.query as string | undefined) ?? '').replaceAll(':', '').toLowerCase()
+-        const matches = emojis.filter(e => e.name?.toLowerCase().includes(query))
+-        const lines = matches.slice(0, MAX_EMOJIS_LISTED).map(e => `<${e.animated ? 'a' : ''}:${e.name}:${e.id}>`)
+-        if (matches.length === 0) lines.push(query ? `(no custom emoji match "${query}")` : '(no custom emoji found)')
+-        if (matches.length > MAX_EMOJIS_LISTED) {
+-          lines.push(`(showing ${MAX_EMOJIS_LISTED} of ${matches.length} — pass query to narrow)`)
+-        }
+-        if (failed.length > 0) lines.push(`(partial list — could not fetch emoji of ${failed.join(', ')})`)
+-        return { content: [{ type: 'text', text: lines.join('\n') }] }
+-      }
 -      case 'edit_message': {
 -        const ch = await fetchAllowedChannel(args.chat_id as string)
 -        const msg = await ch.messages.fetch(args.message_id as string)
@@ -2887,6 +3049,37 @@ index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..00000000000000000000000000000000
 -        return {
 -          content: [{ type: 'text', text: `downloaded ${lines.length} attachment(s):\n${lines.join('\n')}` }],
 -        }
+-      }
+-      case 'create_thread': {
+-        const ch = await fetchAllowedChannel(args.chat_id as string)
+-        if (ch.isThread()) {
+-          throw new Error(`chat_id is already a thread — reply in it, or pass its parent channel ${ch.parentId} to start a new one`)
+-        }
+-        if (ch.type !== ChannelType.GuildText && ch.type !== ChannelType.GuildAnnouncement) {
+-          throw new Error('threads need a server text or announcement channel, not a DM or voice chat')
+-        }
+-        const message_id = args.message_id as string | undefined
+-        let text: string
+-        try {
+-          const thread = await ch.threads.create({ name: args.name as string, startMessage: message_id })
+-          text = `thread created (id: ${thread.id})`
+-        } catch (err) {
+-          const code = (err as { code?: unknown }).code
+-          // Discord API errors: 50001 Missing Access, 50013 Missing Permissions.
+-          if (code === 50001 || code === 50013) {
+-            throw new Error(`${(err as Error).message} — check that the bot has Create Public Threads, View Channel and Read Message History in this channel`)
+-          }
+-          // 10008 Unknown Message.
+-          if (code === 10008) throw new Error(`no message ${message_id} in channel ${ch.id} — it may be deleted or in another channel`)
+-          // 160004: the message already has a thread, which shares the message's ID.
+-          if (code !== 160004) throw err
+-          text = `message already has a thread, which keeps its current name (id: ${message_id})`
+-        }
+-        text += ' — use it as chat_id to reply there.'
+-        if (loadAccess().groups[ch.id]?.requireMention ?? true) {
+-          text += ' As in the parent channel, people must @mention you or reply to one of your messages to reach you there.'
+-        }
+-        return { content: [{ type: 'text', text }] }
 -      }
 -      default:
 -        return {
@@ -2987,6 +3180,9 @@ index 0595fc7ecf2f974a7c7f4f743ab8d3b1dd7f0918..00000000000000000000000000000000
 -
 -client.on('messageCreate', msg => {
 -  if (msg.author.bot) return
+-  // First message of a thread started from a message: a system pointer back
+-  // to that message, with no text of its own.
+-  if (msg.type === MessageType.ThreadStarterMessage) return
 -  handleInbound(msg).catch(e => process.stderr.write(`discord: handleInbound failed: ${e}\n`))
 -})
 -

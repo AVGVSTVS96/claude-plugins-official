@@ -2426,7 +2426,7 @@ index 0000000000000000000000000000000000000000..1ed8764f8d18a3b1d41e15298564731e
 +}
 diff --git a/external_plugins/buzz/bun.lock b/external_plugins/buzz/bun.lock
 new file mode 100644
-index 0000000000000000000000000000000000000000..989c41decb82db699fcacaff166fc5db4cd289c2
+index 0000000000000000000000000000000000000000..bcd5758192e019d6b09b8d0552df02177753b3c5
 --- /dev/null
 +++ b/external_plugins/buzz/bun.lock
 @@ -0,0 +1,260 @@
@@ -2585,7 +2585,7 @@ index 0000000000000000000000000000000000000000..989c41decb82db699fcacaff166fc5db
 +
 +    "isexe": ["isexe@2.0.0", "", {}, "sha512-RHxMLp9lnKHGHRng9QFhRCMbYAcVpn69smSGcq3f36xjgVVWThj4qqLbTLlq7Ssj8B+fIQ1EuCEGI2lKsyQeIw=="],
 +
-+    "jose": ["jose@6.2.17", "", {}, "sha512-wOuK9V1yujQFH5S0ZWmLcDZN7+IKh9bUCC2ZPCf2HDlol3WWHy+PPyNjEI75FXRLMp3vDKQcupP59xhVU95hcg=="],
++    "jose": ["jose@6.2.18", "", {}, "sha512-doV4thUwgkrycJH4yLeqwTGIIZphHl+pk7CPReuMIhYhncmgzdko85MaCG4YQFTxqMFr1/oEH32tZuKKovcDEg=="],
 +
 +    "json-schema-to-ts": ["json-schema-to-ts@3.1.1", "", { "dependencies": { "@babel/runtime": "^7.18.3", "ts-algebra": "^2.0.0" } }, "sha512-+DWg8jCJG2TEnpy7kOm/7/AxaYoaRbjVB4LFZLySZlWn8exGs3A4OLJR966cVvU26N7X9TWxl+Jsw7dzAqKT6g=="],
 +
@@ -2611,7 +2611,7 @@ index 0000000000000000000000000000000000000000..989c41decb82db699fcacaff166fc5db
 +
 +    "object-assign": ["object-assign@4.1.1", "", {}, "sha512-rJgTQnkUnH1sFw8yT6VSU3zD3sWmu6sZhIseY8VX+GRu3P6F7Fu+JNDoXfklElbLJSnc3FUQHVe4cU5hj+BcUg=="],
 +
-+    "object-inspect": ["object-inspect@1.13.4", "", {}, "sha512-W67iLl4J2EXEGTbfeHCffrjDfitvLANg0UlX3wFUUSTx92KXRFegMHUVgSqE+wvhAbi4WqjGg9czysTV2Epbew=="],
++    "object-inspect": ["object-inspect@1.14.0", "", {}, "sha512-IVgHNlp/jwQX271+Xzoq9LZNTWXxZK+cEOrGBOBxXNbn7fapnZ+Ts6TVMgNOuAezwG2wdtnMX97tTPK6VEnuOQ=="],
 +
 +    "on-finished": ["on-finished@2.4.2", "", { "dependencies": { "ee-first": "1.1.1" } }, "sha512-ATWUv387i+nLD49EiDoOft5scf32Vsdz3ktrQJG9bi7jRFmaXTssvyvj1EmeKVVgvesbqUtvQQvaS2TpTukAZQ=="],
 +

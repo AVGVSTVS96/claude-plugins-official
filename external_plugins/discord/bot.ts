@@ -35,6 +35,7 @@ import {
   type StringSelectMenuComponent,
   type RESTGetAPIGuildMessagesSearchResult,
   type Attachment,
+  type Emoji,
   type Collection,
   type Channel,
   type NewsChannel,
@@ -102,6 +103,7 @@ function loadAccess(): Access {
 
 const MAX_CHUNK_LIMIT = 2000
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
+const MAX_EMOJIS_LISTED = 200
 const READ = [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.ReadMessageHistory]
 
 // reply's files param takes any path, but channel state and .env files (tokens)
@@ -385,6 +387,43 @@ function serve(token: string) {
     return found.map(ch => `#${ch!.name}  (id: ${ch!.id}${isForum(ch) ? ', forum' : ''})`).join('\n') || '(none)'
   }
 
+  // The bot's server's emoji, from a thread or a DM alike, and the application's own.
+  async function listEmojis(query: string): Promise<string> {
+    const servers = client.guilds.cache.first(1)
+    const emojis: Emoji[] = []
+    const failed: string[] = []
+    for (const guild of servers) {
+      try {
+        const myRoles = guild.members.me?.roles.cache
+        for (const e of (await guild.emojis.fetch()).values()) {
+          // Skip emoji the server lost with its boosts, and ones limited to roles the bot lacks.
+          if (e.available === false) continue
+          if (e.roles.cache.size > 0 && !e.roles.cache.some(r => myRoles?.has(r.id) ?? false)) continue
+          emojis.push(e)
+        }
+      } catch (err) {
+        failed.push(`server ${guild.id} (${(err as Error).message})`)
+      }
+    }
+    try {
+      if (!client.application) throw new Error('bot not connected yet')
+      emojis.push(...(await client.application.emojis.fetch()).values())
+    } catch (err) {
+      failed.push(`the application (${(err as Error).message})`)
+    }
+    if (failed.length === servers.length + 1) throw new Error(`could not fetch emoji of ${failed.join(', ')}`)
+
+    query = query.replaceAll(':', '').toLowerCase()
+    const matches = emojis.filter(e => e.name?.toLowerCase().includes(query))
+    const lines = matches.slice(0, MAX_EMOJIS_LISTED).map(e => `<${e.animated ? 'a' : ''}:${e.name}:${e.id}>`)
+    if (matches.length === 0) lines.push(query ? `(no custom emoji match "${query}")` : '(no custom emoji found)')
+    if (matches.length > MAX_EMOJIS_LISTED) {
+      lines.push(`(showing ${MAX_EMOJIS_LISTED} of ${matches.length} — pass query to narrow)`)
+    }
+    if (failed.length > 0) lines.push(`(partial list — could not fetch emoji of ${failed.join(', ')})`)
+    return lines.join('\n')
+  }
+
   const link = (thread: string) => `https://discord.com/channels/${guild().id}/${thread}`
 
   // A forum takes a thread only as a post, which opens with a message: the about line, or its title.
@@ -529,6 +568,7 @@ function serve(token: string) {
     }
     if (tool === 'fetch_messages') return history(caller, args)
     if (tool === 'list_channels') return listChannels()
+    if (tool === 'list_emojis') return listEmojis((args.query as string | undefined) ?? '')
     if (tool === 'search_messages') return search(args)
     if (tool === 'forward') {
       if (!args.thread && !args.channel) throw new Error('name a thread or channel to forward to')
@@ -933,6 +973,9 @@ function serve(token: string) {
 
   client.on('messageCreate', msg => {
     if (msg.author.bot) return
+    // First message of a thread started from a message: a system pointer back
+    // to that message, with no text of its own.
+    if (msg.type === MessageType.ThreadStarterMessage) return
     handleInbound(msg).catch(failure('handleInbound'))
   })
 

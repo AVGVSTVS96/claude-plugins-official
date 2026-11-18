@@ -50,7 +50,7 @@ export const server: ChannelServer = {
     {
       name: 'react',
       _meta: { 'anthropic/alwaysLoad': true },
-      description: 'Add an emoji reaction to a Discord message, or take the bot\'s own off with remove. Unicode emoji work directly; custom emoji need the <:name:id> form.',
+      description: 'Add an emoji reaction to a Discord message, or take the bot\'s own off with remove. Unicode emoji work directly; custom emoji need the <:name:id> form from list_emojis.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -59,6 +59,17 @@ export const server: ChannelServer = {
           remove: { type: 'boolean', description: 'Remove the bot\'s reaction instead of adding it.' },
         },
         required: ['message_id', 'emoji'],
+      },
+    },
+    {
+      name: 'list_emojis',
+      description:
+        "List the custom emoji the bot can use, ready to paste into react or reply (<:name:id>, or <a:name:id> when animated): the server's, and the bot application's own. Unicode emoji aren't listed.",
+      inputSchema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Only emoji whose name contains this text (case-insensitive).' },
+        },
       },
     },
     {

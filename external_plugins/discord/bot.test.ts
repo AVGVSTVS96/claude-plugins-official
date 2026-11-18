@@ -124,6 +124,16 @@ const ideas = channel('4006', { name: 'ideas', type: ChannelType.GuildForum })
 const here = channel('5000', { name: 'desk anchors', type: ChannelType.PublicThread, parent: general })
 const live = (where: Channel) => ({ inGuild: () => true, channel: where, mentions: { has: () => false }, react: async () => {} })
 
+const roles = (...ids: string[]) => ({ cache: new Collection(ids.map(id => [id, { id }])) })
+const emoji = (id: string, name: string, fields: Channel = {}) => ({ id, name, animated: false, available: true, roles: roles(), ...fields })
+const serverEmojis = [
+  emoji('8000', 'shipit'),
+  emoji('8001', 'party_parrot', { animated: true }),
+  emoji('8002', 'lost_boost', { available: false }),
+  emoji('8003', 'mods_only', { roles: roles('6002') }),
+  emoji('8004', 'shipped', { roles: roles('6001') }),
+]
+
 class Client {
   user = { id: BOT, tag: 'hex#0000' }
   channels = {
@@ -132,7 +142,14 @@ class Client {
       return channels.get(id)
     },
   }
-  guilds = { cache: new Collection([[GUILD, { id: GUILD, systemChannel: general, channels: { cache: channels, fetch: async () => new Collection([...channels].filter(([, ch]) => ch.guildId === GUILD && !ch.isThread())) } }]]) }
+  guilds = { cache: new Collection([[GUILD, {
+    id: GUILD,
+    systemChannel: general,
+    channels: { cache: channels, fetch: async () => new Collection([...channels].filter(([, ch]) => ch.guildId === GUILD && !ch.isThread())) },
+    members: { me: { roles: { cache: new Collection([['6001', {}]]) } } },
+    emojis: { fetch: async () => new Collection(serverEmojis.map(e => [e.id, e])) },
+  }]]) }
+  application = { emojis: { fetch: async () => new Collection([['8100', emoji('8100', 'hexlogo')]]) } }
   users = { fetch: async (id: string) => (id === OWNER ? owner : { id, username: 'someone' }) }
   rest = {
     get: async (route: string, { query }: { query: URLSearchParams }) => (done.push({ get: route, query: query.toString() }), found),
@@ -257,6 +274,19 @@ test('sessions read only text channels and threads in the server the bot can see
 
 test('list_channels names the text, announcement and forum channels the bot can read', async () => {
   expect((await call('list_channels', {})).text).toBe(`#open-source  (id: ${openSource.id})\n#general  (id: ${general.id})\n#news  (id: ${news.id})\n#ideas  (id: ${ideas.id}, forum)`)
+})
+
+test('list_emojis lists the server\'s usable custom emoji and the application\'s own, filtered by query', async () => {
+  expect((await call('list_emojis', {})).text).toBe('<:shipit:8000>\n<a:party_parrot:8001>\n<:shipped:8004>\n<:hexlogo:8100>')
+  expect((await call('list_emojis', { query: ':SHIP' })).text).toBe('<:shipit:8000>\n<:shipped:8004>')
+  expect((await call('list_emojis', { query: 'nope' })).text).toBe('(no custom emoji match "nope")')
+})
+
+test('the system message that opens a thread started from a message never reaches a session', async () => {
+  const before = received.length
+  handlers.get('messageCreate')!({ ...say(here, 7, ''), ...live(here), type: MessageType.ThreadStarterMessage })
+  await Bun.sleep(100)
+  expect(received.length).toBe(before)
 })
 
 const inbound = (lines: any[], check: (line: any) => boolean) => until(() => lines.find(line => line.type === 'inbound' && check(line)))
